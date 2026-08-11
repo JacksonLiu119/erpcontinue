@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+tmp/
+coverage/
+.DS_Store
+*.bak
+*.dump
+*.sql.gz
+*.pem
+*.key
+*.p12

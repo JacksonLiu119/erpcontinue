@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>進銷存 ERP</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>#loginGate[hidden] { display: none !important; }</style>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">◆</span><span>進銷存 ERP</span><small>Inventory ERP</small></div>
+      <div class="breadcrumb" id="breadcrumb">首頁 / 業務流程總覽</div>
+      <div class="top-actions"><button class="top-btn" id="companyButton" type="button">🏢 公司：SH</button><button class="top-btn" id="databaseButton" type="button">🗄️ 資料庫：SH</button><button class="top-btn" id="themeButton" type="button">🎨 顏色風格</button><span>測試企業</span><span class="avatar">TE</span></div>
+    </header>
+    <aside class="sidebar" id="sidebar"></aside>
+    <main class="workspace">
+      <nav class="tabbar" id="tabbar"></nav>
+      <section class="canvas" id="canvas"></section>
+    </main>
+  </div>
+  <div class="theme-popover" id="themePopover" hidden>
+    <div class="theme-title">選擇介面風格</div>
+    <button type="button" data-theme="brown"><i class="swatch brown"></i>暖棕經典</button>
+    <button type="button" data-theme="blue"><i class="swatch blue"></i>海藍商務</button>
+    <button type="button" data-theme="green"><i class="swatch green"></i>森林綠</button>
+    <button type="button" data-theme="slate"><i class="swatch slate"></i>石墨灰</button>
+  </div>
+  <div class="theme-popover database-popover" id="databasePopover" hidden>
+    <div class="theme-title">選擇資料庫來源</div>
+    <div id="databaseOptions"><div class="empty-hint">正在檢查資料庫...</div></div>
+  </div>
+  <div class="theme-popover company-popover" id="companyPopover" hidden>
+    <div class="theme-title">選擇公司別</div>
+    <div class="desc company-context-note">公司別與來源資料庫綁定；切換後，查詢與新增資料會使用該公司的隔離範圍。</div>
+    <div id="companyOptions"><div class="empty-hint">正在載入公司資料...</div></div>
+  </div>
+  <div id="fileWarning" class="file-warning" hidden>請使用 <a href="http://127.0.0.1:3000/">http://127.0.0.1:3000/</a> 開啟系統，不要直接雙擊 index.html。</div>
+  <script src="app.js"></script>
+  <div id="loginGate" style="position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;background:rgba(35,27,22,.78)"><form id="loginForm" style="width:min(390px,calc(100vw - 40px));padding:28px;background:#fffaf2;border-radius:10px;box-shadow:0 18px 55px rgba(0,0,0,.32)"><h2 style="margin-top:0;color:#713b17">進銷存 ERP 登入</h2><p style="color:#6e6258">請使用已建立的員工帳號登入。</p><label style="display:block;margin-top:14px">帳號<input name="username" autocomplete="username" required style="width:100%;box-sizing:border-box;margin-top:5px;padding:9px"></label><label style="display:block;margin-top:14px">密碼<input name="password" type="password" autocomplete="current-password" required style="width:100%;box-sizing:border-box;margin-top:5px;padding:9px"></label><button class="btn primary" style="margin-top:18px;width:100%" type="submit">登入</button><div id="loginStatus" style="margin-top:12px;color:#9d2d20"></div></form></div>
+  <script src="access-control.js"></script>
+  <script src="auth-ui.js"></script>
+  <script src="database-switch-fix.js"></script>
+</body>
+</html>

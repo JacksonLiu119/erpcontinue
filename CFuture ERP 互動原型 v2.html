@@ -1,0 +1,2487 @@
+<!DOCTYPE html>
+<!-- saved from url=(0046)https://createfuture.com.tw/Sales/demoERP.html -->
+<html lang="zh-Hant"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CFuture ERP 互動原型 v2</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --brand: #6b3410;
+      --brand-2: #a8632a;
+      --bg: #f5f1ec;
+      --panel: #ffffff;
+      --border: #e3dcd2;
+      --muted: #8a8074;
+      --text: #2a221b;
+      --accent: #c97b3c;
+      --ok: #2a8a4a;
+      --warn: #c97a00;
+      --err: #b3261e;
+      --info: #2563eb;
+      --row-alt: #faf7f2;
+      --hover: #f1e7d8;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: "Microsoft JhengHei", "PingFang TC", -apple-system, Segoe UI, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+
+    body {
+      font-size: 13px;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      grid-template-rows: 56px 1fr;
+      height: 100vh;
+      min-height: 640px;
+    }
+
+    .topbar {
+      grid-column: 1 / 3;
+      display: flex;
+      align-items: center;
+      background: linear-gradient(90deg, var(--brand), var(--brand-2));
+      color: #fff;
+      padding: 0 18px;
+      gap: 16px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+    }
+
+    .topbar .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: 0.5px;
+    }
+
+    .topbar .logo .badge {
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+      padding: 3px 8px;
+      font-size: 11px;
+    }
+
+    .topbar .breadcrumb {
+      opacity: 0.92;
+      font-size: 13px;
+    }
+
+    .topbar .user {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+    }
+
+    .topbar .user .avatar {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #fff;
+      color: var(--brand);
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+    }
+
+    .sidebar {
+      background: #2a221b;
+      color: #ece4d6;
+      overflow-y: auto;
+    }
+
+    .sidebar .group {
+      padding: 8px 0;
+    }
+
+    .sidebar .group-title {
+      color: #b2a48d;
+      font-size: 11px;
+      padding: 8px 16px;
+      letter-spacing: 1px;
+    }
+
+    .sidebar .mod {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 16px;
+      cursor: pointer;
+      border-left: 3px solid transparent;
+      user-select: none;
+    }
+
+    .sidebar .mod:hover {
+      background: #3a2f24;
+    }
+
+    .sidebar .mod.active {
+      background: #4a3a2c;
+      border-left-color: var(--accent);
+      color: #fff;
+    }
+
+    .sidebar .mod .id {
+      background: rgba(255, 255, 255, 0.12);
+      color: #fff;
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+
+    .sidebar .mod .name {
+      font-size: 13px;
+    }
+
+    .main {
+      display: grid;
+      grid-template-rows: 42px 1fr;
+      min-width: 0;
+      min-height: 0;
+    }
+
+    .tabbar {
+      display: flex;
+      gap: 2px;
+      padding: 6px 12px 0;
+      background: #efe7d8;
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+      align-items: end;
+    }
+
+    .tabbar .tab {
+      padding: 8px 14px;
+      background: #ddd2bd;
+      color: #5a4630;
+      border-radius: 6px 6px 0 0;
+      cursor: pointer;
+      font-size: 12px;
+      white-space: nowrap;
+      border: 1px solid transparent;
+      border-bottom: none;
+    }
+
+    .tabbar .tab:hover {
+      background: #d1c1a3;
+    }
+
+    .tabbar .tab.active {
+      background: #fff;
+      color: var(--brand);
+      font-weight: 600;
+      border-color: var(--border);
+    }
+
+    .canvas {
+      padding: 14px 18px;
+      overflow: auto;
+      background: var(--bg);
+    }
+
+    .screen {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    }
+
+    .screen-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: #fbf6ed;
+      border-radius: 8px 8px 0 0;
+    }
+
+    .screen-head h2 {
+      margin: 0;
+      font-size: 15px;
+      color: var(--brand);
+    }
+
+    .screen-head .code {
+      font-size: 11px;
+      color: var(--muted);
+      background: #efe7d7;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+
+    .screen-head .actions {
+      margin-left: auto;
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn {
+      background: #fff;
+      border: 1px solid #cdbfa4;
+      color: #5a4630;
+      padding: 6px 12px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background 0.15s;
+    }
+
+    .btn:hover {
+      background: var(--hover);
+    }
+
+    .btn.primary {
+      background: var(--brand);
+      color: #fff;
+      border-color: var(--brand);
+    }
+
+    .btn.primary:hover {
+      background: var(--brand-2);
+    }
+
+    .btn.accent {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .btn.ghost {
+      background: transparent;
+    }
+
+    .btn.small {
+      padding: 3px 8px;
+      font-size: 11px;
+    }
+
+    .screen-body {
+      padding: 14px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .desc {
+      background: #fff8eb;
+      border-left: 3px solid var(--accent);
+      padding: 8px 12px;
+      color: #5a4630;
+      font-size: 12px;
+      border-radius: 4px;
+    }
+
+    .form {
+      display: grid;
+      gap: 10px;
+    }
+
+    .row {
+      display: grid;
+      gap: 12px;
+    }
+
+    .row.c2 {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .row.c3 {
+      grid-template-columns: 1fr 1fr 1fr;
+    }
+
+    .row.c4 {
+      grid-template-columns: 1fr 1fr 1fr 1fr;
+    }
+
+    .field {
+      display: grid;
+      gap: 4px;
+    }
+
+    .field label {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .field input,
+    .field select,
+    .field textarea {
+      border: 1px solid #d6cbb4;
+      background: #fff;
+      padding: 6px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: inherit;
+      color: var(--text);
+    }
+
+    .field input:focus,
+    .field select:focus,
+    .field textarea:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: -1px;
+    }
+
+    .field input[readonly] {
+      background: #f6f1e6;
+      color: #6b5d49;
+    }
+
+    .field .hint {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    table.grid {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    table.grid th {
+      background: #f0e6d2;
+      color: #5a4630;
+      text-align: left;
+      padding: 7px 8px;
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+    }
+
+    table.grid td {
+      padding: 6px 8px;
+      border-bottom: 1px solid #eee5d3;
+    }
+
+    table.grid tr:nth-child(even) td {
+      background: var(--row-alt);
+    }
+
+    table.grid tr:hover td {
+      background: var(--hover);
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+    }
+
+    .pill.ok {
+      background: #e4f3e8;
+      color: var(--ok);
+    }
+
+    .pill.warn {
+      background: #fdf1d7;
+      color: var(--warn);
+    }
+
+    .pill.err {
+      background: #fbe2e0;
+      color: var(--err);
+    }
+
+    .pill.info {
+      background: #dde9fc;
+      color: var(--info);
+    }
+
+    .pill.gray {
+      background: #ecebe7;
+      color: #555;
+    }
+
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+    }
+
+    .kpi {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+    }
+
+    .kpi .label {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .kpi .value {
+      font-size: 20px;
+      color: var(--brand);
+      font-weight: 700;
+    }
+
+    .kpi .delta {
+      font-size: 11px;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 14px;
+    }
+
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fff;
+    }
+
+    .panel .panel-head {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      background: #faf3e2;
+      font-weight: 600;
+      color: var(--brand);
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+    }
+
+    .panel .panel-head .actions {
+      margin-left: auto;
+      display: flex;
+      gap: 4px;
+    }
+
+    .panel .panel-body {
+      padding: 10px 12px;
+    }
+
+    .list {
+      display: grid;
+      gap: 2px;
+    }
+
+    .list .item {
+      padding: 6px 8px;
+      cursor: pointer;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    .list .item:hover {
+      background: var(--hover);
+    }
+
+    .list .item.active {
+      background: #fbeacb;
+      color: var(--brand);
+      font-weight: 600;
+    }
+
+    .tree {
+      font-size: 12px;
+    }
+
+    .tree .node {
+      padding: 4px 6px;
+      cursor: pointer;
+    }
+
+    .tree .node:hover {
+      background: var(--hover);
+    }
+
+    .tree .node.active {
+      background: #fbeacb;
+      color: var(--brand);
+      font-weight: 600;
+    }
+
+    .tree .children {
+      padding-left: 18px;
+      border-left: 1px dashed #d6cbb4;
+      margin-left: 6px;
+    }
+
+    /* Calendar */
+    .cal {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .cal .cell {
+      background: #fff;
+      min-height: 90px;
+      padding: 5px 6px;
+      font-size: 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .cal .cell.head {
+      background: #f0e6d2;
+      min-height: auto;
+      padding: 6px;
+      font-weight: 600;
+      text-align: center;
+      color: var(--brand);
+    }
+
+    .cal .cell.dim {
+      background: #f6f1e6;
+      color: #aaa;
+    }
+
+    .cal .d {
+      font-weight: 600;
+      color: #5a4630;
+    }
+
+    .cal .ev {
+      background: #e4f3e8;
+      color: var(--ok);
+      padding: 2px 4px;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+
+    .cal .ev.warn {
+      background: #fdf1d7;
+      color: var(--warn);
+    }
+
+    .cal .ev.info {
+      background: #dde9fc;
+      color: var(--info);
+    }
+
+    /* Kanban */
+    .kanban {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+    }
+
+    .kanban .col {
+      background: #fbf6ed;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px;
+      min-height: 240px;
+    }
+
+    .kanban .col-head {
+      font-weight: 600;
+      color: var(--brand);
+      padding: 4px 6px 8px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+    }
+
+    .kanban .card {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 4px;
+      padding: 8px;
+      margin-bottom: 6px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .kanban .card:hover {
+      background: var(--hover);
+    }
+
+    .kanban .card .t {
+      font-weight: 600;
+      color: var(--brand);
+      margin-bottom: 4px;
+    }
+
+    .kanban .card.green {
+      border-left-color: var(--ok);
+    }
+
+    .kanban .card.red {
+      border-left-color: var(--err);
+    }
+
+    .kanban .card.blue {
+      border-left-color: var(--info);
+    }
+
+    .scanbox {
+      background: linear-gradient(135deg, #2a221b, #4a3a2c);
+      color: #fff;
+      padding: 24px;
+      border-radius: 8px;
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: 18px;
+      align-items: center;
+    }
+
+    .scanbox .scanner {
+      background: rgba(255, 255, 255, 0.06);
+      border: 2px dashed rgba(255, 255, 255, 0.3);
+      border-radius: 8px;
+      padding: 24px;
+      text-align: center;
+    }
+
+    .scanbox .scanner .icon {
+      font-size: 48px;
+    }
+
+    .scanbox .scanner .hint {
+      font-size: 11px;
+      opacity: 0.7;
+    }
+
+    .scanbox input {
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      color: #fff;
+      padding: 10px;
+      border-radius: 4px;
+      font-size: 14px;
+      width: 100%;
+    }
+
+    .scanbox .last {
+      font-size: 11px;
+      opacity: 0.8;
+      margin-top: 6px;
+    }
+
+    .bom {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+
+    .bom .h {
+      font-weight: 600;
+      color: var(--brand);
+      padding: 6px 8px;
+      background: #faf3e2;
+      border-radius: 4px;
+    }
+
+    .bom .item {
+      display: grid;
+      grid-template-columns: 100px 1fr 90px 90px 70px;
+      gap: 8px;
+      padding: 5px 8px;
+      border-bottom: 1px dashed var(--border);
+      font-size: 12px;
+      align-items: center;
+    }
+
+    .allergen {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+
+    .allergen .tag {
+      background: #fff8eb;
+      border: 1px solid #e6c98a;
+      color: #8a5a00;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+    }
+
+    .stat-bar {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      font-size: 11px;
+    }
+
+    .stat-bar .bar {
+      flex: 1;
+      height: 6px;
+      background: #ece6d6;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .stat-bar .fill {
+      height: 100%;
+      background: var(--ok);
+    }
+
+    /* Flow */
+    .flow {
+      display: grid;
+      gap: 8px;
+      padding: 14px;
+      background: #fffaf0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+
+    .flow .step {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--accent);
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    .flow .step .n {
+      background: var(--accent);
+      color: #fff;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 11px;
+    }
+
+    .flow .arrow {
+      text-align: center;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .footer-bar {
+      padding: 8px 14px;
+      border-top: 1px solid var(--border);
+      background: #fbf6ed;
+      border-radius: 0 0 8px 8px;
+      display: flex;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .footer-bar .sep {
+      color: #ccc;
+    }
+
+    .empty-hint {
+      padding: 30px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .matrix {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+
+    .matrix th,
+    .matrix td {
+      border: 1px solid #ddd;
+      padding: 4px 6px;
+      text-align: center;
+    }
+
+    .matrix th {
+      background: #f0e6d2;
+    }
+
+    .matrix td.name {
+      text-align: left;
+      background: #fbf6ed;
+      font-weight: 600;
+    }
+
+    .label-preview {
+      background: #fff;
+      border: 2px dashed #999;
+      padding: 14px;
+      text-align: center;
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+    }
+
+    .label-preview .barcode {
+      font-size: 28px;
+      letter-spacing: 2px;
+      margin: 6px 0;
+    }
+
+    .label-preview .qr {
+      display: inline-block;
+      width: 80px;
+      height: 80px;
+      background:
+        linear-gradient(45deg, #000 25%, transparent 25%, transparent 75%, #000 75%),
+        linear-gradient(45deg, #000 25%, #fff 25%, #fff 75%, #000 75%);
+      background-size: 16px 16px;
+      background-position: 0 0, 8px 8px;
+      border: 4px solid #000;
+    }
+
+    .timeline-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      border-bottom: 1px dashed var(--border);
+      font-size: 12px;
+    }
+
+    .timeline-bar {
+      background: #ece6d6;
+      flex: 1;
+      height: 22px;
+      border-radius: 3px;
+      position: relative;
+    }
+
+    .timeline-bar .seg {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      background: var(--accent);
+      border-radius: 3px;
+      color: #fff;
+      font-size: 10px;
+      padding: 0 6px;
+      display: flex;
+      align-items: center;
+    }
+
+    .timeline-bar .seg.ok {
+      background: var(--ok);
+    }
+
+    .timeline-bar .seg.info {
+      background: var(--info);
+    }
+
+    .timeline-bar .seg.warn {
+      background: var(--warn);
+    }
+
+    .alert {
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    .alert.warn {
+      background: #fdf1d7;
+      color: var(--warn);
+      border-left: 3px solid var(--warn);
+    }
+
+    .alert.err {
+      background: #fbe2e0;
+      color: var(--err);
+      border-left: 3px solid var(--err);
+    }
+
+    .alert.ok {
+      background: #e4f3e8;
+      color: var(--ok);
+      border-left: 3px solid var(--ok);
+    }
+
+    /* responsive smallish */
+    @media (max-width: 900px) {
+      .app {
+        grid-template-columns: 64px 1fr;
+      }
+
+      .sidebar .mod .name {
+        display: none;
+      }
+
+      .sidebar .group-title {
+        display: none;
+      }
+
+      .kpi-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .split {
+        grid-template-columns: 1fr;
+      }
+
+      .row.c4,
+      .row.c3,
+      .row.c2 {
+        grid-template-columns: 1fr;
+      }
+
+      .kanban {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="app">
+    <div class="topbar">
+      <div class="logo">🍫 CFuture ERP <span class="badge">v2 原型</span></div>
+      <div class="breadcrumb" id="crumb">系統管理 / 系統參數設定</div>
+      <div class="user">
+        <span>測試企業（Test）</span>
+        <span class="avatar">CF</span>
+      </div>
+    </div>
+    <div class="sidebar" id="sidebar"><div class="group"><div class="group-title">功能模組</div><div class="mod active" data-m="M1">
+        <span class="id">M1</span><span>⚙️</span><span class="name">系統管理</span>
+      </div><div class="mod " data-m="M2">
+        <span class="id">M2</span><span>📋</span><span class="name">訂單</span>
+      </div><div class="mod " data-m="M3">
+        <span class="id">M3</span><span>📦</span><span class="name">庫存</span>
+      </div><div class="mod " data-m="M4">
+        <span class="id">M4</span><span>🛒</span><span class="name">採購</span>
+      </div><div class="mod " data-m="M5">
+        <span class="id">M5</span><span>🏭</span><span class="name">生產管理</span>
+      </div><div class="mod " data-m="M6">
+        <span class="id">M6</span><span>👷</span><span class="name">現場管理</span>
+      </div><div class="mod " data-m="M7">
+        <span class="id">M7</span><span>🔖</span><span class="name">條碼掃描</span>
+      </div></div><div class="group"><div class="group-title">總覽</div><div class="mod " data-m="M0">
+        <span class="id">M0</span><span>🗺️</span><span class="name">業務流程總覽</span>
+      </div></div></div>
+    <div class="main">
+      <div class="tabbar" id="tabbar"><div class="tab active" data-f="sysparam">系統參數設定</div><div class="tab " data-f="modmaint">模組與作業維護</div><div class="tab " data-f="dept">部門組織</div><div class="tab " data-f="user">人員帳號及權限</div><div class="tab " data-f="company">公司基本資料</div></div>
+      <div class="canvas" id="canvas">
+    <div class="screen">
+      <div class="screen-head">
+        <h2>系統參數設定</h2>
+        <span class="code">M1-01</span>
+        <div class="actions">
+          <button class="btn small">🔍 查詢</button>
+          <button class="btn small primary">＋ 新增</button>
+          <button class="btn small">💾 儲存</button>
+          <button class="btn small">🖨️ 列印</button>
+        </div>
+      </div>
+      <div class="screen-body">
+        <div class="desc">設定全系統共用的基本規則：品號命名、日期格式、編號流水、批號規則等。</div>
+        <div class="form">
+    <div class="row c2">
+      <div class="field"><label>品號命名規則</label><input value="[類別2碼]-[流水4碼]"></div>
+      <div class="field"><label>批號規則</label><input value="LOT-YYYYMMDD-####"></div>
+    </div>
+    <div class="row c3">
+      <div class="field"><label>系統日期格式</label><select><option>YYYY-MM-DD</option><option>YYYY/MM/DD</option></select></div>
+      <div class="field"><label>有效期單位</label><select><option>天</option><option>月</option></select></div>
+      <div class="field"><label>近效期預警(天)</label><input value="30"></div>
+    </div>
+    <div class="row c4">
+      <div class="field"><label>訂單單號</label><input value="SO-####"></div>
+      <div class="field"><label>採購單號</label><input value="PO-####"></div>
+      <div class="field"><label>製令單號</label><input value="WO-####"></div>
+      <div class="field"><label>進貨單號</label><input value="GR-####"></div>
+    </div>
+    <div class="row c2">
+      <div class="field"><label>稅率(%)</label><input value="5"></div>
+      <div class="field"><label>幣別</label><select><option>TWD</option><option>USD</option><option>JPY</option></select></div>
+    </div>
+  </div>
+      </div>
+      <div class="footer-bar">
+        <span>狀態：模擬畫面（demo only）</span>
+        <span class="sep">|</span>
+        <span>使用者：admin</span>
+        <span class="sep">|</span>
+        <span>建立日：2026-05-27</span>
+        
+      </div>
+    </div>
+  </div>
+    </div>
+  </div>
+
+  <script>
+    // ==== 模組與作業定義 ====
+    const MODULES = [
+      {
+        id: 'M1', name: '系統管理', icon: '⚙️', funcs: [
+          { id: 'sysparam', name: '系統參數設定' },
+          { id: 'modmaint', name: '模組與作業維護' },
+          { id: 'dept', name: '部門組織' },
+          { id: 'user', name: '人員帳號及權限' },
+          { id: 'company', name: '公司基本資料' },
+        ]
+      },
+      {
+        id: 'M2', name: '訂單', icon: '📋', funcs: [
+          { id: 'cust', name: '客戶資料' },
+          { id: 'duecheck', name: '預計交期回覆狀況表' },
+          { id: 'order', name: '訂單建立' },
+          { id: 'shipdoc', name: '出貨單建立' },
+          { id: 'shipcal', name: '出貨行事曆' },
+        ]
+      },
+      {
+        id: 'M3', name: '庫存', icon: '📦', funcs: [
+          { id: 'wh', name: '庫別資料' },
+          { id: 'itemcat', name: '品號類別' },
+          { id: 'item', name: '品號資料' },
+          { id: 'transfer', name: '轉撥單' },
+          { id: 'adjust', name: '調整單' },
+          { id: 'misc', name: '其他領退料單' },
+          { id: 'stockrpt', name: '庫存報表' },
+        ]
+      },
+      {
+        id: 'M4', name: '採購', icon: '🛒', funcs: [
+          { id: 'vendor', name: '廠商資料' },
+          { id: 'req', name: '請購單' },
+          { id: 'po', name: '採購單' },
+          { id: 'iqc', name: '進貨檢驗單' },
+          { id: 'grn', name: '進貨單' },
+        ]
+      },
+      {
+        id: 'M5', name: '生產管理', icon: '🏭', funcs: [
+          { id: 'bom', name: 'BOM 配方' },
+          { id: 'allergen', name: '品號資料（過敏原）' },
+          { id: 'nutrition', name: '品號資料（營養成分）' },
+          { id: 'wo', name: '製令單' },
+          { id: 'issue', name: '領料單' },
+          { id: 'fqc', name: '入庫檢驗單' },
+          { id: 'fgrcpt', name: '入庫單（成品）' },
+          { id: 'sched', name: '生產排程表' },
+          { id: 'usage', name: '生產用量分析' },
+        ]
+      },
+      {
+        id: 'M6', name: '現場管理', icon: '👷', funcs: [
+          { id: 'ws', name: '廠區與工作站維護' },
+          { id: 'exc', name: '異常與非生產項目' },
+          { id: 'maint', name: '保養項目' },
+          { id: 'report', name: '報工作業' },
+          { id: 'prdboard', name: '即時生產看板' },
+          { id: 'manboard', name: '即時人員看板' },
+        ]
+      },
+      {
+        id: 'M7', name: '條碼掃描', icon: '🔖', funcs: [
+          { id: 'bcfmt', name: '條碼格式設定' },
+          { id: 'label', name: '標籤產生與列印' },
+          { id: 'scanin_m', name: '掃碼入庫（原料）' },
+          { id: 'scanin_f', name: '掃碼入庫（成品）' },
+          { id: 'scanout', name: '掃碼出庫' },
+          { id: 'scancnt', name: '掃碼盤點' },
+        ]
+      },
+      {
+        id: 'M0', name: '業務流程總覽', icon: '🗺️', funcs: [
+          { id: 'overview', name: '流程總覽' },
+        ]
+      },
+    ];
+
+    let cur = { m: 'M1', f: 'sysparam' };
+
+    // ==== render ====
+    function renderSidebar() {
+      const sb = document.getElementById('sidebar');
+      sb.innerHTML = '<div class="group"><div class="group-title">功能模組</div>' +
+        MODULES.filter(m => m.id !== 'M0').map(m =>
+          `<div class="mod ${cur.m === m.id ? 'active' : ''}" data-m="${m.id}">
+        <span class="id">${m.id}</span><span>${m.icon}</span><span class="name">${m.name}</span>
+      </div>`).join('') +
+        '</div>' +
+        '<div class="group"><div class="group-title">總覽</div>' +
+        MODULES.filter(m => m.id === 'M0').map(m =>
+          `<div class="mod ${cur.m === m.id ? 'active' : ''}" data-m="${m.id}">
+        <span class="id">${m.id}</span><span>${m.icon}</span><span class="name">${m.name}</span>
+      </div>`).join('') +
+        '</div>';
+      sb.querySelectorAll('.mod').forEach(el => el.addEventListener('click', () => {
+        const mid = el.dataset.m;
+        const mod = MODULES.find(x => x.id === mid);
+        cur = { m: mid, f: mod.funcs[0].id };
+        renderAll();
+      }));
+    }
+
+    function renderTabs() {
+      const mod = MODULES.find(x => x.id === cur.m);
+      const tb = document.getElementById('tabbar');
+      tb.innerHTML = mod.funcs.map(f =>
+        `<div class="tab ${cur.f === f.id ? 'active' : ''}" data-f="${f.id}">${f.name}</div>`
+      ).join('');
+      tb.querySelectorAll('.tab').forEach(el => el.addEventListener('click', () => {
+        cur.f = el.dataset.f;
+        renderAll();
+      }));
+    }
+
+    function renderCrumb() {
+      const mod = MODULES.find(x => x.id === cur.m);
+      const fn = mod.funcs.find(x => x.id === cur.f);
+      document.getElementById('crumb').textContent = `${mod.name} / ${fn.name}`;
+    }
+
+    function screen(code, title, desc, bodyHtml, footer) {
+      return `
+    <div class="screen">
+      <div class="screen-head">
+        <h2>${title}</h2>
+        <span class="code">${code}</span>
+        <div class="actions">
+          <button class="btn small">🔍 查詢</button>
+          <button class="btn small primary">＋ 新增</button>
+          <button class="btn small">💾 儲存</button>
+          <button class="btn small">🖨️ 列印</button>
+        </div>
+      </div>
+      <div class="screen-body">
+        <div class="desc">${desc}</div>
+        ${bodyHtml}
+      </div>
+      <div class="footer-bar">
+        <span>狀態：模擬畫面（demo only）</span>
+        <span class="sep">|</span>
+        <span>使用者：admin</span>
+        <span class="sep">|</span>
+        <span>建立日：2026-05-27</span>
+        ${footer ? `<span class="sep">|</span><span>${footer}</span>` : ''}
+      </div>
+    </div>
+  `;
+    }
+
+    // ==== 各作業模擬畫面 ====
+    const SCREENS = {};
+
+    // ----- M1 系統管理 -----
+    SCREENS['M1.sysparam'] = () => screen('M1-01', '系統參數設定',
+      '設定全系統共用的基本規則：品號命名、日期格式、編號流水、批號規則等。',
+      `<div class="form">
+    <div class="row c2">
+      <div class="field"><label>品號命名規則</label><input value="[類別2碼]-[流水4碼]" /></div>
+      <div class="field"><label>批號規則</label><input value="LOT-YYYYMMDD-####" /></div>
+    </div>
+    <div class="row c3">
+      <div class="field"><label>系統日期格式</label><select><option>YYYY-MM-DD</option><option>YYYY/MM/DD</option></select></div>
+      <div class="field"><label>有效期單位</label><select><option>天</option><option>月</option></select></div>
+      <div class="field"><label>近效期預警(天)</label><input value="30" /></div>
+    </div>
+    <div class="row c4">
+      <div class="field"><label>訂單單號</label><input value="SO-####" /></div>
+      <div class="field"><label>採購單號</label><input value="PO-####" /></div>
+      <div class="field"><label>製令單號</label><input value="WO-####" /></div>
+      <div class="field"><label>進貨單號</label><input value="GR-####" /></div>
+    </div>
+    <div class="row c2">
+      <div class="field"><label>稅率(%)</label><input value="5" /></div>
+      <div class="field"><label>幣別</label><select><option>TWD</option><option>USD</option><option>JPY</option></select></div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M1.modmaint'] = () => screen('M1-02', '模組與作業維護',
+      '控制各模組與作業選單的啟用狀態與排序。',
+      `<div class="split">
+    <div class="panel"><div class="panel-head">模組樹</div>
+      <div class="panel-body tree">
+        ${MODULES.filter(m => m.id !== 'M0').map(m =>
+        `<div class="node active">📂 ${m.id} ${m.name}</div>
+          <div class="children">${m.funcs.map(f => `<div class="node">📄 ${f.name}</div>`).join('')}</div>`
+      ).join('')}
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head">作業屬性 — M2 訂單模組 / 出貨單建立</div>
+      <div class="panel-body">
+        <div class="form">
+          <div class="row c2">
+            <div class="field"><label>作業代號</label><input value="M2-04" readonly /></div>
+            <div class="field"><label>作業名稱</label><input value="出貨單建立" /></div>
+          </div>
+          <div class="row c3">
+            <div class="field"><label>啟用狀態</label><select><option>啟用</option><option>停用</option></select></div>
+            <div class="field"><label>顯示順序</label><input value="4" /></div>
+            <div class="field"><label>圖示</label><input value="📦" /></div>
+          </div>
+          <div class="field"><label>路徑 / API endpoint</label><input value="/m2/shipdoc" readonly /></div>
+        </div>
+      </div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M1.dept'] = () => screen('M1-03', '部門組織',
+      '建立公司部門架構，人員帳號歸屬到部門節點。',
+      `<div class="split">
+    <div class="panel"><div class="panel-head">組織樹</div>
+      <div class="panel-body tree">
+        <div class="node active">🏢 測試股份有限公司</div>
+        <div class="children">
+          <div class="node">📂 業務部</div>
+          <div class="children"><div class="node">👤 國內業務組</div><div class="node">👤 OEM 業務組</div></div>
+          <div class="node">📂 生產部</div>
+          <div class="children"><div class="node">👤 巧克力線</div><div class="node">👤 包裝組</div></div>
+          <div class="node">📂 採購倉儲部</div>
+          <div class="node">📂 品保部</div>
+          <div class="node">📂 行政管理部</div>
+        </div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head">部門基本資料</div>
+      <div class="panel-body">
+        <div class="form">
+          <div class="row c2">
+            <div class="field"><label>部門代號</label><input value="SALES" /></div>
+            <div class="field"><label>部門名稱</label><input value="業務部" /></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label>上層部門</label><select><option>（總公司）</option></select></div>
+            <div class="field"><label>部門主管</label><select><option>陳協理</option></select></div>
+          </div>
+          <div class="row c3">
+            <div class="field"><label>聯絡電話</label><input value="02-2641-XXXX" /></div>
+            <div class="field"><label>分機</label><input value="201" /></div>
+            <div class="field"><label>成本中心</label><input value="C-100" /></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M1.user'] = () => screen('M1-04', '人員帳號及權限',
+      '為員工建立帳號，設定可操作的功能範圍與可查閱的資料範圍。',
+      `<div class="split">
+    <div class="panel"><div class="panel-head">人員清單</div>
+      <div class="panel-body">
+        <div class="list">
+          <div class="item active">👤 王曉明 業務部 / sales01</div>
+          <div class="item">👤 李美華 生產部 / prd02</div>
+          <div class="item">👤 張志強 採購倉儲 / wh03</div>
+          <div class="item">👤 陳怡君 品保部 / qa01</div>
+          <div class="item">👤 林大同 行政 / admin</div>
+        </div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head">帳號與權限</div>
+      <div class="panel-body">
+        <div class="form">
+          <div class="row c3">
+            <div class="field"><label>帳號</label><input value="sales01" /></div>
+            <div class="field"><label>姓名</label><input value="王曉明" /></div>
+            <div class="field"><label>部門</label><select><option>業務部</option></select></div>
+          </div>
+          <div class="row c3">
+            <div class="field"><label>角色群組</label><select><option>業務人員</option><option>業務主管</option></select></div>
+            <div class="field"><label>狀態</label><select><option>啟用</option><option>停用</option></select></div>
+            <div class="field"><label>密碼重設</label><input value="（強制下次登入變更）" readonly /></div>
+          </div>
+        </div>
+        <div style="margin-top:10px"><strong>功能權限矩陣</strong></div>
+        <table class="matrix">
+          <tr><th>模組／作業</th><th>查</th><th>新</th><th>改</th><th>刪</th><th>列印</th></tr>
+          <tr><td class="name">M2 客戶資料</td><td>✅</td><td>✅</td><td>✅</td><td>—</td><td>✅</td></tr>
+          <tr><td class="name">M2 訂單建立</td><td>✅</td><td>✅</td><td>✅</td><td>—</td><td>✅</td></tr>
+          <tr><td class="name">M2 出貨單建立</td><td>✅</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td class="name">M3 庫存報表</td><td>✅</td><td>—</td><td>—</td><td>—</td><td>✅</td></tr>
+          <tr><td class="name">M4 採購單</td><td>✅</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M1.company'] = () => screen('M1-05', '公司基本資料',
+      '設定公司名稱、統一編號、地址、發票抬頭等基本資訊。',
+      `<div class="form">
+    <div class="row c2">
+      <div class="field"><label>公司中文名稱</label><input value="測試股份有限公司" /></div>
+      <div class="field"><label>品牌名稱</label><input value="test" /></div>
+    </div>
+    <div class="row c3">
+      <div class="field"><label>統一編號</label><input value="23456789" /></div>
+      <div class="field"><label>負責人</label><input value="陳董事長" /></div>
+      <div class="field"><label>成立日期</label><input value="1989-09-09" /></div>
+    </div>
+    <div class="row c2">
+      <div class="field"><label>登記地址</label><input value="新北市汐止區○○路○○號" /></div>
+      <div class="field"><label>工廠地址</label><input value="新北市汐止區○○路○○號 (同登記)" /></div>
+    </div>
+    <div class="row c3">
+      <div class="field"><label>電話</label><input value="02-2641-XXXX" /></div>
+      <div class="field"><label>傳真</label><input value="02-2641-XXXX" /></div>
+      <div class="field"><label>客服信箱</label><input value="service@test.com.tw" /></div>
+    </div>
+    <div class="row c2">
+      <div class="field"><label>銀行帳戶</label><input value="○○銀行 汐止分行 / 123-456-7890123" /></div>
+      <div class="field"><label>食品業者登錄字號</label><input value="A-123456789-00000-0" /></div>
+    </div>
+  </div>`
+    );
+
+    // ----- M2 訂單 -----
+    SCREENS['M2.cust'] = () => screen('M2-01', '客戶資料',
+      '建立並維護客戶基本資料，訂單建立時自動帶入。',
+      `<div class="split">
+    <div class="panel"><div class="panel-head">客戶清單 <div class="actions"><button class="btn small">＋ 新增</button></div></div>
+      <div class="panel-body">
+        <div class="list">
+          <div class="item active">🏬 C001 家樂福股份有限公司</div>
+          <div class="item">🏬 C002 全聯實業</div>
+          <div class="item">🏬 C003 統一超商</div>
+          <div class="item">🏬 C004 微風百貨</div>
+          <div class="item">🏬 C005 ABC 禮品代理</div>
+          <div class="item">🏬 C006 美商星巴克</div>
+        </div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head">客戶基本資料</div>
+      <div class="panel-body">
+        <div class="form">
+          <div class="row c3">
+            <div class="field"><label>客戶代號</label><input value="C001" readonly /></div>
+            <div class="field"><label>客戶簡稱</label><input value="家樂福" /></div>
+            <div class="field"><label>客戶分類</label><select><option>通路商</option><option>OEM</option><option>禮品</option></select></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label>客戶全名</label><input value="家樂福股份有限公司" /></div>
+            <div class="field"><label>統一編號</label><input value="12345678" /></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label>聯絡人</label><input value="林採購" /></div>
+            <div class="field"><label>聯絡電話</label><input value="02-2715-XXXX 分機 333" /></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label>送貨地址</label><input value="新北市中和區○○路 1 段 100 號" /></div>
+            <div class="field"><label>發票抬頭</label><input value="家樂福股份有限公司" /></div>
+          </div>
+          <div class="row c3">
+            <div class="field"><label>付款條件</label><select><option>月結 60 天</option><option>月結 30 天</option><option>現金</option></select></div>
+            <div class="field"><label>信用額度</label><input value="2,000,000" /></div>
+            <div class="field"><label>業務員</label><select><option>王曉明</option></select></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M2.duecheck'] = () => screen('M2-02', '預計交期回覆狀況表',
+      '綜合查詢成品庫存、原料庫存、生產排程空檔，協助業務快速回覆客戶交期。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>客戶</label><select><option>家樂福</option></select></div>
+      <div class="field"><label>品項</label><select><option>DK85-100G 85% 黑巧克力 100g</option></select></div>
+      <div class="field"><label>需求數量</label><input value="3,000" /></div>
+      <div class="field"><label>期望交期</label><input value="2026-06-12" /></div>
+    </div>
+  </div>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="label">成品庫存可出</div><div class="value">1,200</div><div class="delta">不足 1,800</div></div>
+    <div class="kpi"><div class="label">原料庫存可生產</div><div class="value">2,500</div><div class="delta">需採購可可膏 50kg</div></div>
+    <div class="kpi"><div class="label">最近排程空檔</div><div class="value">06/05</div><div class="delta">產能 4,000 片/日</div></div>
+    <div class="kpi"><div class="label">建議回覆交期</div><div class="value" style="color:var(--ok)">06/10</div><div class="delta">可全數出貨</div></div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>來源</th><th>批號／單號</th><th>可用數量</th><th>位置／狀態</th><th>備註</th></tr></thead>
+    <tbody>
+      <tr><td>成品庫存</td><td>LOT-20260510-0021</td><td>800</td><td>成品 A 倉</td><td>有效至 2027-05-09</td></tr>
+      <tr><td>成品庫存</td><td>LOT-20260515-0034</td><td>400</td><td>成品 A 倉</td><td>有效至 2027-05-14</td></tr>
+      <tr><td>生產排程</td><td>WO-2026-0617</td><td>2,000</td><td><span class="pill info">06/05 排程</span></td><td>領料完成</td></tr>
+      <tr><td>原料採購</td><td>PO-2026-0341</td><td>50 kg 可可膏</td><td><span class="pill warn">06/02 預定到貨</span></td><td>需提前安排檢驗</td></tr>
+    </tbody>
+  </table>
+  <div class="alert ok">建議：依現有成品 1,200 片先行出貨，差額 1,800 片排入 06/05 製令，預計 06/10 全數備齊。</div>
+  `
+    );
+
+    SCREENS['M2.order'] = () => screen('M2-03', '訂單建立',
+      '正式記錄客戶確認的訂購品項、數量、交期與客製化說明。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>訂單編號</label><input value="SO-2026-0521" readonly /></div>
+      <div class="field"><label>訂單日期</label><input value="2026-05-27" /></div>
+      <div class="field"><label>客戶</label><select><option>C001 家樂福</option></select></div>
+      <div class="field"><label>業務員</label><select><option>王曉明</option></select></div>
+    </div>
+    <div class="row c3">
+      <div class="field"><label>預定交期</label><input value="2026-06-12" /></div>
+      <div class="field"><label>付款條件</label><input value="月結 60 天" readonly /></div>
+      <div class="field"><label>狀態</label><select><option>草稿</option><option>確認</option><option>已排程</option></select></div>
+    </div>
+  </div>
+  <div style="margin-top:8px"><strong>訂單明細</strong> <button class="btn small primary" style="margin-left:8px">＋ 加品項</button></div>
+  <table class="grid">
+    <thead><tr><th width="40">#</th><th>品號</th><th>品名／規格</th><th width="80">數量</th><th width="70">單位</th><th width="90">單價</th><th width="100">小計</th><th>客製說明</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>DK85-100G</td><td>85% 黑巧克力片 100g</td><td>3,000</td><td>片</td><td>120</td><td>360,000</td><td>家樂福端午檔期</td></tr>
+      <tr><td>2</td><td>MK40-80G</td><td>40% 牛奶巧克力 80g</td><td>2,000</td><td>片</td><td>95</td><td>190,000</td><td>—</td></tr>
+      <tr><td>3</td><td>GIFT-12</td><td>綜合 12 入禮盒</td><td>500</td><td>盒</td><td>480</td><td>240,000</td><td>含端午燙金外盒</td></tr>
+    </tbody>
+  </table>
+  <div class="row c4">
+    <div class="kpi"><div class="label">數量合計</div><div class="value">5,500</div></div>
+    <div class="kpi"><div class="label">未稅總額</div><div class="value">790,000</div></div>
+    <div class="kpi"><div class="label">稅額 5%</div><div class="value">39,500</div></div>
+    <div class="kpi"><div class="label">含稅合計</div><div class="value" style="color:var(--ok)">829,500</div></div>
+  </div>`,
+      '依交期確認後將自動進入 M5 生產排程'
+    );
+
+    SCREENS['M2.shipdoc'] = () => screen('M2-04', '出貨單建立',
+      '依訂單建立出貨記錄，記錄出貨品項、數量、批號與出貨日期，並自動扣減成品庫存。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>出貨單號</label><input value="SH-2026-0432" readonly /></div>
+      <div class="field"><label>出貨日期</label><input value="2026-06-10" /></div>
+      <div class="field"><label>對應訂單</label><input value="SO-2026-0521" /></div>
+      <div class="field"><label>客戶</label><input value="C001 家樂福" readonly /></div>
+    </div>
+    <div class="row c3">
+      <div class="field"><label>送貨地址</label><input value="新北市中和區○○路 1 段 100 號" /></div>
+      <div class="field"><label>運送方式</label><select><option>自送</option><option>宅配</option><option>客戶自取</option></select></div>
+      <div class="field"><label>司機 / 車號</label><input value="李大哥 / KAB-1234" /></div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>品名</th><th>應出</th><th>本次出</th><th>批號</th><th>有效日期</th><th>庫位</th></tr></thead>
+    <tbody>
+      <tr><td>DK85-100G</td><td>85% 黑巧克力 100g</td><td>3,000</td><td>1,200</td><td>LOT-20260510-0021 / 0034</td><td>2027-05-09</td><td>成品 A-01</td></tr>
+      <tr><td>DK85-100G</td><td>85% 黑巧克力 100g</td><td></td><td>1,800</td><td>LOT-20260605-0011 <span class="pill info">新批</span></td><td>2027-06-04</td><td>成品 A-02</td></tr>
+      <tr><td>MK40-80G</td><td>40% 牛奶巧克力 80g</td><td>2,000</td><td>2,000</td><td>LOT-20260601-0007</td><td>2027-05-31</td><td>成品 A-03</td></tr>
+      <tr><td>GIFT-12</td><td>綜合 12 入禮盒</td><td>500</td><td>500</td><td>LOT-20260608-0002</td><td>2027-06-07</td><td>成品 B-12</td></tr>
+    </tbody>
+  </table>
+  <div class="alert ok">出貨確認後，系統將自動扣減成品庫存並建立出貨歷史紀錄。</div>`
+    );
+
+    SCREENS['M2.shipcal'] = () => screen('M2-05', '出貨行事曆',
+      '以日曆方式顯示各天出貨安排，供倉庫與生產部門提前備貨。',
+      `<div class="row c4">
+    <div class="field"><label>年月</label><select><option>2026 年 06 月</option></select></div>
+    <div class="field"><label>客戶</label><select><option>（全部）</option></select></div>
+    <div class="field"><label>業務</label><select><option>（全部）</option></select></div>
+    <div class="field"><label>顯示</label><select><option>月檢視</option><option>週檢視</option></select></div>
+  </div>
+  <div class="cal">
+    ${['一', '二', '三', '四', '五', '六', '日'].map(d => `<div class="cell head">星期${d}</div>`).join('')}
+    ${(() => {
+        const cells = [];
+        // 2026/06/01 是星期一
+        let day = 1;
+        const samples = {
+          2: ['全聯 1,200 片'],
+          5: ['家樂福 GIFT-12 200 盒'],
+          8: ['7-11 800 片', '微風百貨 50 盒'],
+          10: ['家樂福 5,500 件'],
+          12: ['ABC 禮品 300 盒'],
+          15: ['星巴克 OEM 2,000 片'],
+          18: ['全聯 1,500 片'],
+          22: ['家樂福補單 1,000 片'],
+          25: ['7-11 600 片'],
+        };
+        for (let i = 0; i < 35; i++) {
+          if (day > 30 || i < 0) { cells.push('<div class="cell dim"></div>'); continue; }
+          const ev = samples[day] || [];
+          cells.push(`<div class="cell"><div class="d">${day}</div>${ev.map((e, k) => `<div class="ev ${k % 3 == 1 ? 'warn' : k % 3 == 2 ? 'info' : ''}">📦 ${e}</div>`).join('')}</div>`);
+          day++;
+        }
+        return cells.join('');
+      })()}
+  </div>`
+    );
+
+    // ----- M3 庫存 -----
+    SCREENS['M3.wh'] = () => screen('M3-01', '庫別資料',
+      '設定倉庫分區（原料倉、成品倉、包材倉等）。',
+      `<table class="grid">
+    <thead><tr><th>庫別代號</th><th>名稱</th><th>類型</th><th>位置</th><th>負責人</th><th>狀態</th></tr></thead>
+    <tbody>
+      <tr><td>WH-RAW</td><td>原料倉</td><td>原料</td><td>1F 後場</td><td>張志強</td><td><span class="pill ok">啟用</span></td></tr>
+      <tr><td>WH-COCOA</td><td>可可豆冷藏倉</td><td>原料/冷藏</td><td>1F 冷藏室</td><td>張志強</td><td><span class="pill ok">啟用</span></td></tr>
+      <tr><td>WH-PKG</td><td>包材倉</td><td>包材</td><td>2F 倉儲</td><td>李美華</td><td><span class="pill ok">啟用</span></td></tr>
+      <tr><td>WH-WIP</td><td>半成品暫存</td><td>製程</td><td>1F 廠區</td><td>李美華</td><td><span class="pill ok">啟用</span></td></tr>
+      <tr><td>WH-FG-A</td><td>成品 A 倉</td><td>成品</td><td>1F 出貨區</td><td>陳怡君</td><td><span class="pill ok">啟用</span></td></tr>
+      <tr><td>WH-FG-B</td><td>成品 B 倉（禮盒）</td><td>成品</td><td>2F 禮盒區</td><td>陳怡君</td><td><span class="pill ok">啟用</span></td></tr>
+      <tr><td>WH-RETURN</td><td>退貨倉</td><td>退貨暫存</td><td>1F 角落</td><td>—</td><td><span class="pill gray">啟用</span></td></tr>
+    </tbody>
+  </table>`
+    );
+
+    SCREENS['M3.itemcat'] = () => screen('M3-02', '品號類別',
+      '將物料依類型分組，方便查詢與統計。',
+      `<div class="split">
+    <div class="panel"><div class="panel-head">類別樹</div>
+      <div class="panel-body tree">
+        <div class="node">📂 RM 原料</div>
+        <div class="children">
+          <div class="node">可可類 (RM-CC)</div>
+          <div class="node">糖類 (RM-SG)</div>
+          <div class="node">乳製品 (RM-MK)</div>
+          <div class="node">堅果 (RM-NT)</div>
+        </div>
+        <div class="node active">📂 FG 成品</div>
+        <div class="children">
+          <div class="node">片裝巧克力 (FG-BAR)</div>
+          <div class="node">禮盒 (FG-GIFT)</div>
+          <div class="node">節慶系列 (FG-EVT)</div>
+        </div>
+        <div class="node">📂 PKG 包材</div>
+        <div class="children">
+          <div class="node">內包裝 (PK-IN)</div>
+          <div class="node">外盒 (PK-OUT)</div>
+        </div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head">類別屬性 — FG 成品</div>
+      <div class="panel-body">
+        <div class="form">
+          <div class="row c3">
+            <div class="field"><label>類別代號</label><input value="FG" /></div>
+            <div class="field"><label>類別名稱</label><input value="成品" /></div>
+            <div class="field"><label>預設庫別</label><select><option>WH-FG-A</option></select></div>
+          </div>
+          <div class="row c3">
+            <div class="field"><label>是否啟用批號</label><select><option>是</option></select></div>
+            <div class="field"><label>是否管理效期</label><select><option>是</option></select></div>
+            <div class="field"><label>會計分類</label><input value="存貨-成品" /></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M3.item'] = () => screen('M3-03', '品號資料',
+      '為每種物料建立品號、品名、規格、計量單位、安全庫存量；可設定該品號是否啟用批號管理。',
+      `<div class="split">
+    <div class="panel"><div class="panel-head">品號清單</div>
+      <div class="panel-body">
+        <div class="list">
+          <div class="item">RM-CC-001 可可膏 70%</div>
+          <div class="item">RM-CC-002 可可脂</div>
+          <div class="item">RM-MK-001 全脂奶粉</div>
+          <div class="item">RM-NT-001 杏仁碎</div>
+          <div class="item active">FG-DK85-100G 85% 黑巧克力 100g</div>
+          <div class="item">FG-MK40-80G 40% 牛奶巧克力 80g</div>
+          <div class="item">FG-GIFT-12 綜合 12 入禮盒</div>
+          <div class="item">PK-IN-001 鋁箔內袋 100g 規格</div>
+        </div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head">品號明細 — FG-DK85-100G</div>
+      <div class="panel-body">
+        <div class="form">
+          <div class="row c3">
+            <div class="field"><label>品號</label><input value="FG-DK85-100G" readonly /></div>
+            <div class="field"><label>類別</label><select><option>FG / 片裝巧克力</option></select></div>
+            <div class="field"><label>狀態</label><select><option>啟用</option></select></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label>品名</label><input value="85% 黑巧克力 100g" /></div>
+            <div class="field"><label>英文品名</label><input value="85% Dark Chocolate Bar 100g" /></div>
+          </div>
+          <div class="row c4">
+            <div class="field"><label>計量單位</label><input value="片" /></div>
+            <div class="field"><label>包裝規格</label><input value="100g／片" /></div>
+            <div class="field"><label>安全庫存</label><input value="500" /></div>
+            <div class="field"><label>再訂購點</label><input value="800" /></div>
+          </div>
+          <div class="row c3">
+            <div class="field"><label>啟用批號管理</label><select><option>是</option></select></div>
+            <div class="field"><label>管理效期</label><select><option>是</option></select></div>
+            <div class="field"><label>保存天數</label><input value="365" /></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label>標準成本</label><input value="68" /></div>
+            <div class="field"><label>預設售價</label><input value="120" /></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M3.transfer'] = () => screen('M3-04', '轉撥單',
+      '記錄物料在不同倉區之間的移動。若啟用批號管理，異動時需填寫批號。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>轉撥單號</label><input value="TR-2026-0118" readonly /></div>
+      <div class="field"><label>異動日期</label><input value="2026-05-27" /></div>
+      <div class="field"><label>來源倉</label><select><option>WH-WIP 半成品暫存</option></select></div>
+      <div class="field"><label>目的倉</label><select><option>WH-FG-A 成品 A 倉</option></select></div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>品名</th><th>批號 (必填)</th><th>數量</th><th>單位</th><th>備註</th></tr></thead>
+    <tbody>
+      <tr><td>FG-DK85-100G</td><td>85% 黑巧克力 100g</td><td>LOT-20260605-0011 <span class="pill info">批</span></td><td>1,800</td><td>片</td><td>由製程移入成品倉</td></tr>
+      <tr><td>FG-MK40-80G</td><td>40% 牛奶巧克力 80g</td><td>LOT-20260601-0007 <span class="pill info">批</span></td><td>500</td><td>片</td><td>—</td></tr>
+    </tbody>
+  </table>
+  <div class="alert warn">本品號已啟用批號管理，轉撥時批號為必填欄位。</div>`
+    );
+
+    SCREENS['M3.adjust'] = () => screen('M3-05', '調整單',
+      '盤點後調整系統庫存與實際庫存的差異。若啟用批號管理，調整時需記錄批號。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>調整單號</label><input value="ADJ-2026-0042" readonly /></div>
+      <div class="field"><label>異動日期</label><input value="2026-05-27" /></div>
+      <div class="field"><label>調整類型</label><select><option>盤點差異</option><option>報廢</option><option>過期銷毀</option></select></div>
+      <div class="field"><label>調整倉</label><select><option>WH-RAW 原料倉</option></select></div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>批號</th><th>帳面</th><th>實盤</th><th>差異</th><th>原因</th></tr></thead>
+    <tbody>
+      <tr><td>RM-CC-001 可可膏 70%</td><td>LOT-20260301-0001</td><td>120 kg</td><td>118 kg</td><td style="color:var(--err)">-2</td><td>容器殘留耗損</td></tr>
+      <tr><td>RM-NT-001 杏仁碎</td><td>LOT-20260415-0008</td><td>30 kg</td><td>28.5 kg</td><td style="color:var(--err)">-1.5</td><td>抽樣檢驗扣除</td></tr>
+      <tr><td>RM-SG-001 細砂糖</td><td>LOT-20260520-0023</td><td>200 kg</td><td>205 kg</td><td style="color:var(--ok)">+5</td><td>前次入庫漏記</td></tr>
+    </tbody>
+  </table>`
+    );
+
+    SCREENS['M3.misc'] = () => screen('M3-06', '其他領退料單',
+      '處理非生產流程的物料領用或歸還（如試做、客訴樣品、辦公消耗）。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>單號</label><input value="MR-2026-0017" readonly /></div>
+      <div class="field"><label>類型</label><select><option>領料</option><option>退料</option></select></div>
+      <div class="field"><label>用途</label><select><option>新品試做</option><option>展覽樣品</option><option>客訴調查</option></select></div>
+      <div class="field"><label>領用人</label><select><option>李美華</option></select></div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>品名</th><th>批號</th><th>數量</th><th>備註</th></tr></thead>
+    <tbody>
+      <tr><td>RM-CC-001</td><td>可可膏 70%</td><td>LOT-20260301-0001</td><td>2 kg</td><td>夏季新品試做</td></tr>
+      <tr><td>RM-NT-002</td><td>夏威夷豆</td><td>LOT-20260420-0011</td><td>500 g</td><td>—</td></tr>
+      <tr><td>PK-IN-001</td><td>鋁箔內袋</td><td>—</td><td>50 個</td><td>樣品包裝</td></tr>
+    </tbody>
+  </table>`
+    );
+
+    SCREENS['M3.stockrpt'] = () => screen('M3-07', '庫存報表',
+      '查詢即時庫存量、庫存異動明細、安全庫存預警、近效期品項；支援依批號查詢庫存狀況。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>查詢類別</label><select><option>即時庫存</option><option>批號明細</option><option>安全庫存預警</option><option>近效期品項</option></select></div>
+      <div class="field"><label>庫別</label><select><option>（全部）</option></select></div>
+      <div class="field"><label>品號類別</label><select><option>（全部）</option></select></div>
+      <div class="field"><label>關鍵字</label><input placeholder="品號／品名" /></div>
+    </div>
+  </div>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="label">總庫存品項</div><div class="value">312</div></div>
+    <div class="kpi"><div class="label">低於安全庫存</div><div class="value" style="color:var(--warn)">14</div></div>
+    <div class="kpi"><div class="label">30 日內到期</div><div class="value" style="color:var(--err)">7</div></div>
+    <div class="kpi"><div class="label">活動批號</div><div class="value">248</div></div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>品名</th><th>庫別</th><th>批號</th><th>有效日期</th><th>數量</th><th>狀態</th></tr></thead>
+    <tbody>
+      <tr><td>RM-CC-001</td><td>可可膏 70%</td><td>WH-COCOA</td><td>LOT-20260301-0001</td><td>2026-12-28</td><td>118 kg</td><td><span class="pill ok">正常</span></td></tr>
+      <tr><td>RM-MK-001</td><td>全脂奶粉</td><td>WH-RAW</td><td>LOT-20260128-0005</td><td>2026-06-20</td><td>25 kg</td><td><span class="pill err">近效期 ≤30 日</span></td></tr>
+      <tr><td>FG-DK85-100G</td><td>85% 黑巧克力 100g</td><td>WH-FG-A</td><td>LOT-20260510-0021</td><td>2027-05-09</td><td>800 片</td><td><span class="pill ok">正常</span></td></tr>
+      <tr><td>FG-MK40-80G</td><td>40% 牛奶巧克力 80g</td><td>WH-FG-A</td><td>—</td><td>—</td><td>320 片</td><td><span class="pill warn">低於安全庫存 (500)</span></td></tr>
+      <tr><td>PK-IN-001</td><td>鋁箔內袋 100g</td><td>WH-PKG</td><td>—</td><td>—</td><td>2,300 個</td><td><span class="pill ok">正常</span></td></tr>
+    </tbody>
+  </table>`
+    );
+
+    // ----- M4 採購 -----
+    SCREENS['M4.vendor'] = () => screen('M4-01', '廠商資料',
+      '建立供應商基本資料，採購時直接選取。',
+      `<div class="split">
+    <div class="panel"><div class="panel-head">廠商清單</div>
+      <div class="panel-body">
+        <div class="list">
+          <div class="item active">🏭 V001 比利時可可進口商</div>
+          <div class="item">🏭 V002 法國糖業</div>
+          <div class="item">🏭 V003 台南奶粉供應</div>
+          <div class="item">🏭 V004 加州堅果代理</div>
+          <div class="item">🏭 V005 包材印製廠</div>
+        </div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head">廠商基本資料</div>
+      <div class="panel-body">
+        <div class="form">
+          <div class="row c3">
+            <div class="field"><label>廠商代號</label><input value="V001" readonly /></div>
+            <div class="field"><label>簡稱</label><input value="比利時可可" /></div>
+            <div class="field"><label>分類</label><select><option>原料-可可類</option></select></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label>全名</label><input value="Belgian Cocoa Trading Ltd." /></div>
+            <div class="field"><label>統一編號／VAT</label><input value="BE-12345678" /></div>
+          </div>
+          <div class="row c3">
+            <div class="field"><label>聯絡人</label><input value="Pierre" /></div>
+            <div class="field"><label>電話</label><input value="+32 2 XXXX" /></div>
+            <div class="field"><label>幣別</label><select><option>EUR</option></select></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label>付款條件</label><select><option>T/T 30 days</option></select></div>
+            <div class="field"><label>採購評等</label><select><option>A — 優良</option><option>B</option><option>C</option></select></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M4.req'] = () => screen('M4-02', '請購單',
+      '倉庫或生產部門向採購申請補料，主管核准後作為採購依據。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>請購單號</label><input value="PR-2026-0089" readonly /></div>
+      <div class="field"><label>請購日</label><input value="2026-05-27" /></div>
+      <div class="field"><label>請購部門</label><select><option>生產部</option></select></div>
+      <div class="field"><label>請購人</label><select><option>李美華</option></select></div>
+    </div>
+    <div class="row c2">
+      <div class="field"><label>用途說明</label><input value="WO-2026-0617 製令備料補不足" /></div>
+      <div class="field"><label>核准狀態</label><select><option>待核准</option><option>已核准</option><option>退回</option></select></div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>品名</th><th>需求量</th><th>單位</th><th>需求到貨日</th><th>建議廠商</th></tr></thead>
+    <tbody>
+      <tr><td>RM-CC-001</td><td>可可膏 70%</td><td>50</td><td>kg</td><td>2026-06-02</td><td>V001 比利時可可</td></tr>
+      <tr><td>RM-MK-001</td><td>全脂奶粉</td><td>30</td><td>kg</td><td>2026-06-02</td><td>V003 台南奶粉</td></tr>
+      <tr><td>PK-IN-001</td><td>鋁箔內袋 100g</td><td>3,000</td><td>個</td><td>2026-06-05</td><td>V005 包材印製廠</td></tr>
+    </tbody>
+  </table>`
+    );
+
+    SCREENS['M4.po'] = () => screen('M4-03', '採購單',
+      '正式向供應商下訂，可從核准的請購單轉入，記錄品項、數量、單價、要求到貨日。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>採購單號</label><input value="PO-2026-0341" readonly /></div>
+      <div class="field"><label>採購日</label><input value="2026-05-27" /></div>
+      <div class="field"><label>廠商</label><select><option>V001 比利時可可</option></select></div>
+      <div class="field"><label>對應請購單</label><input value="PR-2026-0089" /></div>
+    </div>
+    <div class="row c3">
+      <div class="field"><label>要求到貨日</label><input value="2026-06-02" /></div>
+      <div class="field"><label>付款條件</label><input value="T/T 30 days" readonly /></div>
+      <div class="field"><label>狀態</label><select><option>已下單</option><option>部分到貨</option><option>完成</option></select></div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>品名</th><th>數量</th><th>單位</th><th>單價(EUR)</th><th>小計</th><th>到貨日</th></tr></thead>
+    <tbody>
+      <tr><td>RM-CC-001</td><td>可可膏 70%</td><td>50</td><td>kg</td><td>18.50</td><td>925.00</td><td>2026-06-02</td></tr>
+      <tr><td>RM-CC-002</td><td>可可脂</td><td>20</td><td>kg</td><td>32.00</td><td>640.00</td><td>2026-06-02</td></tr>
+    </tbody>
+  </table>
+  <div class="row c4">
+    <div class="kpi"><div class="label">未稅總額</div><div class="value">€1,565.00</div></div>
+    <div class="kpi"><div class="label">運費</div><div class="value">€180.00</div></div>
+    <div class="kpi"><div class="label">含費合計</div><div class="value">€1,745.00</div></div>
+    <div class="kpi"><div class="label">折合 TWD</div><div class="value">~62,820</div></div>
+  </div>`
+    );
+
+    SCREENS['M4.iqc'] = () => screen('M4-04', '進貨檢驗單',
+      '廠商送貨到廠時，核對品項數量並記錄品質檢驗結果，合格後才允許入庫。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>檢驗單號</label><input value="IQC-2026-0211" readonly /></div>
+      <div class="field"><label>檢驗日期</label><input value="2026-06-02" /></div>
+      <div class="field"><label>對應採購單</label><input value="PO-2026-0341" /></div>
+      <div class="field"><label>檢驗人員</label><select><option>陳怡君</option></select></div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>數量</th><th>外觀</th><th>水分%</th><th>異味</th><th>檢驗結果</th></tr></thead>
+    <tbody>
+      <tr><td>RM-CC-001 可可膏 70%</td><td>50 kg</td><td>正常</td><td>0.8</td><td>無</td><td><span class="pill ok">合格</span></td></tr>
+      <tr><td>RM-CC-002 可可脂</td><td>20 kg</td><td>輕微結晶</td><td>0.3</td><td>無</td><td><span class="pill warn">合格 (限期使用)</span></td></tr>
+    </tbody>
+  </table>
+  <div class="row c2">
+    <div class="field"><label>檢驗意見</label><textarea>可可脂表面有輕微再結晶，需於 30 天內使用完畢；其餘品項依採購規格驗收合格。</textarea></div>
+    <div class="field"><label>處置</label><select><option>全數允收，可入庫</option><option>部分退貨</option><option>全數退貨</option></select></div>
+  </div>
+  <div class="alert ok">檢驗合格項目將自動產生「進貨單草稿」，待倉庫人員確認入庫批號。</div>`
+    );
+
+    SCREENS['M4.grn'] = () => screen('M4-05', '進貨單',
+      '檢驗合格的原料正式入庫，需填寫批號與有效日期，庫存自動增加。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>進貨單號</label><input value="GR-2026-0455" readonly /></div>
+      <div class="field"><label>入庫日</label><input value="2026-06-02" /></div>
+      <div class="field"><label>對應檢驗單</label><input value="IQC-2026-0211" /></div>
+      <div class="field"><label>入庫倉</label><select><option>WH-COCOA</option></select></div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>數量</th><th>批號 (必填)</th><th>有效日期 (必填)</th><th>儲位</th></tr></thead>
+    <tbody>
+      <tr><td>RM-CC-001 可可膏 70%</td><td>50 kg</td><td><input value="LOT-20260602-CC01" /></td><td><input value="2026-12-30" /></td><td>COCOA-A-03</td></tr>
+      <tr><td>RM-CC-002 可可脂</td><td>20 kg</td><td><input value="LOT-20260602-CC02" /></td><td><input value="2026-09-02" /></td><td>COCOA-A-04</td></tr>
+    </tbody>
+  </table>
+  <div class="alert ok">確認後庫存自動增加，並可印出原料條碼標籤（M7-02）貼附入庫。</div>`
+    );
+
+    // ----- M5 生產管理 -----
+    SCREENS['M5.bom'] = () => screen('M5-01', 'BOM 配方',
+      '記錄每種成品的生產配方；系統依原料標示自動彙整成品的過敏原清單。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>成品品號</label><select><option>FG-DK85-100G 85% 黑巧克力 100g</option></select></div>
+      <div class="field"><label>配方版本</label><select><option>V2.1 (現行)</option><option>V2.0</option></select></div>
+      <div class="field"><label>基準產量</label><input value="1,000 片 (100g/片)" /></div>
+      <div class="field"><label>狀態</label><select><option>啟用</option></select></div>
+    </div>
+  </div>
+  <div class="bom">
+    <div class="item h"><div>品號</div><div>原料品名</div><div>用量</div><div>單位</div><div>損耗%</div></div>
+    <div class="item"><div>RM-CC-001</div><div>可可膏 70%</div><div>62.0</div><div>kg</div><div>2.0</div></div>
+    <div class="item"><div>RM-CC-002</div><div>可可脂</div><div>15.0</div><div>kg</div><div>1.0</div></div>
+    <div class="item"><div>RM-SG-001</div><div>細砂糖</div><div>13.0</div><div>kg</div><div>0.5</div></div>
+    <div class="item"><div>RM-MK-001</div><div>全脂奶粉</div><div>5.0</div><div>kg</div><div>1.0</div></div>
+    <div class="item"><div>RM-AD-001</div><div>大豆卵磷脂</div><div>0.4</div><div>kg</div><div>—</div></div>
+    <div class="item"><div>PK-IN-001</div><div>鋁箔內袋 100g</div><div>1,020</div><div>個</div><div>2.0</div></div>
+  </div>
+  <div style="margin-top:8px"><strong>系統自動彙整過敏原：</strong></div>
+  <div class="allergen">
+    <div class="tag">🥛 牛奶</div>
+    <div class="tag">🌱 大豆</div>
+    <div class="tag">🥜 工廠共用線可能含堅果</div>
+  </div>`
+    );
+
+    SCREENS['M5.allergen'] = () => screen('M5-02', '品號資料（過敏原）',
+      '原料品號可標示含有的過敏原種類，系統會自動向上彙整到成品配方。',
+      `<div class="split">
+    <div class="panel"><div class="panel-head">原料清單</div>
+      <div class="panel-body list">
+        <div class="item">RM-CC-001 可可膏 70%</div>
+        <div class="item active">RM-MK-001 全脂奶粉</div>
+        <div class="item">RM-NT-001 杏仁碎</div>
+        <div class="item">RM-AD-001 大豆卵磷脂</div>
+        <div class="item">RM-SG-001 細砂糖</div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head">過敏原標示 — 全脂奶粉</div>
+      <div class="panel-body">
+        <div class="row c3">
+          <div class="field"><label>品號</label><input value="RM-MK-001" readonly /></div>
+          <div class="field"><label>品名</label><input value="全脂奶粉" /></div>
+          <div class="field"><label>製造商標示版本</label><input value="2026 規格書 v3" /></div>
+        </div>
+        <div style="margin-top:8px"><strong>過敏原</strong>（依台灣食藥署 11 大類）</div>
+        <table class="matrix">
+          <tr><th>類別</th><th>含有</th><th>同產線可能混入</th><th>備註</th></tr>
+          <tr><td class="name">🥛 牛奶</td><td>✅</td><td>—</td><td>主成分</td></tr>
+          <tr><td class="name">🌾 含麩質穀物</td><td>—</td><td>—</td><td></td></tr>
+          <tr><td class="name">🥚 蛋</td><td>—</td><td>—</td><td></td></tr>
+          <tr><td class="name">🥜 堅果類</td><td>—</td><td>—</td><td></td></tr>
+          <tr><td class="name">🌱 大豆</td><td>—</td><td>✅</td><td>同產線</td></tr>
+          <tr><td class="name">🐟 魚類 / 甲殼類</td><td>—</td><td>—</td><td></td></tr>
+          <tr><td class="name">🌰 芝麻</td><td>—</td><td>—</td><td></td></tr>
+        </table>
+      </div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M5.nutrition'] = () => screen('M5-03', '品號資料（營養成分）',
+      '成品品號可記錄營養成分資訊（熱量、蛋白質、脂肪、碳水化合物、鈉等），供包裝標示與報表使用。',
+      `<div class="row c3">
+    <div class="field"><label>成品品號</label><select><option>FG-DK85-100G 85% 黑巧克力 100g</option></select></div>
+    <div class="field"><label>標示單位</label><select><option>每 100 公克</option><option>每份 (25g)</option></select></div>
+    <div class="field"><label>每包份數</label><input value="4" /></div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>項目</th><th>每 100g</th><th>每份 (25g)</th><th>單位</th></tr></thead>
+    <tbody>
+      <tr><td>熱量</td><td>598</td><td>149.5</td><td>kcal</td></tr>
+      <tr><td>蛋白質</td><td>7.5</td><td>1.9</td><td>g</td></tr>
+      <tr><td>脂肪</td><td>42.0</td><td>10.5</td><td>g</td></tr>
+      <tr><td style="padding-left:24px">飽和脂肪</td><td>25.0</td><td>6.3</td><td>g</td></tr>
+      <tr><td style="padding-left:24px">反式脂肪</td><td>0.0</td><td>0.0</td><td>g</td></tr>
+      <tr><td>碳水化合物</td><td>30.0</td><td>7.5</td><td>g</td></tr>
+      <tr><td style="padding-left:24px">糖</td><td>22.0</td><td>5.5</td><td>g</td></tr>
+      <tr><td>鈉</td><td>15</td><td>4</td><td>mg</td></tr>
+    </tbody>
+  </table>
+  <div class="alert ok">營養成分資料可一鍵匯出為包裝印刷規格檔（PDF / CSV）。</div>`
+    );
+
+    SCREENS['M5.wo'] = () => screen('M5-04', '製令單',
+      '每次生產任務的工作指令，記載生產品項、數量、預計日期，系統依 BOM 自動帶入配方。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>製令單號</label><input value="WO-2026-0617" readonly /></div>
+      <div class="field"><label>下令日</label><input value="2026-05-27" /></div>
+      <div class="field"><label>生產品號</label><select><option>FG-DK85-100G 85% 黑巧克力 100g</option></select></div>
+      <div class="field"><label>生產數量</label><input value="2,000 片" /></div>
+    </div>
+    <div class="row c4">
+      <div class="field"><label>預計開工</label><input value="2026-06-05 08:00" /></div>
+      <div class="field"><label>預計完工</label><input value="2026-06-06 17:00" /></div>
+      <div class="field"><label>工作站</label><select><option>WS-LINE1 巧克力 1 號線</option></select></div>
+      <div class="field"><label>狀態</label><select><option>已排程</option><option>領料中</option><option>生產中</option><option>完工</option></select></div>
+    </div>
+  </div>
+  <div><strong>系統依 BOM 自動帶入應領原料（基準 1,000 → 實際 2,000，自動換算）</strong></div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>原料</th><th>應領量</th><th>單位</th><th>含損耗</th><th>庫存可供應</th></tr></thead>
+    <tbody>
+      <tr><td>RM-CC-001</td><td>可可膏 70%</td><td>124.0</td><td>kg</td><td>126.5</td><td><span class="pill ok">充足 (118 + 50 新到)</span></td></tr>
+      <tr><td>RM-CC-002</td><td>可可脂</td><td>30.0</td><td>kg</td><td>30.3</td><td><span class="pill ok">充足</span></td></tr>
+      <tr><td>RM-SG-001</td><td>細砂糖</td><td>26.0</td><td>kg</td><td>26.1</td><td><span class="pill ok">充足</span></td></tr>
+      <tr><td>RM-MK-001</td><td>全脂奶粉</td><td>10.0</td><td>kg</td><td>10.1</td><td><span class="pill warn">需注意近效期批</span></td></tr>
+      <tr><td>PK-IN-001</td><td>鋁箔內袋</td><td>2,040</td><td>個</td><td>2,080</td><td><span class="pill ok">充足</span></td></tr>
+    </tbody>
+  </table>`
+    );
+
+    SCREENS['M5.issue'] = () => screen('M5-05', '領料單',
+      '依製令單配方自動計算應領量，倉庫備料發放；需記錄領用的原料批號，庫存自動扣減。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>領料單號</label><input value="MI-2026-0517" readonly /></div>
+      <div class="field"><label>對應製令</label><input value="WO-2026-0617" /></div>
+      <div class="field"><label>領料日</label><input value="2026-06-05" /></div>
+      <div class="field"><label>領料人</label><select><option>李美華</option></select></div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>應領</th><th>實領</th><th>批號 (必填)</th><th>來源倉位</th></tr></thead>
+    <tbody>
+      <tr><td>RM-CC-001 可可膏 70%</td><td>124 kg</td><td>118 kg</td><td>LOT-20260301-0001</td><td>COCOA-A-01</td></tr>
+      <tr><td>RM-CC-001 可可膏 70%</td><td></td><td>8 kg</td><td>LOT-20260602-CC01 <span class="pill info">新批</span></td><td>COCOA-A-03</td></tr>
+      <tr><td>RM-CC-002 可可脂</td><td>30 kg</td><td>30 kg</td><td>LOT-20260602-CC02</td><td>COCOA-A-04</td></tr>
+      <tr><td>RM-SG-001 細砂糖</td><td>26 kg</td><td>26 kg</td><td>LOT-20260520-0023</td><td>RAW-B-02</td></tr>
+      <tr><td>RM-MK-001 全脂奶粉</td><td>10 kg</td><td>10 kg</td><td>LOT-20260128-0005 <span class="pill err">近效</span></td><td>RAW-B-05</td></tr>
+    </tbody>
+  </table>
+  <div class="alert warn">提醒：奶粉批 LOT-20260128-0005 距到期 18 天，已優先指派此製令使用 (FEFO)。</div>`
+    );
+
+    SCREENS['M5.fqc'] = () => screen('M5-06', '入庫檢驗單',
+      '成品生產完成後進行品質確認，合格才允許入庫。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>檢驗單號</label><input value="FQC-2026-0298" readonly /></div>
+      <div class="field"><label>對應製令</label><input value="WO-2026-0617" /></div>
+      <div class="field"><label>檢驗日</label><input value="2026-06-06" /></div>
+      <div class="field"><label>檢驗人員</label><select><option>陳怡君</option></select></div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>檢驗項目</th><th>標準</th><th>實測</th><th>判定</th></tr></thead>
+    <tbody>
+      <tr><td>重量（每片）</td><td>100 ± 2 g</td><td>100.4 g</td><td><span class="pill ok">合格</span></td></tr>
+      <tr><td>外觀（色澤、缺角）</td><td>無明顯瑕疵</td><td>正常</td><td><span class="pill ok">合格</span></td></tr>
+      <tr><td>口感（風味）</td><td>無異味</td><td>正常</td><td><span class="pill ok">合格</span></td></tr>
+      <tr><td>水分%</td><td>≤ 1.0</td><td>0.6</td><td><span class="pill ok">合格</span></td></tr>
+      <tr><td>金屬探測</td><td>未檢出</td><td>未檢出</td><td><span class="pill ok">合格</span></td></tr>
+    </tbody>
+  </table>
+  <div class="alert ok">全項合格 — 可開立入庫單（M5-07）。</div>`
+    );
+
+    SCREENS['M5.fgrcpt'] = () => screen('M5-07', '入庫單（成品）',
+      '成品正式入庫，需填寫成品批號、生產日期、有效日期，庫存自動增加。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>入庫單號</label><input value="FG-2026-0612" readonly /></div>
+      <div class="field"><label>對應製令</label><input value="WO-2026-0617" /></div>
+      <div class="field"><label>入庫日</label><input value="2026-06-06" /></div>
+      <div class="field"><label>入庫倉</label><select><option>WH-FG-A 成品 A 倉</option></select></div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>數量</th><th>批號</th><th>生產日</th><th>有效日</th><th>儲位</th></tr></thead>
+    <tbody>
+      <tr><td>FG-DK85-100G 85% 黑巧克力 100g</td><td>1,985 片</td><td><input value="LOT-20260605-0011" /></td><td><input value="2026-06-05" /></td><td><input value="2027-06-04" /></td><td>FG-A-02</td></tr>
+    </tbody>
+  </table>
+  <div class="row c3">
+    <div class="kpi"><div class="label">製令計畫</div><div class="value">2,000</div></div>
+    <div class="kpi"><div class="label">實際入庫</div><div class="value">1,985</div></div>
+    <div class="kpi"><div class="label">良率</div><div class="value" style="color:var(--ok)">99.25%</div></div>
+  </div>
+  <div class="alert ok">入庫完成後將自動列印成品標籤（M7-02），條碼內含批號與有效日期。</div>`
+    );
+
+    SCREENS['M5.sched'] = () => screen('M5-08', '生產排程表',
+      '依交期和產能安排每日生產計畫，排程結果同步顯示於現場看板。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>排程週次</label><select><option>2026-W23 (06/01 ~ 06/07)</option></select></div>
+      <div class="field"><label>工作站</label><select><option>（全部）</option></select></div>
+      <div class="field"><label>狀態</label><select><option>（全部）</option></select></div>
+      <div class="field"><label>顯示</label><select><option>甘特圖</option><option>清單</option></select></div>
+    </div>
+  </div>
+  <div style="font-weight:600; color:var(--brand); padding: 6px 0">📊 甘特排程 — 巧克力 1 號線 / 包裝線</div>
+  ${[
+        ['WO-0615 牛奶巧克力 2000 片', 'LINE1', 0, 18, 'ok'],
+        ['WO-0616 黑巧 OEM 1500 片', 'LINE1', 20, 35, 'info'],
+        ['WO-0617 85% 黑巧 2000 片', 'LINE1', 40, 65, 'warn'],
+        ['WO-0618 禮盒包裝 500 盒', 'LINE2', 30, 55, 'ok'],
+        ['WO-0619 杏仁巧克力 1000 片', 'LINE1', 70, 90, ''],
+      ].map(([n, line, s, e, cl]) => `
+    <div class="timeline-row">
+      <span style="width:200px">${n}</span>
+      <span style="width:60px;color:var(--muted)">${line}</span>
+      <div class="timeline-bar"><div class="seg ${cl}" style="left:${s}%;right:${100 - e}%">${e - s}h</div></div>
+    </div>
+  `).join('')}
+  <div style="display:flex;gap:14px;font-size:11px;color:var(--muted);margin-top:8px">
+    <span><span class="pill ok">綠</span> 已完成</span>
+    <span><span class="pill info">藍</span> 生產中</span>
+    <span><span class="pill warn">黃</span> 待領料</span>
+    <span><span class="pill gray">灰</span> 已排程</span>
+  </div>`
+    );
+
+    SCREENS['M5.usage'] = () => screen('M5-09', '生產用量分析',
+      '比較配方標準用量與實際用量，找出浪費或異常，協助控管生產成本。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>分析期間</label><select><option>2026-05 月</option></select></div>
+      <div class="field"><label>產品</label><select><option>FG-DK85-100G</option></select></div>
+      <div class="field"><label>班別</label><select><option>（全部）</option></select></div>
+      <div class="field"><label>差異門檻</label><select><option>±3%</option><option>±5%</option></select></div>
+    </div>
+  </div>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="label">本月生產次數</div><div class="value">12</div></div>
+    <div class="kpi"><div class="label">總生產量</div><div class="value">24,500 片</div></div>
+    <div class="kpi"><div class="label">原料超用</div><div class="value" style="color:var(--err)">+2.8%</div></div>
+    <div class="kpi"><div class="label">成本差異</div><div class="value" style="color:var(--err)">+38,200</div></div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>原料</th><th>標準用量</th><th>實際用量</th><th>差異</th><th>差異 %</th><th>狀態</th></tr></thead>
+    <tbody>
+      <tr><td>可可膏 70%</td><td>1,519 kg</td><td>1,572 kg</td><td>+53 kg</td><td>+3.5%</td><td><span class="pill warn">超出門檻</span></td></tr>
+      <tr><td>可可脂</td><td>367 kg</td><td>362 kg</td><td>-5 kg</td><td>-1.4%</td><td><span class="pill ok">正常</span></td></tr>
+      <tr><td>細砂糖</td><td>319 kg</td><td>328 kg</td><td>+9 kg</td><td>+2.8%</td><td><span class="pill ok">正常</span></td></tr>
+      <tr><td>全脂奶粉</td><td>122 kg</td><td>128 kg</td><td>+6 kg</td><td>+4.9%</td><td><span class="pill warn">超出門檻</span></td></tr>
+      <tr><td>鋁箔內袋</td><td>24,990 個</td><td>25,420 個</td><td>+430 個</td><td>+1.7%</td><td><span class="pill ok">正常</span></td></tr>
+    </tbody>
+  </table>
+  <div class="alert warn">可可膏與奶粉超用幅度偏高，建議追蹤 06/05 班次 (WO-0617) 是否有設備溢料情況。</div>`
+    );
+
+    // ----- M6 現場管理 -----
+    SCREENS['M6.ws'] = () => screen('M6-01', '廠區與工作站維護',
+      '設定工廠實體區域與各工作站，作為排程與看板的基礎資料。',
+      `<div class="split">
+    <div class="panel"><div class="panel-head">廠區樹</div>
+      <div class="panel-body tree">
+        <div class="node">🏭 汐止總廠</div>
+        <div class="children">
+          <div class="node">📂 一樓 — 生產區</div>
+          <div class="children">
+            <div class="node active">⚙️ WS-LINE1 巧克力 1 號線</div>
+            <div class="node">⚙️ WS-LINE2 包裝線</div>
+            <div class="node">⚙️ WS-TEMP 調溫機 A</div>
+            <div class="node">⚙️ WS-MOLD 成型 / 灌模站</div>
+          </div>
+          <div class="node">📂 二樓 — 禮盒區</div>
+          <div class="children">
+            <div class="node">⚙️ WS-GIFT 禮盒包裝站</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head">工作站屬性</div>
+      <div class="panel-body">
+        <div class="form">
+          <div class="row c3">
+            <div class="field"><label>站別代號</label><input value="WS-LINE1" /></div>
+            <div class="field"><label>站別名稱</label><input value="巧克力 1 號線" /></div>
+            <div class="field"><label>所屬廠區</label><input value="汐止總廠 1F" /></div>
+          </div>
+          <div class="row c3">
+            <div class="field"><label>標準產能</label><input value="4,000 片 / 8h" /></div>
+            <div class="field"><label>單位工時</label><input value="2 秒 / 片" /></div>
+            <div class="field"><label>操作人數</label><input value="3" /></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M6.exc'] = () => screen('M6-02', '異常與非生產項目',
+      '設定常見異常類型，現場填報時快速選取。',
+      `<table class="grid">
+    <thead><tr><th>代號</th><th>分類</th><th>名稱</th><th>影響</th><th>是否計入工時</th><th>狀態</th></tr></thead>
+    <tbody>
+      <tr><td>EX-001</td><td>設備</td><td>調溫機異常</td><td>停線</td><td>否</td><td><span class="pill ok">啟用</span></td></tr>
+      <tr><td>EX-002</td><td>設備</td><td>包裝機卡膜</td><td>暫停</td><td>否</td><td><span class="pill ok">啟用</span></td></tr>
+      <tr><td>EX-003</td><td>原料</td><td>等待原料領用</td><td>暫停</td><td>否</td><td><span class="pill ok">啟用</span></td></tr>
+      <tr><td>EX-004</td><td>品質</td><td>外觀不良</td><td>重工</td><td>是</td><td><span class="pill ok">啟用</span></td></tr>
+      <tr><td>EX-005</td><td>人員</td><td>休息／用餐</td><td>非生產</td><td>否</td><td><span class="pill ok">啟用</span></td></tr>
+      <tr><td>EX-006</td><td>環境</td><td>濕度過高</td><td>暫停</td><td>否</td><td><span class="pill ok">啟用</span></td></tr>
+    </tbody>
+  </table>`
+    );
+
+    SCREENS['M6.maint'] = () => screen('M6-03', '保養項目',
+      '設定設備定期保養清單，記錄保養完成狀況。',
+      `<table class="grid">
+    <thead><tr><th>設備</th><th>保養項目</th><th>頻率</th><th>上次保養</th><th>下次預定</th><th>狀態</th></tr></thead>
+    <tbody>
+      <tr><td>調溫機 A</td><td>清潔內槽 / 換油</td><td>每月</td><td>2026-04-30</td><td>2026-05-30</td><td><span class="pill warn">本週應做</span></td></tr>
+      <tr><td>包裝機 #1</td><td>傳動皮帶檢查</td><td>每季</td><td>2026-03-15</td><td>2026-06-15</td><td><span class="pill ok">正常</span></td></tr>
+      <tr><td>金屬探測器</td><td>感度校驗</td><td>每週</td><td>2026-05-20</td><td>2026-05-27</td><td><span class="pill err">逾期</span></td></tr>
+      <tr><td>冷藏室</td><td>溫度感測器校正</td><td>每半年</td><td>2025-12-01</td><td>2026-06-01</td><td><span class="pill warn">本週應做</span></td></tr>
+      <tr><td>輸送帶</td><td>潤滑油補充</td><td>每月</td><td>2026-05-05</td><td>2026-06-05</td><td><span class="pill ok">正常</span></td></tr>
+    </tbody>
+  </table>`
+    );
+
+    SCREENS['M6.report'] = () => screen('M6-04', '報工作業',
+      '現場人員填報完成數量與工時，數據即時更新看板與工時統計。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>報工人員</label><select><option>王美玲</option></select></div>
+      <div class="field"><label>製令單號</label><select><option>WO-2026-0617</option></select></div>
+      <div class="field"><label>工作站</label><select><option>WS-LINE1</option></select></div>
+      <div class="field"><label>工序</label><select><option>調溫</option><option>成型</option><option>包裝</option></select></div>
+    </div>
+    <div class="row c4">
+      <div class="field"><label>開始時間</label><input value="2026-06-05 08:00" /></div>
+      <div class="field"><label>結束時間</label><input value="2026-06-05 12:00" /></div>
+      <div class="field"><label>良品數</label><input value="980" /></div>
+      <div class="field"><label>不良數</label><input value="15" /></div>
+    </div>
+    <div class="row c2">
+      <div class="field"><label>異常選項</label><select><option>無</option><option>EX-002 包裝機卡膜</option></select></div>
+      <div class="field"><label>備註</label><input value="正常生產，包裝機曾短暫卡膜 5 分鐘" /></div>
+    </div>
+  </div>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="label">本班良品累計</div><div class="value">980</div></div>
+    <div class="kpi"><div class="label">不良率</div><div class="value" style="color:var(--warn)">1.51%</div></div>
+    <div class="kpi"><div class="label">工時 (人時)</div><div class="value">4.0</div></div>
+    <div class="kpi"><div class="label">UPH</div><div class="value">245</div></div>
+  </div>`
+    );
+
+    SCREENS['M6.prdboard'] = () => screen('M6-05', '即時生產看板',
+      '顯示當日生產計畫、各製令進度、即時產量與異常警示。',
+      `<div class="kpi-grid">
+    <div class="kpi"><div class="label">今日計畫</div><div class="value">8,500</div></div>
+    <div class="kpi"><div class="label">已完成</div><div class="value" style="color:var(--ok)">5,260</div></div>
+    <div class="kpi"><div class="label">達成率</div><div class="value">61.9%</div></div>
+    <div class="kpi"><div class="label">異常工時</div><div class="value" style="color:var(--err)">23 分</div></div>
+  </div>
+  <div class="kanban">
+    <div class="col"><div class="col-head">待開工 <span>2</span></div>
+      <div class="card"><div class="t">WO-0619 杏仁巧克力</div><div>1,000 片 / LINE1</div><div>排程 14:00</div></div>
+      <div class="card"><div class="t">WO-0620 禮盒包裝</div><div>200 盒 / LINE2</div><div>排程 15:30</div></div>
+    </div>
+    <div class="col"><div class="col-head">領料中 <span>1</span></div>
+      <div class="card blue"><div class="t">WO-0618 禮盒包裝</div><div>500 盒 / LINE2</div><div>領料 70%</div></div>
+    </div>
+    <div class="col"><div class="col-head">生產中 <span>2</span></div>
+      <div class="card green"><div class="t">WO-0617 85% 黑巧克力</div><div>1,985 / 2,000 片</div><div class="stat-bar"><div class="bar"><div class="fill" style="width:99%"></div></div><span>99%</span></div></div>
+      <div class="card red"><div class="t">WO-0616 黑巧 OEM</div><div>820 / 1,500 片</div><div>⚠️ 包裝機卡膜 5 分</div></div>
+    </div>
+    <div class="col"><div class="col-head">已完工 <span>3</span></div>
+      <div class="card green"><div class="t">WO-0613 牛奶巧</div><div>2,000 片 ✅</div></div>
+      <div class="card green"><div class="t">WO-0614 杏仁巧</div><div>1,200 片 ✅</div></div>
+      <div class="card green"><div class="t">WO-0615 牛奶巧</div><div>2,060 片 ✅</div></div>
+    </div>
+  </div>
+  <div class="alert err">⚠️ LINE1 包裝機自 11:50 起卡膜累積 5 分鐘 (EX-002)，已派工程人員處理。</div>`
+    );
+
+    SCREENS['M6.manboard'] = () => screen('M6-06', '即時人員看板',
+      '顯示現場人員工作狀態與人力配置。',
+      `<table class="grid">
+    <thead><tr><th>人員</th><th>站別</th><th>目前作業</th><th>開始時間</th><th>累計時數</th><th>狀態</th></tr></thead>
+    <tbody>
+      <tr><td>👤 王美玲</td><td>LINE1-調溫</td><td>WO-0617 調溫</td><td>08:00</td><td>3h 50m</td><td><span class="pill ok">生產中</span></td></tr>
+      <tr><td>👤 張小華</td><td>LINE1-包裝</td><td>WO-0617 包裝</td><td>08:00</td><td>3h 50m</td><td><span class="pill warn">異常處理中</span></td></tr>
+      <tr><td>👤 陳大同</td><td>LINE2-成型</td><td>WO-0618 灌模</td><td>08:30</td><td>3h 20m</td><td><span class="pill ok">生產中</span></td></tr>
+      <tr><td>👤 李小芳</td><td>LINE2-禮盒</td><td>WO-0618 包裝</td><td>09:00</td><td>2h 50m</td><td><span class="pill ok">生產中</span></td></tr>
+      <tr><td>👤 林志明</td><td>—</td><td>EX-005 用餐</td><td>11:30</td><td>20m</td><td><span class="pill gray">休息</span></td></tr>
+      <tr><td>👤 黃淑芬</td><td>QC 檢驗站</td><td>FQC-0298 抽樣</td><td>10:00</td><td>1h 50m</td><td><span class="pill info">檢驗中</span></td></tr>
+    </tbody>
+  </table>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="label">在線人員</div><div class="value">6</div></div>
+    <div class="kpi"><div class="label">生產中</div><div class="value" style="color:var(--ok)">3</div></div>
+    <div class="kpi"><div class="label">異常處理</div><div class="value" style="color:var(--warn)">1</div></div>
+    <div class="kpi"><div class="label">休息</div><div class="value" style="color:var(--muted)">1</div></div>
+  </div>`
+    );
+
+    // ----- M7 條碼掃描 -----
+    SCREENS['M7.bcfmt'] = () => screen('M7-01', '條碼格式設定',
+      '設定條碼/QR Code 內含的資訊欄位，作為各類標籤的產生規則。',
+      `<div class="split">
+    <div class="panel"><div class="panel-head">格式清單</div>
+      <div class="panel-body list">
+        <div class="item active">📋 原料標籤 (RAW-LBL)</div>
+        <div class="item">📋 成品標籤 (FG-LBL)</div>
+        <div class="item">📋 出貨外箱標籤 (BOX-LBL)</div>
+        <div class="item">📋 儲位 / 庫位標籤</div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head">格式設定 — 原料標籤</div>
+      <div class="panel-body">
+        <div class="form">
+          <div class="row c3">
+            <div class="field"><label>編碼類型</label><select><option>QR Code (推薦)</option><option>Code128</option><option>EAN-13</option></select></div>
+            <div class="field"><label>尺寸</label><input value="50 x 30 mm" /></div>
+            <div class="field"><label>列印機</label><select><option>TSC TX600</option></select></div>
+          </div>
+          <div><strong>內含欄位</strong></div>
+          <table class="matrix">
+            <tr><th>欄位</th><th>啟用</th><th>顯示在標籤</th><th>分隔符</th></tr>
+            <tr><td class="name">品號</td><td>✅</td><td>✅</td><td>|</td></tr>
+            <tr><td class="name">品名</td><td>✅</td><td>✅</td><td></td></tr>
+            <tr><td class="name">批號</td><td>✅</td><td>✅</td><td>|</td></tr>
+            <tr><td class="name">有效日期</td><td>✅</td><td>✅</td><td>|</td></tr>
+            <tr><td class="name">廠商代號</td><td>✅</td><td>—</td><td>|</td></tr>
+            <tr><td class="name">收貨日期</td><td>—</td><td>—</td><td></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M7.label'] = () => screen('M7-02', '標籤產生與列印',
+      '依設定的格式，產生原料標籤（進貨用）與成品標籤（入庫用），直接列印貼附物料。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>標籤類型</label><select><option>成品標籤</option><option>原料標籤</option></select></div>
+      <div class="field"><label>來源單據</label><select><option>FG-2026-0612 入庫單</option></select></div>
+      <div class="field"><label>份數</label><input value="1,985" /></div>
+      <div class="field"><label>列印機</label><select><option>TSC TX600</option></select></div>
+    </div>
+  </div>
+  <div class="row c2">
+    <div class="label-preview">
+      <div style="font-weight:700">test</div>
+      <div style="margin:4px 0; font-size:14px">85% 黑巧克力 100g</div>
+      <div>品號 FG-DK85-100G</div>
+      <div>批號 LOT-20260605-0011</div>
+      <div>生產 2026-06-05　有效 2027-06-04</div>
+      <div class="barcode">|||| || ||| | ||||</div>
+      <div style="font-size:11px">FG-DK85-100G|LOT-20260605-0011|20270604</div>
+    </div>
+    <div class="label-preview">
+      <div style="font-weight:700">原料標籤</div>
+      <div style="margin:4px 0; font-size:14px">可可膏 70%</div>
+      <div>品號 RM-CC-001｜批號 LOT-20260602-CC01</div>
+      <div>有效 2026-12-30｜廠商 V001</div>
+      <div class="qr" style="margin-top:8px"></div>
+    </div>
+  </div>`
+    );
+
+    SCREENS['M7.scanin_m'] = () => screen('M7-03', '掃碼入庫（原料）',
+      '原料進貨時掃描條碼，自動帶入品號與批號資訊，加速進貨入庫作業。',
+      `<div class="scanbox">
+    <div class="scanner"><div class="icon">📷</div><div>請對準條碼掃描</div><div class="hint">支援 1D / 2D 條碼</div></div>
+    <div>
+      <div style="font-size:13px;opacity:0.8">掃描資料</div>
+      <input placeholder="自動填入或手動輸入..." value="RM-CC-001|LOT-20260602-CC01|20261230|V001" />
+      <div class="last">✅ 已辨識：可可膏 70% / 批號 LOT-20260602-CC01 / 有效 2026-12-30</div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>序</th><th>時間</th><th>品號</th><th>批號</th><th>數量</th><th>狀態</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>10:32:15</td><td>RM-CC-001 可可膏 70%</td><td>LOT-20260602-CC01</td><td>50 kg</td><td><span class="pill ok">已入庫</span></td></tr>
+      <tr><td>2</td><td>10:34:02</td><td>RM-CC-002 可可脂</td><td>LOT-20260602-CC02</td><td>20 kg</td><td><span class="pill ok">已入庫</span></td></tr>
+      <tr><td>3</td><td>10:35:48</td><td>RM-MK-001 全脂奶粉</td><td>LOT-20260602-MK03</td><td>30 kg</td><td><span class="pill info">待確認</span></td></tr>
+    </tbody>
+  </table>
+  <div class="alert ok">本次入庫 3 筆，將自動產生對應進貨單 GR-2026-0455。</div>`
+    );
+
+    SCREENS['M7.scanin_f'] = () => screen('M7-04', '掃碼入庫（成品）',
+      '成品生產完成後掃描條碼入庫，自動記錄成品批號與有效日期。',
+      `<div class="scanbox">
+    <div class="scanner"><div class="icon">📷</div><div>掃描成品箱條碼</div></div>
+    <div>
+      <input value="FG-DK85-100G|LOT-20260605-0011|20270604" />
+      <div class="last">✅ 85% 黑巧克力 100g / 批號 LOT-20260605-0011 / 有效 2027-06-04</div>
+    </div>
+  </div>
+  <div class="row c2">
+    <div class="field"><label>本箱數量</label><input value="100 片" /></div>
+    <div class="field"><label>儲位</label><select><option>FG-A-02</option></select></div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>箱號</th><th>時間</th><th>數量</th><th>儲位</th><th>狀態</th></tr></thead>
+    <tbody>
+      <tr><td>BX-001</td><td>16:02</td><td>100</td><td>FG-A-02</td><td><span class="pill ok">已入庫</span></td></tr>
+      <tr><td>BX-002</td><td>16:03</td><td>100</td><td>FG-A-02</td><td><span class="pill ok">已入庫</span></td></tr>
+      <tr><td>BX-003</td><td>16:05</td><td>100</td><td>FG-A-02</td><td><span class="pill ok">已入庫</span></td></tr>
+      <tr><td>...</td><td></td><td></td><td></td><td></td></tr>
+      <tr><td>BX-020</td><td>16:32</td><td>85</td><td>FG-A-02</td><td><span class="pill ok">已入庫 (尾數)</span></td></tr>
+    </tbody>
+  </table>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="label">本批計畫</div><div class="value">2,000</div></div>
+    <div class="kpi"><div class="label">已掃入庫</div><div class="value" style="color:var(--ok)">1,985</div></div>
+    <div class="kpi"><div class="label">差異</div><div class="value">-15 (報廢)</div></div>
+    <div class="kpi"><div class="label">完成度</div><div class="value">99.25%</div></div>
+  </div>`
+    );
+
+    SCREENS['M7.scanout'] = () => screen('M7-05', '掃碼出庫',
+      '出貨時掃碼核對出貨品項與數量，確認無誤後自動扣減庫存。',
+      `<div class="scanbox">
+    <div class="scanner"><div class="icon">📷</div><div>對應出貨單 SH-2026-0432</div><div class="hint">客戶：家樂福</div></div>
+    <div>
+      <input value="FG-DK85-100G|LOT-20260605-0011|20270604" />
+      <div class="last">✅ 比對成功 — 出貨明細第 2 行</div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>#</th><th>品號</th><th>批號</th><th>應出</th><th>已掃</th><th>狀態</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>FG-DK85-100G</td><td>LOT-20260510-0021 / 0034</td><td>1,200</td><td>1,200</td><td><span class="pill ok">完成</span></td></tr>
+      <tr><td>2</td><td>FG-DK85-100G</td><td>LOT-20260605-0011</td><td>1,800</td><td>1,800</td><td><span class="pill ok">完成</span></td></tr>
+      <tr><td>3</td><td>FG-MK40-80G</td><td>LOT-20260601-0007</td><td>2,000</td><td>1,900</td><td><span class="pill warn">尚差 100</span></td></tr>
+      <tr><td>4</td><td>GIFT-12</td><td>LOT-20260608-0002</td><td>500</td><td>500</td><td><span class="pill ok">完成</span></td></tr>
+    </tbody>
+  </table>
+  <div class="alert warn">第 3 行 MK40-80G 尚差 100 片未掃，請繼續掃描以完成出貨確認。</div>`
+    );
+
+    SCREENS['M7.scancnt'] = () => screen('M7-06', '掃碼盤點',
+      '盤點時掃描物料條碼快速計數，系統自動彙整盤點結果與帳面庫存差異。',
+      `<div class="form">
+    <div class="row c4">
+      <div class="field"><label>盤點單號</label><input value="PI-2026-0009" readonly /></div>
+      <div class="field"><label>盤點倉</label><select><option>WH-FG-A 成品 A 倉</option></select></div>
+      <div class="field"><label>盤點人員</label><select><option>陳怡君</option></select></div>
+      <div class="field"><label>盤點日期</label><input value="2026-05-31" /></div>
+    </div>
+  </div>
+  <div class="scanbox">
+    <div class="scanner"><div class="icon">📷</div><div>持續掃描中...</div></div>
+    <div>
+      <input value="FG-MK40-80G|LOT-20260601-0007" />
+      <div class="last">✅ 第 247 次掃描 — 40% 牛奶巧克力 / 數量 +1</div>
+    </div>
+  </div>
+  <table class="grid">
+    <thead><tr><th>品號</th><th>批號</th><th>帳面</th><th>掃描實盤</th><th>差異</th></tr></thead>
+    <tbody>
+      <tr><td>FG-DK85-100G</td><td>LOT-20260510-0021</td><td>800</td><td>800</td><td style="color:var(--ok)">0</td></tr>
+      <tr><td>FG-DK85-100G</td><td>LOT-20260605-0011</td><td>1,985</td><td>1,985</td><td style="color:var(--ok)">0</td></tr>
+      <tr><td>FG-MK40-80G</td><td>LOT-20260601-0007</td><td>2,000</td><td>1,997</td><td style="color:var(--err)">-3</td></tr>
+      <tr><td>FG-GIFT-12</td><td>LOT-20260608-0002</td><td>500</td><td>502</td><td style="color:var(--warn)">+2</td></tr>
+    </tbody>
+  </table>
+  <div class="alert ok">盤點完成後可一鍵產生「調整單」（M3-05）以同步帳面庫存。</div>`
+    );
+
+    // ----- M0 業務流程總覽 -----
+    SCREENS['M0.overview'] = () => screen('M0', '業務流程總覽',
+      '從客戶詢單到完成出貨的完整流程串接示意，各步驟點擊可跳至對應作業。',
+      `<div class="flow">
+    <div class="step" onclick="goto('M2','duecheck')"><span class="n">1</span><span>📞 客戶詢單 — 業務收到客戶詢價／下單請求</span></div>
+    <div class="arrow">▼</div>
+    <div class="step" onclick="goto('M2','duecheck')"><span class="n">2</span><span>【M2 訂單】 預計交期回覆狀況表：查成品庫存 / 原料庫存 / 排程空檔 → 回覆交期</span></div>
+    <div class="arrow">▼</div>
+    <div class="step" onclick="goto('M2','order')"><span class="n">3</span><span>【M2 訂單】 訂單建立（有庫存 → 直接出貨；需生產 → 進入採購／生產流程）</span></div>
+    <div class="arrow">▼</div>
+    <div class="step" onclick="goto('M4','req')"><span class="n">4</span><span>【M4 採購】 請購 → 採購 → 進貨檢驗 → 進貨單（記錄批號入庫）</span></div>
+    <div class="arrow">▼</div>
+    <div class="step" onclick="goto('M5','sched')"><span class="n">5</span><span>【M5 生產】 生產排程 → 開立製令單（自動帶入 BOM）</span></div>
+    <div class="arrow">▼</div>
+    <div class="step" onclick="goto('M5','issue')"><span class="n">6</span><span>【M5／M3】 領料單（記錄批號）→ 庫存自動扣減</span></div>
+    <div class="arrow">▼</div>
+    <div class="step" onclick="goto('M6','prdboard')"><span class="n">7</span><span>【M6 現場】 即時看板顯示 → 報工 → 異常記錄</span></div>
+    <div class="arrow">▼</div>
+    <div class="step" onclick="goto('M5','fqc')"><span class="n">8</span><span>【M5】 入庫檢驗 → 入庫單（記錄成品批號 / 有效日期）</span></div>
+    <div class="arrow">▼</div>
+    <div class="step" onclick="goto('M2','shipdoc')"><span class="n">9</span><span>【M2／M3】 出貨單建立（記錄批號）→ 成品庫存扣減</span></div>
+    <div class="arrow">▼</div>
+    <div class="step" onclick="goto('M7','scanout')"><span class="n">10</span><span>【M7 條碼】 出貨掃碼核對 → 完成出貨</span></div>
+  </div>
+  <div style="margin-top:14px"><strong>各模組在流程中的角色</strong></div>
+  <table class="grid">
+    <thead><tr><th>流程階段</th><th>負責模組</th><th>主要動作</th></tr></thead>
+    <tbody>
+      <tr><td>接單與交期確認</td><td>M2 訂單</td><td>查庫存、確認排程空檔、回覆交期</td></tr>
+      <tr><td>原料採購</td><td>M4 採購</td><td>請購 → 採購 → 進貨驗收 → 入庫（記錄批號）</td></tr>
+      <tr><td>生產規劃</td><td>M5 生產</td><td>排程 → 開製令 → 領料（記錄批號）</td></tr>
+      <tr><td>現場執行</td><td>M6 現場</td><td>看板顯示 → 報工 → 異常記錄</td></tr>
+      <tr><td>成品入庫</td><td>M5 + M3</td><td>品質確認 → 入庫（記錄批號）</td></tr>
+      <tr><td>條碼作業</td><td>M7 條碼</td><td>標籤列印 → 掃碼入出庫 → 掃碼盤點</td></tr>
+      <tr><td>安排出貨</td><td>M2 + M3</td><td>出貨單建立（記錄批號）→ 庫存扣減</td></tr>
+    </tbody>
+  </table>`
+    );
+
+    function renderCanvas() {
+      const key = `${cur.m}.${cur.f}`;
+      const fn = SCREENS[key];
+      const c = document.getElementById('canvas');
+      if (!fn) {
+        c.innerHTML = `<div class="screen"><div class="empty-hint">⚙️ 此作業模擬畫面尚未建立（${key}）</div></div>`;
+        return;
+      }
+      c.innerHTML = fn();
+    }
+
+    function goto(m, f) { cur = { m, f }; renderAll(); }
+    window.goto = goto;
+
+    function renderAll() {
+      renderSidebar();
+      renderTabs();
+      renderCrumb();
+      renderCanvas();
+    }
+
+    renderAll();
+  </script>
+<script defer="" src="./CFuture ERP 互動原型 v2_files/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon="{&quot;version&quot;:&quot;2024.11.0&quot;,&quot;token&quot;:&quot;e38c839173ba4e2081ecb47c39795146&quot;,&quot;r&quot;:1,&quot;server_timing&quot;:{&quot;name&quot;:{&quot;cfCacheStatus&quot;:true,&quot;cfEdge&quot;:true,&quot;cfExtPri&quot;:true,&quot;cfL4&quot;:true,&quot;cfOrigin&quot;:true,&quot;cfSpeedBrain&quot;:true},&quot;location_startswith&quot;:null}}" crossorigin="anonymous"></script>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a1b66f1fd8c31a58',t:'MTc4NDA5NDA0NA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><iframe height="1" width="1" style="position: absolute; top: 0px; left: 0px; border-width: medium; border-style: none; border-color: currentcolor; border-image: none; visibility: hidden;" src="./CFuture ERP 互動原型 v2_files/saved_resource.html"></iframe>
+
+</body></html>
