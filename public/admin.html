@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ERP 系統後台</title>
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+  <section class="login-page" id="loginPage">
+    <form class="login-card" id="adminLoginForm">
+      <div class="logo">◆</div><h1>ERP 系統後台</h1>
+      <p>限系統管理員登入</p>
+      <label>管理員帳號<input name="username" autocomplete="username" required></label>
+      <label>密碼<input name="password" type="password" autocomplete="current-password" required></label>
+      <button class="primary" type="submit">登入後台</button>
+      <div class="status error" id="loginStatus"></div>
+      <a href="/">返回 ERP 作業系統</a>
+    </form>
+  </section>
+  <div class="admin-shell" id="adminShell" hidden>
+    <aside>
+      <div class="admin-brand"><b>◆ ERP 後台</b><small>System Administration</small></div>
+      <button class="nav active" data-view="users">人員帳號管理</button>
+      <button class="nav" data-view="roles">角色與功能權限</button>
+      <a class="nav link" href="/">返回 ERP 系統</a>
+    </aside>
+    <main>
+      <header><div><h1 id="pageTitle">人員帳號管理</h1><p>帳號停用只會禁止登入，不會刪除歷史單據紀錄。</p></div><div class="admin-user"><span id="adminName"></span><button id="logoutButton">登出</button></div></header>
+      <section class="view" id="usersView">
+        <div class="card"><h2>新增登入帳號</h2><form id="createUserForm" class="form-grid"><label>登入帳號<input name="username" required></label><label>員工代號<input name="employee_code"></label><label>顯示姓名<input name="display_name" required></label><label>初始密碼<input name="password" type="password" minlength="8" required></label><label>角色<select name="role_id" id="newUserRole"></select></label><fieldset class="wide"><legend>可進入公司別</legend><div id="newUserCompanies" class="company-checks"></div></fieldset><button class="primary" type="submit">建立帳號</button></form></div>
+        <div class="card"><div class="card-head"><h2>現有登入帳號</h2><button id="reloadUsers">重新整理</button></div><div class="table-wrap"><table><thead><tr><th>帳號</th><th>員工代號</th><th>姓名</th><th>角色</th><th>可進入公司別</th><th>狀態</th><th>作業</th></tr></thead><tbody id="userRows"></tbody></table></div></div>
+        <div class="card"><h2>重設密碼</h2><form id="resetPasswordForm" class="form-grid"><label>帳號<select name="user_id" id="resetUser"></select></label><label>新密碼<input name="new_password" type="password" minlength="8" required></label><label>確認密碼<input name="confirm_password" type="password" minlength="8" required></label><button class="primary" type="submit">重設密碼</button></form></div>
+      </section>
+      <section class="view" id="rolesView" hidden>
+        <div class="card"><h2>新增角色</h2><form id="createRoleForm" class="form-grid"><label>角色代號<input name="role_code" placeholder="例如 SALES_MANAGER" required></label><label>角色名稱<input name="role_name" required></label><label class="wide">說明<input name="description"></label><button class="primary" type="submit">建立角色</button></form></div>
+        <div class="card"><div class="role-picker"><label>目前角色<select id="permissionRole"></select></label><div id="roleDescription"></div></div><div class="table-wrap"><table><thead><tr><th>功能</th><th>顯示／查詢</th><th>新增</th><th>修改</th><th>停用／作廢</th><th>核準／過帳</th></tr></thead><tbody id="permissionRows"></tbody></table></div><button class="primary save-permissions" id="savePermissions">儲存角色權限</button></div>
+      </section>
+      <div class="toast" id="toast" hidden></div>
+    </main>
+  </div>
+  <script src="admin.js"></script>
+</body>
+</html>

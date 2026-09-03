@@ -1,6 +1,7 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 dotenv.config();
 
@@ -23,7 +24,27 @@ export const sourceDatabases = Object.create(null); /* legacy hardcoded list rem
 };
 */
 
-export const pool = mysql.createPool({ ...baseConfig, database: process.env.DB_NAME || 'inventory_erp' });
+const controlDatabase = process.env.DB_NAME || 'inventory_erp';
+const controlPool = mysql.createPool({ ...baseConfig, database: controlDatabase });
+const targetContext = new AsyncLocalStorage();
+const targetPools = new Map();
+
+function activePool() { return targetContext.getStore()?.pool || controlPool; }
+export const pool = new Proxy(controlPool, {
+  get(_target, property) {
+    const selected = activePool();
+    const value = selected[property];
+    return typeof value === 'function' ? value.bind(selected) : value;
+  }
+});
+
+export function runWithTargetDatabase(sourceName, work) {
+  const source = sourceDatabases[String(sourceName || '').toUpperCase()];
+  const database = source?.target_database;
+  if (!database || database === controlDatabase) return work();
+  if (!targetPools.has(database)) targetPools.set(database, mysql.createPool({ ...baseConfig, database, connectionLimit: 10 }));
+  return targetContext.run({ pool: targetPools.get(database), sourceName: source.key, database }, work);
+}
 
 const sourcePools = new Map();
 export function getSourcePool(sourceName = 'SH') {
@@ -45,9 +66,48 @@ export function getSourcePool(sourceName = 'SH') {
   return sourcePools.get(key);
 }
 
+// 資料來源只有在採購、庫存、銷售三個核心模組都存在實際資料時，
+// 才能登錄成可切換的營運公司。系統庫、報表庫與空資料庫會被拒絕。
+export async function validateOperationalSource(config = {}) {
+  const connection = await mysql.createConnection({
+    ...baseConfig,
+    host: config.host || baseConfig.host,
+    port: Number(config.port || baseConfig.port),
+    user: config.username || baseConfig.user,
+    password: config.password_env ? (process.env[config.password_env] || '') : baseConfig.password,
+    database: config.database_name,
+  });
+  try {
+    const [tables] = await connection.query(`SELECT TABLE_NAME table_name, TABLE_ROWS estimated_rows
+      FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE'`);
+    const names = tables.map(row => String(row.table_name));
+    // 排除 PURMA/COPMA/INVMB 等純主檔；必須找到實際交易或庫存帳資料。
+    const groups = {
+      procurement: names.filter(name => /^(PURT[A-Z]|PURH[A-Z]|PURL[A-Z])$/i.test(name)),
+      inventory: names.filter(name => /^(INVT[A-Z]|INVL[A-Z])$/i.test(name)),
+      sales: names.filter(name => /^(COPT[A-Z]|COPL[A-Z])$/i.test(name)),
+    };
+    const result = {};
+    for (const [group, candidates] of Object.entries(groups)) {
+      let dataTable = null;
+      let rowCount = 0;
+      for (const table of candidates.slice(0, 30)) {
+        const safeTable = table.replace(/`/g, '``');
+        const [[row]] = await connection.query(`SELECT COUNT(*) count FROM \`${safeTable}\` LIMIT 1`);
+        if (Number(row.count) > 0) { dataTable = table; rowCount = Number(row.count); break; }
+      }
+      result[group] = { passed: Boolean(dataTable), table: dataTable, row_count: rowCount, candidates: candidates.length };
+    }
+    const passed = Object.values(result).every(item => item.passed);
+    return { passed, database: config.database_name, table_count: names.length, modules: result };
+  } finally {
+    await connection.end();
+  }
+}
+
 export async function reloadSourceDatabases() {
   const [rows] = await pool.query(`SELECT source_key, label, adapter_code, host, port,
-      database_name, username, password_env, tenant_id, company_id, source_system,
+      database_name, target_database, username, password_env, tenant_id, company_id, source_system,
       enabled, read_only, sort_order
     FROM erp_data_sources WHERE enabled=1 ORDER BY sort_order, source_key`);
   for (const key of Object.keys(sourceDatabases)) delete sourceDatabases[key];
@@ -55,7 +115,7 @@ export async function reloadSourceDatabases() {
     const key = String(row.source_key).toUpperCase();
     sourceDatabases[key] = {
       key, label: row.label, adapter_code: row.adapter_code, host: row.host,
-      port: Number(row.port), database: row.database_name, username: row.username,
+      port: Number(row.port), database: row.database_name, target_database: row.target_database || (process.env.DB_NAME || 'inventory_erp'), username: row.username,
       password_env: row.password_env, enabled: Boolean(row.enabled),
       read_only: Boolean(row.read_only), sort_order: Number(row.sort_order),
       tenant_id: row.tenant_id, company_id: row.company_id, source_system: row.source_system
@@ -72,7 +132,15 @@ async function addColumnIfMissing(table, column, definition) {
     'SELECT COUNT(*) AS count FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?',
     [table, column]
   );
-  if (!Number(row.count)) await pool.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  if (!Number(row.count)) {
+    try {
+      await pool.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    } catch (error) {
+      // Two first requests can initialise the same target schema concurrently.
+      // If one request already added the column, the other request can continue safely.
+      if (error.code !== 'ER_DUP_FIELDNAME') throw error;
+    }
+  }
 }
 
 export function ensureProcurementSchema() {
@@ -86,6 +154,7 @@ export function ensureProcurementSchema() {
         host VARCHAR(255) NOT NULL DEFAULT '127.0.0.1',
         port INT UNSIGNED NOT NULL DEFAULT 3306,
         database_name VARCHAR(120) NOT NULL,
+        target_database VARCHAR(120) NULL,
         username VARCHAR(120) NOT NULL DEFAULT 'root',
         password_env VARCHAR(120) NULL,
         tenant_id VARCHAR(60) NOT NULL DEFAULT 'SH',
@@ -100,12 +169,11 @@ export function ensureProcurementSchema() {
       await pool.query(`INSERT IGNORE INTO erp_data_sources
         (source_key, label, adapter_code, host, port, database_name, username, password_env, enabled, read_only, sort_order)
         VALUES
-        ('SH', 'SH（鼎新營運資料）', 'ism-sh', '127.0.0.1', 3306, 'sh', 'root', NULL, 1, 1, 10),
-        ('SMARTDSCSYS', 'SMARTDSCSYS（鼎新系統資料）', 'ism-smartdscsys', '127.0.0.1', 3306, 'smartdscsys', 'root', NULL, 1, 1, 20),
-        ('DSCRPT', 'DSCRPT（鼎新報表資料）', 'ism-dscrpt', '127.0.0.1', 3306, 'dscrpt', 'root', NULL, 1, 1, 30)`);
+        ('SH', 'SH（鼎新營運資料）', 'ism-sh', '127.0.0.1', 3306, 'sh', 'root', NULL, 1, 1, 10)`);
       await addColumnIfMissing('erp_data_sources', 'tenant_id', "VARCHAR(60) NOT NULL DEFAULT 'SH'");
       await addColumnIfMissing('erp_data_sources', 'company_id', "VARCHAR(60) NOT NULL DEFAULT 'SH'");
       await addColumnIfMissing('erp_data_sources', 'source_system', "VARCHAR(60) NOT NULL DEFAULT 'iSM'");
+      await addColumnIfMissing('erp_data_sources', 'target_database', "VARCHAR(120) NULL");
       await pool.query(`UPDATE erp_data_sources
         SET tenant_id=CASE WHEN tenant_id='SH' AND source_key<>'SH' THEN source_key ELSE tenant_id END,
             company_id=CASE WHEN company_id='SH' AND source_key<>'SH' THEN source_key ELSE company_id END,
@@ -451,7 +519,7 @@ export function ensureProcurementSchema() {
         UNIQUE KEY uq_inventory_movement(document_id,warehouse_code,item_code,location_code,lot_no,quantity_delta), KEY ix_inventory_movement_item(item_code,warehouse_code,movement_date)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS sales_document_types (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,tenant_id VARCHAR(60) NOT NULL,company_id VARCHAR(60) NOT NULL,source_system VARCHAR(60) NOT NULL,document_kind ENUM('quotation','sales_order','shipment','sales_return') NOT NULL,type_code VARCHAR(20) NOT NULL,type_name VARCHAR(80) NOT NULL,number_prefix VARCHAR(20) NOT NULL,requires_approval TINYINT(1) NOT NULL DEFAULT 1,is_active TINYINT(1) NOT NULL DEFAULT 1,note VARCHAR(255) NULL,UNIQUE KEY uq_sales_document_type(tenant_id,company_id,source_system,document_kind,type_code)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
-      await pool.query(`CREATE TABLE IF NOT EXISTS sales_documents (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,tenant_id VARCHAR(60) NOT NULL,company_id VARCHAR(60) NOT NULL,source_system VARCHAR(60) NOT NULL,source_database VARCHAR(60) NOT NULL,document_kind ENUM('quotation','sales_order','shipment','sales_return') NOT NULL,document_type VARCHAR(20) NOT NULL,document_no VARCHAR(60) NOT NULL,document_date DATE NOT NULL,customer_code VARCHAR(30) NOT NULL,currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD',warehouse_code VARCHAR(30) NULL,salesperson_code VARCHAR(30) NULL,source_document_id BIGINT UNSIGNED NULL,return_type ENUM('return','allowance') NULL,status ENUM('draft','approved','partial','completed','posted','closed','voided') NOT NULL DEFAULT 'draft',inventory_status VARCHAR(20) NOT NULL DEFAULT 'not_applicable',note VARCHAR(500) NULL,created_by BIGINT UNSIGNED NULL,approved_by BIGINT UNSIGNED NULL,approved_at DATETIME NULL,posted_by BIGINT UNSIGNED NULL,posted_at DATETIME NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,UNIQUE KEY uq_sales_document(tenant_id,company_id,source_system,document_no),KEY ix_sales_document(source_database,document_kind,status,document_date)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS sales_documents (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,tenant_id VARCHAR(60) NOT NULL,company_id VARCHAR(60) NOT NULL,source_system VARCHAR(60) NOT NULL,source_database VARCHAR(60) NOT NULL,document_kind ENUM('quotation','sales_order','shipment','sales_return') NOT NULL,document_type VARCHAR(20) NOT NULL,document_no VARCHAR(60) NOT NULL,document_date DATE NOT NULL,customer_code VARCHAR(30) NOT NULL,currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD',warehouse_code VARCHAR(30) NULL,salesperson_code VARCHAR(30) NULL,source_document_id BIGINT UNSIGNED NULL,return_type ENUM('return','allowance') NULL,status ENUM('draft','approved','partial','completed','posted','closed','voided') NOT NULL DEFAULT 'draft',inventory_status VARCHAR(20) NOT NULL DEFAULT 'not_applicable',note VARCHAR(500) NULL,created_by BIGINT UNSIGNED NULL,approved_by BIGINT UNSIGNED NULL,approved_at DATETIME NULL,posted_by BIGINT UNSIGNED NULL,posted_at DATETIME NULL,closed_by BIGINT UNSIGNED NULL,closed_at DATETIME NULL,close_note VARCHAR(255) NULL,reopened_by BIGINT UNSIGNED NULL,reopened_at DATETIME NULL,reopen_note VARCHAR(255) NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,UNIQUE KEY uq_sales_document(tenant_id,company_id,source_system,document_no),KEY ix_sales_document(source_database,document_kind,status,document_date)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS sales_document_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,document_id BIGINT UNSIGNED NOT NULL,line_no INT UNSIGNED NOT NULL DEFAULT 1,source_item_id BIGINT UNSIGNED NULL,item_code VARCHAR(40) NOT NULL,item_name VARCHAR(160) NULL,specification VARCHAR(160) NULL,unit VARCHAR(20) NOT NULL DEFAULT 'PCS',warehouse_code VARCHAR(30) NULL,quantity DECIMAL(24,3) NOT NULL,related_quantity DECIMAL(24,3) NOT NULL DEFAULT 0,unit_price DECIMAL(24,6) NOT NULL DEFAULT 0,unit_cost DECIMAL(24,6) NOT NULL DEFAULT 0,expected_date DATE NULL,allowance_amount DECIMAL(24,6) NOT NULL DEFAULT 0,note VARCHAR(255) NULL,UNIQUE KEY uq_sales_document_item(document_id,line_no),CONSTRAINT fk_sales_document_item FOREIGN KEY(document_id) REFERENCES sales_documents(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS sales_order_changes (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,tenant_id VARCHAR(60) NOT NULL,company_id VARCHAR(60) NOT NULL,source_system VARCHAR(60) NOT NULL,source_database VARCHAR(60) NOT NULL,change_no VARCHAR(60) NOT NULL,order_item_id BIGINT UNSIGNED NOT NULL,change_date DATE NOT NULL,new_quantity DECIMAL(24,3) NOT NULL,new_unit_price DECIMAL(24,6) NOT NULL,new_expected_date DATE NULL,reason VARCHAR(255) NOT NULL,status ENUM('draft','approved','voided') DEFAULT 'draft',approved_by BIGINT UNSIGNED NULL,approved_at DATETIME NULL,created_by BIGINT UNSIGNED NULL,UNIQUE KEY uq_sales_change(tenant_id,company_id,source_system,change_no)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS erp_master_source_mappings (
@@ -766,12 +834,26 @@ export function ensureProcurementSchema() {
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_procurement_document_type (tenant_id, company_id, source_system, document_kind, type_code)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
-      await pool.query(`INSERT IGNORE INTO procurement_document_types
-        (tenant_id, company_id, source_system, document_kind, type_code, type_name, number_prefix, requires_approval, allow_overage)
-        VALUES ('SH','SH','iSM','requisition','RQ','請購單','RQ',1,0),
-          ('SH','SH','iSM','purchase_order','PO','採購單','PO',1,0),
-          ('SH','SH','iSM','receipt','GR','進貨單','GR',1,0),
-          ('SH','SH','iSM','purchase_return','PR','採購退貨／折讓單','PR',1,0)`);
+      // 不在共用初始化程序寫死 SH 單別。每家公司應由自己的 CMSMQ
+      // 同步單據性質；只有該公司完全沒有對應性質時，API 才建立公司專屬預設值。
+      await addColumnIfMissing('procurement_document_types', 'type_full_name', 'VARCHAR(120) NULL');
+      await addColumnIfMissing('procurement_document_types', 'nature_code', 'VARCHAR(4) NULL');
+      await addColumnIfMissing('procurement_document_types', 'numbering_method', "VARCHAR(12) NOT NULL DEFAULT 'daily'");
+      await addColumnIfMissing('procurement_document_types', 'year_digits', 'TINYINT UNSIGNED NOT NULL DEFAULT 4');
+      await addColumnIfMissing('procurement_document_types', 'serial_digits', 'TINYINT UNSIGNED NOT NULL DEFAULT 4');
+      await addColumnIfMissing('procurement_document_types', 'item_input_method', "VARCHAR(12) NOT NULL DEFAULT 'item'");
+      await addColumnIfMissing('procurement_document_types', 'auto_confirm', 'TINYINT(1) NOT NULL DEFAULT 0');
+      await addColumnIfMissing('procurement_document_types', 'auto_confirm_on_edit', 'TINYINT(1) NOT NULL DEFAULT 0');
+      await addColumnIfMissing('procurement_document_types', 'update_supplier_price', 'TINYINT(1) NOT NULL DEFAULT 0');
+      await addColumnIfMissing('procurement_document_types', 'require_purchase_order', 'TINYINT(1) NOT NULL DEFAULT 0');
+      await addColumnIfMissing('procurement_document_types', 'require_source_document', 'TINYINT(1) NOT NULL DEFAULT 0');
+      await addColumnIfMissing('procurement_document_types', 'source_document_kind', 'VARCHAR(40) NULL');
+      await addColumnIfMissing('procurement_document_types', 'direct_settlement', 'TINYINT(1) NOT NULL DEFAULT 0');
+      await addColumnIfMissing('procurement_document_types', 'settlement_mode', "VARCHAR(12) NOT NULL DEFAULT 'batch'");
+      await addColumnIfMissing('procurement_document_types', 'ap_document_type', 'VARCHAR(20) NULL');
+      await addColumnIfMissing('procurement_document_types', 'is_default', 'TINYINT(1) NOT NULL DEFAULT 0');
+      await addColumnIfMissing('procurement_document_types', 'source_database', 'VARCHAR(60) NULL');
+      await addColumnIfMissing('procurement_document_types', 'source_table', 'VARCHAR(30) NULL');
       for (const table of ['procurement_requisitions','procurement_orders','procurement_receipts']) {
         await addColumnIfMissing(table, 'tenant_id', "VARCHAR(60) NOT NULL DEFAULT 'SH'");
         await addColumnIfMissing(table, 'company_id', "VARCHAR(60) NOT NULL DEFAULT 'SH'");
@@ -782,6 +864,9 @@ export function ensureProcurementSchema() {
       await addColumnIfMissing('procurement_requisition_items', 'suggested_unit_price', 'DECIMAL(18,4) NOT NULL DEFAULT 0');
       await addColumnIfMissing('procurement_requisition_items', 'purchase_locked', 'TINYINT(1) NOT NULL DEFAULT 0');
       await addColumnIfMissing('procurement_order_items', 'qty_cancelled', 'DECIMAL(18,4) NOT NULL DEFAULT 0');
+      await addColumnIfMissing('procurement_orders', 'closed_by', 'BIGINT UNSIGNED NULL');
+      await addColumnIfMissing('procurement_orders', 'closed_at', 'DATETIME NULL');
+      await addColumnIfMissing('procurement_orders', 'close_note', 'VARCHAR(255) NULL');
       await addColumnIfMissing('procurement_receipt_items', 'qty_rejected', 'DECIMAL(18,4) NOT NULL DEFAULT 0');
       await addColumnIfMissing('procurement_receipt_items', 'qty_returned', 'DECIMAL(18,4) NOT NULL DEFAULT 0');
       await addColumnIfMissing('procurement_receipt_items', 'inspection_status', "VARCHAR(30) NOT NULL DEFAULT 'pending'");
@@ -792,6 +877,10 @@ export function ensureProcurementSchema() {
       await addColumnIfMissing('procurement_receipts', 'inventory_status', "VARCHAR(20) NOT NULL DEFAULT 'pending'");
       await addColumnIfMissing('procurement_receipts', 'inventory_posted_by', 'BIGINT UNSIGNED NULL');
       await addColumnIfMissing('procurement_receipts', 'inventory_posted_at', 'DATETIME NULL');
+      await addColumnIfMissing('procurement_receipts', 'arrival_date', 'DATE NULL');
+      await addColumnIfMissing('procurement_receipts', 'delivery_note_no', 'VARCHAR(60) NULL');
+      await addColumnIfMissing('procurement_receipts', 'invoice_no', 'VARCHAR(60) NULL');
+      await addColumnIfMissing('procurement_receipts', 'received_by', 'VARCHAR(30) NULL');
       await pool.query("ALTER TABLE procurement_receipts MODIFY COLUMN status ENUM('draft','pending_inspection','accepted','partially_accepted','rejected','posted','voided') NOT NULL DEFAULT 'draft'");
       await pool.query(`CREATE TABLE IF NOT EXISTS procurement_order_changes (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -847,6 +936,115 @@ export function ensureProcurementSchema() {
         KEY ix_finance_note(source_database,account_type,due_date,status),
         CONSTRAINT fk_finance_note_settlement FOREIGN KEY(settlement_id) REFERENCES finance_settlements(id) ON DELETE SET NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS finance_bank_accounts (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+        source_database VARCHAR(60) NOT NULL, bank_code VARCHAR(30) NOT NULL, bank_name VARCHAR(120) NOT NULL,
+        account_no VARCHAR(80) NOT NULL, currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD',
+        opening_balance DECIMAL(24,6) NOT NULL DEFAULT 0, current_balance DECIMAL(24,6) NOT NULL DEFAULT 0,
+        is_active TINYINT(1) NOT NULL DEFAULT 1, note VARCHAR(500) NULL,
+        created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_finance_bank_account(tenant_id,company_id,source_system,source_database,bank_code,account_no),
+        KEY ix_finance_bank_account(source_database,is_active)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS finance_bank_transactions (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+        source_database VARCHAR(60) NOT NULL, bank_account_id BIGINT UNSIGNED NOT NULL,
+        transaction_no VARCHAR(60) NOT NULL, transaction_date DATE NOT NULL,
+        transaction_type VARCHAR(30) NOT NULL, direction ENUM('in','out') NOT NULL,
+        amount DECIMAL(24,6) NOT NULL, reference_type VARCHAR(40) NULL, reference_id BIGINT UNSIGNED NULL,
+        reference_no VARCHAR(80) NULL, counterparty VARCHAR(80) NULL, memo VARCHAR(500) NULL,
+        status ENUM('draft','posted','voided') NOT NULL DEFAULT 'draft',
+        reconciled TINYINT(1) NOT NULL DEFAULT 0, reconciled_at DATETIME NULL,
+        created_by BIGINT UNSIGNED NULL, posted_by BIGINT UNSIGNED NULL, posted_at DATETIME NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_finance_bank_transaction(tenant_id,company_id,source_system,source_database,transaction_no),
+        KEY ix_finance_bank_transaction(bank_account_id,transaction_date,status,reconciled),
+        CONSTRAINT fk_finance_bank_transaction_account FOREIGN KEY(bank_account_id) REFERENCES finance_bank_accounts(id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS finance_bank_reconciliations (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+        source_database VARCHAR(60) NOT NULL, bank_account_id BIGINT UNSIGNED NOT NULL,
+        reconciliation_date DATE NOT NULL, statement_balance DECIMAL(24,6) NOT NULL,
+        book_balance DECIMAL(24,6) NOT NULL, difference_amount DECIMAL(24,6) NOT NULL,
+        status ENUM('draft','completed','difference') NOT NULL DEFAULT 'draft', note VARCHAR(500) NULL,
+        created_by BIGINT UNSIGNED NULL, completed_by BIGINT UNSIGNED NULL, completed_at DATETIME NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        KEY ix_finance_bank_reconciliation(bank_account_id,reconciliation_date,status),
+        CONSTRAINT fk_finance_bank_reconciliation_account FOREIGN KEY(bank_account_id) REFERENCES finance_bank_accounts(id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS finance_opening_balances (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+        source_database VARCHAR(60) NOT NULL, account_type ENUM('AR','AP') NOT NULL,
+        opening_no VARCHAR(60) NOT NULL, opening_date DATE NOT NULL, due_date DATE NULL,
+        party_code VARCHAR(30) NOT NULL, source_document_no VARCHAR(80) NULL,
+        currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD', original_amount DECIMAL(24,6) NOT NULL,
+        status ENUM('draft','approved','posted','voided') NOT NULL DEFAULT 'draft', note VARCHAR(500) NULL,
+        created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL,
+        posted_by BIGINT UNSIGNED NULL, posted_at DATETIME NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_finance_opening_balance(tenant_id,company_id,source_system,source_database,account_type,opening_no),
+        KEY ix_finance_opening_balance(source_database,account_type,opening_date,status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS accounting_year_closings (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+        source_database VARCHAR(60) NOT NULL, fiscal_year CHAR(4) NOT NULL, closing_no VARCHAR(60) NOT NULL,
+        close_date DATE NOT NULL, retained_earnings_account_code VARCHAR(30) NOT NULL DEFAULT '3201',
+        retained_earnings_account_name VARCHAR(120) NOT NULL DEFAULT '保留盈餘',
+        net_income DECIMAL(24,6) NOT NULL DEFAULT 0, journal_id BIGINT UNSIGNED NULL,
+        status ENUM('draft','posted','voided') NOT NULL DEFAULT 'draft', note VARCHAR(500) NULL,
+        created_by BIGINT UNSIGNED NULL, posted_by BIGINT UNSIGNED NULL, posted_at DATETIME NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_accounting_year_closing(tenant_id,company_id,source_system,source_database,fiscal_year),
+        KEY ix_accounting_year_closing(source_database,fiscal_year,status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      const [noteColumns] = await pool.query(`SELECT column_name FROM information_schema.columns
+        WHERE table_schema=DATABASE() AND table_name='finance_notes'`);
+      const noteColumnSet = new Set(noteColumns.map(x => String(x.column_name || x.COLUMN_NAME || '').toLowerCase()));
+      for (const [column, definition] of [
+        ['bank_account_id','BIGINT UNSIGNED NULL'],['status_date','DATE NULL'],
+        ['status_by','BIGINT UNSIGNED NULL'],['status_note','VARCHAR(500) NULL']
+      ]) {
+        if (!noteColumnSet.has(column.toLowerCase())) await pool.query(`ALTER TABLE finance_notes ADD COLUMN \`${column}\` ${definition}`);
+      }
+      const [noteIndexes] = await pool.query(`SELECT constraint_name FROM information_schema.table_constraints
+        WHERE table_schema=DATABASE() AND table_name='finance_notes' AND constraint_type='FOREIGN KEY'`);
+      if (!noteIndexes.some(x => String(x.constraint_name || x.CONSTRAINT_NAME || '').toLowerCase() === 'fk_finance_note_bank_account')) {
+        await pool.query(`ALTER TABLE finance_notes ADD CONSTRAINT fk_finance_note_bank_account
+          FOREIGN KEY(bank_account_id) REFERENCES finance_bank_accounts(id) ON DELETE SET NULL`);
+      }
+      await pool.query(`CREATE TABLE IF NOT EXISTS accounting_accounts (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+        account_code VARCHAR(30) NOT NULL, account_name VARCHAR(120) NOT NULL,
+        account_type ENUM('asset','liability','equity','revenue','expense') NOT NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_accounting_account(tenant_id,company_id,source_system,account_code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS accounting_journals (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+        journal_no VARCHAR(60) NOT NULL, journal_date DATE NOT NULL, source_kind VARCHAR(30) NOT NULL,
+        source_id BIGINT UNSIGNED NOT NULL, source_document_no VARCHAR(60) NULL,
+        status ENUM('draft','posted','voided') NOT NULL DEFAULT 'draft', memo VARCHAR(500) NULL,
+        created_by BIGINT UNSIGNED NULL, posted_by BIGINT UNSIGNED NULL, posted_at DATETIME NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_accounting_journal_no(tenant_id,company_id,source_system,journal_no),
+        UNIQUE KEY uq_accounting_journal_source(tenant_id,company_id,source_system,source_kind,source_id),
+        KEY ix_accounting_journal(source_database,journal_date,status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS accounting_journal_lines (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, journal_id BIGINT UNSIGNED NOT NULL, line_no INT UNSIGNED NOT NULL,
+        account_code VARCHAR(30) NOT NULL, account_name VARCHAR(120) NOT NULL,
+        debit_amount DECIMAL(24,6) NOT NULL DEFAULT 0, credit_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+        party_code VARCHAR(30) NULL, description VARCHAR(255) NULL,
+        UNIQUE KEY uq_accounting_journal_line(journal_id,line_no),
+        CONSTRAINT fk_accounting_journal_line FOREIGN KEY(journal_id) REFERENCES accounting_journals(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS access_roles (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         role_code VARCHAR(30) NOT NULL UNIQUE,
@@ -879,7 +1077,8 @@ export function ensureProcurementSchema() {
       for (const role of defaultRoles) {
         await pool.query('INSERT IGNORE INTO access_roles (role_code, role_name, description, is_system) VALUES (?, ?, ?, ?)', role);
       }
-      const accessFeatures = ['sales-document-types','sales-quotations','sales-orders','sales-order-changes','sales-shipments','sales-returns','sales-progress','sales-open-orders','access-control', 'basicdata', 'warehouses', 'departments', 'employees', 'source-customers', 'source-suppliers', 'inventory-opening', 'inventory-document-types', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-new-ledger', 'inventory-new-balance', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'inventory-movement-stats', 'department-movement-stats', 'procurement-document-types', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'receipt-entry', 'receipt-inspection', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts'];
+      const accessFeatures = ['sales-document-types','sales-quotations','sales-orders','sales-order-changes','sales-shipments','sales-returns','sales-progress','sales-open-orders','accounting-general-ledger','accounting-drafts','accounting-periods','accounting-auto-rules','accounting-clearing','accounting-opening-balances','accounting-year-close','bank-ledger','finance-bookkeeping','finance-cash','finance-reconcile','operations-health','operations-reports','sales-flow-audit','purchase-flow-audit','architecture-flow','access-control','import-monitor','data-quality', 'basicdata', 'warehouses', 'departments', 'employees', 'source-customers', 'source-suppliers', 'inventory-opening', 'inventory-document-types', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-reversals', 'inventory-new-ledger', 'inventory-new-balance', 'procurement-document-types', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'receipt-arrival', 'receipt-entry', 'receipt-inspection', 'receipt-rejected-return', 'receipt-posting', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts'];
+      await pool.query("DELETE FROM access_role_permissions WHERE feature_code IN ('inventory-detail','inventory-ledger','inventory-balance','inventory-movement-stats','department-movement-stats')");
       const [[admin]] = await pool.query("SELECT id FROM access_roles WHERE role_code='ADMIN'");
       for (const feature of accessFeatures) {
         await pool.query(`INSERT IGNORE INTO access_role_permissions
@@ -887,11 +1086,11 @@ export function ensureProcurementSchema() {
           VALUES (?, ?, 1, 1, 1, 1, 1)`, [admin.id, feature]);
       }
       const initialRoleFeatures = {
-        REQUESTER: ['basicdata', 'requisition-entry'],
-        PURCHASER: ['basicdata', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts'],
-        WAREHOUSE: ['inventory-opening', 'inventory-document-types', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-new-ledger', 'inventory-new-balance', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'receipt-entry', 'receipt-inspection', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts'],
-        FINANCE: ['basicdata', 'purchase-receipts'],
-        VIEWER: ['basicdata', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'purchase-receipts']
+        REQUESTER: ['basicdata', 'requisition-entry', 'architecture-flow'],
+        PURCHASER: ['basicdata', 'procurement-document-types', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'receipt-arrival', 'receipt-posting', 'purchase-returns', 'receipt-rejected-return', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts', 'purchase-flow-audit', 'operations-reports', 'architecture-flow'],
+        WAREHOUSE: ['inventory-opening', 'inventory-document-types', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-reversals', 'inventory-new-ledger', 'inventory-new-balance', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'receipt-arrival', 'receipt-entry', 'receipt-inspection', 'receipt-rejected-return', 'receipt-posting', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts', 'operations-reports'],
+        FINANCE: ['basicdata', 'purchase-receipts', 'accounting-drafts', 'accounting-periods', 'accounting-auto-rules', 'accounting-general-ledger', 'accounting-clearing', 'accounting-opening-balances', 'accounting-year-close', 'bank-ledger', 'finance-bookkeeping', 'finance-cash', 'finance-reconcile', 'operations-health', 'operations-reports', 'sales-flow-audit', 'purchase-flow-audit', 'architecture-flow'],
+        VIEWER: ['basicdata', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'purchase-receipts', 'operations-health', 'operations-reports', 'architecture-flow']
       };
       for (const [roleCode, features] of Object.entries(initialRoleFeatures)) {
         const [[role]] = await pool.query('SELECT id FROM access_roles WHERE role_code=?', [roleCode]);
@@ -902,8 +1101,8 @@ export function ensureProcurementSchema() {
         }
       }
       const elevatedRoleFeatures = {
-        PURCHASER: ['requisition-maintenance', 'purchase-order-changes', 'purchase-returns'],
-        WAREHOUSE: ['receipt-inspection', 'purchase-returns', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting']
+        PURCHASER: ['procurement-document-types', 'requisition-maintenance', 'purchase-order-changes', 'purchase-returns', 'receipt-rejected-return'],
+        WAREHOUSE: ['receipt-arrival', 'receipt-entry', 'receipt-inspection', 'receipt-rejected-return', 'receipt-posting', 'purchase-returns', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-reversals']
       };
       for (const [roleCode, features] of Object.entries(elevatedRoleFeatures)) {
         const [[role]] = await pool.query('SELECT id FROM access_roles WHERE role_code=?', [roleCode]);
@@ -918,6 +1117,20 @@ export function ensureProcurementSchema() {
       await pool.query(`INSERT INTO access_role_permissions(role_id,feature_code,can_view,can_create,can_update,can_delete,can_approve) VALUES(?,'finance-workflow',1,1,1,1,1) ON DUPLICATE KEY UPDATE can_view=1,can_create=1,can_update=1,can_approve=1`,[admin.id]);
       const [[financeRole]] = await pool.query("SELECT id FROM access_roles WHERE role_code='FINANCE'");
       await pool.query(`INSERT INTO access_role_permissions(role_id,feature_code,can_view,can_create,can_update,can_delete,can_approve) VALUES(?,'finance-workflow',1,1,1,0,1) ON DUPLICATE KEY UPDATE can_view=1,can_create=1,can_update=1,can_approve=1`,[financeRole.id]);
+      await pool.query(`INSERT INTO access_role_permissions(role_id,feature_code,can_view,can_create,can_update,can_delete,can_approve)
+        VALUES(?,'accounting-drafts',1,1,1,0,1)
+        ON DUPLICATE KEY UPDATE can_view=1,can_create=1,can_update=1,can_approve=1`,[financeRole.id]);
+      for (const [feature, canCreate, canUpdate, canApprove] of [
+        ['finance-bookkeeping', 0, 0, 0],
+        ['finance-cash', 1, 1, 1],
+        ['finance-reconcile', 1, 0, 1]
+      ]) {
+        await pool.query(`INSERT INTO access_role_permissions
+          (role_id,feature_code,can_view,can_create,can_update,can_delete,can_approve)
+          VALUES(?,?,1,?,?,0,?)
+          ON DUPLICATE KEY UPDATE can_view=1,can_create=VALUES(can_create),can_update=VALUES(can_update),can_approve=VALUES(can_approve)`,
+          [financeRole.id, feature, canCreate, canUpdate, canApprove]);
+      }
       await pool.query(`INSERT INTO access_role_permissions
         (role_id, feature_code, can_view, can_create, can_update, can_delete, can_approve)
         VALUES (?, 'inventory-opening', 1, 1, 1, 0, 0)
@@ -935,6 +1148,14 @@ export function ensureProcurementSchema() {
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         CONSTRAINT fk_access_user_role FOREIGN KEY (role_id) REFERENCES access_roles(id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS access_user_companies (
+        user_id BIGINT UNSIGNED NOT NULL,
+        source_key VARCHAR(60) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(user_id,source_key),
+        CONSTRAINT fk_access_user_company_user FOREIGN KEY(user_id) REFERENCES access_users(id) ON DELETE CASCADE,
+        CONSTRAINT fk_access_user_company_source FOREIGN KEY(source_key) REFERENCES erp_data_sources(source_key) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS access_sessions (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -975,6 +1196,826 @@ export function ensureProcurementSchema() {
     })();
   }
   return procurementSchemaPromise;
+}
+
+// Historical import quality findings are control records.  They are kept in
+// the application/control database instead of the legacy source database so
+// that an audit or a correction decision can never mutate SH/SC data.
+let importQualitySchemaPromise;
+export function ensureImportQualitySchema() {
+  if (!importQualitySchemaPromise) {
+    importQualitySchemaPromise = (async () => {
+      await pool.query(`CREATE TABLE IF NOT EXISTS erp_import_quality_issues (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        batch_id BIGINT UNSIGNED NULL,
+        tenant_id VARCHAR(60) NOT NULL,
+        company_id VARCHAR(60) NOT NULL,
+        source_system VARCHAR(60) NOT NULL,
+        source_database VARCHAR(60) NOT NULL,
+        issue_code VARCHAR(80) NOT NULL,
+        severity ENUM('info','warning','error') NOT NULL DEFAULT 'warning',
+        status ENUM('open','acknowledged','correction_pending','resolved','ignored') NOT NULL DEFAULT 'open',
+        source_table VARCHAR(120) NOT NULL,
+        source_key VARCHAR(255) NOT NULL,
+        target_table VARCHAR(120) NULL,
+        target_id BIGINT UNSIGNED NULL,
+        document_kind VARCHAR(60) NULL,
+        document_type VARCHAR(30) NULL,
+        document_no VARCHAR(120) NULL,
+        line_no INT UNSIGNED NULL,
+        item_code VARCHAR(60) NULL,
+        expected_json JSON NULL,
+        actual_json JSON NULL,
+        rule_description VARCHAR(1000) NOT NULL,
+        recommended_action VARCHAR(1000) NULL,
+        resolution_type VARCHAR(40) NULL,
+        resolution_note VARCHAR(1000) NULL,
+        correction_no VARCHAR(60) NULL,
+        decided_by BIGINT UNSIGNED NULL,
+        decided_at DATETIME NULL,
+        resolved_by BIGINT UNSIGNED NULL,
+        resolved_at DATETIME NULL,
+        last_seen_at DATETIME NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_erp_import_quality_issue (source_database, issue_code, source_key),
+        KEY ix_erp_import_quality_context (tenant_id, company_id, source_system, source_database, status, severity),
+        KEY ix_erp_import_quality_document (source_database, document_no, document_kind),
+        KEY ix_erp_import_quality_batch (batch_id),
+        CONSTRAINT fk_erp_import_quality_batch FOREIGN KEY (batch_id) REFERENCES erp_import_batches(id) ON DELETE SET NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS erp_import_quality_events (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        issue_id BIGINT UNSIGNED NOT NULL,
+        action_code VARCHAR(40) NOT NULL,
+        from_status VARCHAR(30) NULL,
+        to_status VARCHAR(30) NOT NULL,
+        note VARCHAR(1000) NULL,
+        actor_id BIGINT UNSIGNED NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        KEY ix_erp_import_quality_event_issue (issue_id, created_at),
+        CONSTRAINT fk_erp_import_quality_event_issue FOREIGN KEY (issue_id) REFERENCES erp_import_quality_issues(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+    })();
+  }
+  return importQualitySchemaPromise;
+}
+
+export async function ensureTargetProcurementTypeSchema() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS procurement_document_types (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL,company_id VARCHAR(60) NOT NULL,source_system VARCHAR(60) NOT NULL,
+    document_kind ENUM('requisition','purchase_order','receipt','purchase_return') NOT NULL,
+    type_code VARCHAR(20) NOT NULL,type_name VARCHAR(80) NOT NULL,number_prefix VARCHAR(12) NOT NULL,
+    requires_approval TINYINT(1) NOT NULL DEFAULT 1,allow_overage DECIMAL(8,2) NOT NULL DEFAULT 0,
+    is_active TINYINT(1) NOT NULL DEFAULT 1,note VARCHAR(255) NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_procurement_document_type(tenant_id,company_id,source_system,document_kind,type_code)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  const columns = [
+    ['type_full_name','VARCHAR(120) NULL'],['nature_code','VARCHAR(4) NULL'],['numbering_method',"VARCHAR(12) NOT NULL DEFAULT 'daily'"],
+    ['year_digits','TINYINT UNSIGNED NOT NULL DEFAULT 4'],['serial_digits','TINYINT UNSIGNED NOT NULL DEFAULT 4'],
+    ['item_input_method',"VARCHAR(12) NOT NULL DEFAULT 'item'"],['auto_confirm','TINYINT(1) NOT NULL DEFAULT 0'],
+    ['auto_confirm_on_edit','TINYINT(1) NOT NULL DEFAULT 0'],['update_supplier_price','TINYINT(1) NOT NULL DEFAULT 0'],
+    ['require_purchase_order','TINYINT(1) NOT NULL DEFAULT 0'],['settlement_mode',"VARCHAR(12) NOT NULL DEFAULT 'batch'"],
+    ['require_source_document','TINYINT(1) NOT NULL DEFAULT 0'],['source_document_kind','VARCHAR(40) NULL'],
+    ['direct_settlement','TINYINT(1) NOT NULL DEFAULT 0'],
+    ['ap_document_type','VARCHAR(20) NULL'],['is_default','TINYINT(1) NOT NULL DEFAULT 0'],
+    ['source_database','VARCHAR(60) NULL'],['source_table','VARCHAR(30) NULL']
+  ];
+  for (const [column, definition] of columns) await addColumnIfMissing('procurement_document_types', column, definition);
+}
+
+export async function ensureTargetReceiptWorkflowSchema() {
+  const orderColumns = [
+    ['closed_by','BIGINT UNSIGNED NULL'],['closed_at','DATETIME NULL'],['close_note','VARCHAR(255) NULL']
+  ];
+  const receiptColumns = [
+    ['updated_at','TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'],
+    ['inventory_status',"VARCHAR(20) NOT NULL DEFAULT 'pending'"],
+    ['inventory_posted_by','BIGINT UNSIGNED NULL'],['inventory_posted_at','DATETIME NULL'],
+    ['arrival_date','DATE NULL'],['delivery_note_no','VARCHAR(60) NULL'],
+    ['invoice_no','VARCHAR(60) NULL'],['received_by','VARCHAR(30) NULL']
+  ];
+  const itemColumns = [
+    ['qty_rejected','DECIMAL(18,4) NOT NULL DEFAULT 0'],['qty_returned','DECIMAL(18,4) NOT NULL DEFAULT 0'],
+    ['freight_amount','DECIMAL(24,6) NOT NULL DEFAULT 0'],['insurance_amount','DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['other_expense_amount','DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['inspection_status',"VARCHAR(30) NOT NULL DEFAULT 'pending'"],['inspection_note','VARCHAR(255) NULL'],
+    ['inspected_by','BIGINT UNSIGNED NULL'],['inspected_at','DATETIME NULL'],
+    ['qty_rejected_returned','DECIMAL(18,4) NOT NULL DEFAULT 0']
+  ];
+  for (const [column, definition] of orderColumns) await addColumnIfMissing('procurement_orders', column, definition);
+  for (const [column, definition] of receiptColumns) await addColumnIfMissing('procurement_receipts', column, definition);
+  for (const [column, definition] of itemColumns) await addColumnIfMissing('procurement_receipt_items', column, definition);
+  // 暫入／暫出歸還必須指回原暫入／暫出單，才能核對尚未歸還量；不與客戶原始資料庫共用。
+  await addColumnIfMissing('inventory_documents', 'related_document_id', 'BIGINT UNSIGNED NULL');
+  await addColumnIfMissing('inventory_documents', 'related_document_no', 'VARCHAR(60) NULL');
+  await pool.query(`CREATE TABLE IF NOT EXISTS procurement_rejected_returns (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL DEFAULT 'SH', company_id VARCHAR(60) NOT NULL DEFAULT 'SH', source_system VARCHAR(60) NOT NULL DEFAULT 'iSM',
+    source_database VARCHAR(30) NOT NULL DEFAULT 'SH', receipt_id BIGINT UNSIGNED NOT NULL, receipt_item_id BIGINT UNSIGNED NOT NULL,
+    returned_date DATE NOT NULL, returned_quantity DECIMAL(18,4) NOT NULL,
+    returned_by VARCHAR(30) NOT NULL, note VARCHAR(255) NULL, created_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_rejected_return_item(source_database,receipt_item_id,returned_date),
+    CONSTRAINT fk_rejected_return_receipt FOREIGN KEY (receipt_id) REFERENCES procurement_receipts(id) ON DELETE CASCADE,
+    CONSTRAINT fk_rejected_return_item FOREIGN KEY (receipt_item_id) REFERENCES procurement_receipt_items(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query("ALTER TABLE procurement_receipts MODIFY COLUMN status ENUM('draft','pending_inspection','accepted','partially_accepted','rejected','posted','voided') NOT NULL DEFAULT 'draft'");
+}
+
+// A posted document is immutable.  Corrections are represented by a separate
+// reversal header/detail pair and an inverse inventory ledger entry.  The
+// original document and its original ledger rows are deliberately preserved.
+export async function ensureTargetReversalSchema() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_reversal_documents (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL,
+    company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL,
+    reversal_no VARCHAR(60) NOT NULL,
+    source_kind VARCHAR(40) NOT NULL,
+    source_document_id BIGINT UNSIGNED NOT NULL,
+    source_document_no VARCHAR(60) NOT NULL,
+    source_document_type VARCHAR(30) NULL,
+    source_date DATE NOT NULL,
+    reversal_date DATE NOT NULL,
+    reason VARCHAR(500) NOT NULL,
+    replacement_note VARCHAR(500) NULL,
+    status ENUM('draft','approved','posted','voided') NOT NULL DEFAULT 'draft',
+    created_by BIGINT UNSIGNED NULL,
+    approved_by BIGINT UNSIGNED NULL,
+    approved_at DATETIME NULL,
+    posted_by BIGINT UNSIGNED NULL,
+    posted_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_reversal_no (tenant_id,company_id,source_system,reversal_no),
+    UNIQUE KEY uq_erp_reversal_source (tenant_id,company_id,source_system,source_kind,source_document_id),
+    KEY ix_erp_reversal_status (tenant_id,company_id,source_system,status,reversal_date)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_reversal_items (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    reversal_id BIGINT UNSIGNED NOT NULL,
+    source_ledger_id BIGINT UNSIGNED NOT NULL,
+    item_code VARCHAR(40) NOT NULL,
+    warehouse_code VARCHAR(30) NOT NULL,
+    location_code VARCHAR(30) NOT NULL DEFAULT '',
+    lot_no VARCHAR(80) NOT NULL DEFAULT '',
+    quantity_delta DECIMAL(24,3) NOT NULL DEFAULT 0,
+    unit_cost DECIMAL(24,6) NOT NULL DEFAULT 0,
+    amount_delta DECIMAL(24,6) NOT NULL DEFAULT 0,
+    note VARCHAR(255) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_reversal_item_source (reversal_id,source_ledger_id),
+    CONSTRAINT fk_erp_reversal_item_header FOREIGN KEY (reversal_id) REFERENCES erp_reversal_documents(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await addColumnIfMissing('erp_reversal_documents', 'replacement_kind', 'VARCHAR(40) NULL');
+  await addColumnIfMissing('erp_reversal_documents', 'replacement_document_id', 'BIGINT UNSIGNED NULL');
+  await addColumnIfMissing('erp_reversal_documents', 'replacement_document_no', 'VARCHAR(60) NULL');
+}
+
+// Sales reversal/reopen audit fields live in inventory_erp only.  They keep
+// the original customer ERP documents untouched while recording the
+// controlled order unlock/reopen operation in the target ERP.
+export async function ensureTargetSalesWorkflowSchema() {
+  const typeColumns = [
+    ['type_full_name', 'VARCHAR(120) NULL'], ['nature_code', 'VARCHAR(4) NULL'],
+    ['numbering_method', "VARCHAR(12) NOT NULL DEFAULT 'daily'"], ['year_digits', 'TINYINT UNSIGNED NOT NULL DEFAULT 4'],
+    ['serial_digits', 'TINYINT UNSIGNED NOT NULL DEFAULT 4'], ['item_input_method', "VARCHAR(12) NOT NULL DEFAULT 'item'"],
+    ['auto_confirm', 'TINYINT(1) NOT NULL DEFAULT 0'], ['auto_confirm_on_edit', 'TINYINT(1) NOT NULL DEFAULT 0'],
+    ['update_customer_price', 'TINYINT(1) NOT NULL DEFAULT 0'], ['require_sales_order', 'TINYINT(1) NOT NULL DEFAULT 0'],
+    ['settlement_mode', "VARCHAR(20) NOT NULL DEFAULT 'batch'"], ['ar_document_type', 'VARCHAR(20) NULL'],
+    ['require_source_document', 'TINYINT(1) NOT NULL DEFAULT 0'], ['source_document_kind', 'VARCHAR(40) NULL'],
+    ['direct_settlement', 'TINYINT(1) NOT NULL DEFAULT 0'],
+    ['is_default', 'TINYINT(1) NOT NULL DEFAULT 0'], ['source_database', 'VARCHAR(60) NULL'], ['source_table', 'VARCHAR(60) NULL']
+  ];
+  for (const [column, definition] of typeColumns) await addColumnIfMissing('sales_document_types', column, definition);
+  const columns = [
+    ['closed_by', 'BIGINT UNSIGNED NULL'],
+    ['closed_at', 'DATETIME NULL'],
+    ['close_note', 'VARCHAR(255) NULL'],
+    ['reopened_by', 'BIGINT UNSIGNED NULL'],
+    ['reopened_at', 'DATETIME NULL'],
+    ['reopen_note', 'VARCHAR(255) NULL']
+  ];
+  for (const [column, definition] of columns) await addColumnIfMissing('sales_documents', column, definition);
+  for (const [column, definition] of [
+    ['version_no', 'INT UNSIGNED NULL'],
+    ['old_quantity', 'DECIMAL(24,3) NULL'],
+    ['old_unit_price', 'DECIMAL(24,6) NULL'],
+    ['old_expected_date', 'DATE NULL'],
+    ['applied_at', 'DATETIME NULL']
+  ]) await addColumnIfMissing('sales_order_changes', column, definition);
+  await pool.query(`CREATE TABLE IF NOT EXISTS sales_order_versions (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, order_id BIGINT UNSIGNED NOT NULL, order_item_id BIGINT UNSIGNED NULL,
+    version_no INT UNSIGNED NOT NULL, change_kind VARCHAR(40) NOT NULL,
+    source_kind VARCHAR(40) NULL, source_document_id BIGINT UNSIGNED NULL, source_document_no VARCHAR(60) NULL,
+    before_status VARCHAR(20) NULL, after_status VARCHAR(20) NULL,
+    before_quantity DECIMAL(24,3) NULL, after_quantity DECIMAL(24,3) NULL,
+    before_delivered_quantity DECIMAL(24,3) NULL, after_delivered_quantity DECIMAL(24,3) NULL,
+    before_unit_price DECIMAL(24,6) NULL, after_unit_price DECIMAL(24,6) NULL,
+    reason VARCHAR(500) NOT NULL, changed_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_sales_order_version(tenant_id,company_id,source_system,order_id,version_no),
+    KEY ix_sales_order_version_lookup(source_database,order_id,order_item_id,created_at),
+    KEY ix_sales_order_version_source(source_database,source_kind,source_document_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+}
+
+// Unified document nature configuration.  This is the target ERP control
+// table; legacy CMSMQ/ACR/ACP/ACT data is only used as a source reference and
+// is never updated.  The source_database key is intentional because one
+// company may import more than one ERP database with different rules.
+export async function ensureTargetDocumentNatureSchema() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_document_natures (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, module_code VARCHAR(12) NOT NULL,
+    document_kind VARCHAR(40) NOT NULL, nature_code VARCHAR(12) NOT NULL,
+    type_code VARCHAR(20) NOT NULL, type_name VARCHAR(80) NOT NULL, type_full_name VARCHAR(120) NULL,
+    number_prefix VARCHAR(20) NOT NULL, numbering_method VARCHAR(12) NOT NULL DEFAULT 'daily',
+    year_digits TINYINT UNSIGNED NOT NULL DEFAULT 4, serial_digits TINYINT UNSIGNED NOT NULL DEFAULT 4,
+    requires_approval TINYINT(1) NOT NULL DEFAULT 1, auto_confirm TINYINT(1) NOT NULL DEFAULT 0,
+    direct_settlement TINYINT(1) NOT NULL DEFAULT 0, settlement_mode VARCHAR(20) NOT NULL DEFAULT 'batch',
+    require_source_document TINYINT(1) NOT NULL DEFAULT 0, source_document_kind VARCHAR(40) NULL,
+    inventory_effect VARCHAR(20) NOT NULL DEFAULT 'none',
+    debit_account_code VARCHAR(30) NULL, debit_account_name VARCHAR(120) NULL,
+    credit_account_code VARCHAR(30) NULL, credit_account_name VARCHAR(120) NULL,
+    is_default TINYINT(1) NOT NULL DEFAULT 0, is_active TINYINT(1) NOT NULL DEFAULT 1,
+    source_table VARCHAR(60) NULL, source_status VARCHAR(30) NOT NULL DEFAULT 'standard_default',
+    note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_document_nature(tenant_id,company_id,source_system,source_database,module_code,document_kind,type_code),
+    KEY ix_erp_document_nature_lookup(tenant_id,company_id,source_system,source_database,module_code,document_kind,is_active)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+}
+
+// Finance vouchers are the application-side equivalent of iSM ACRTA/ACRTB
+// and ACPTA/ACPTB.  They live in the selected target database only; the
+// legacy source database remains read-only.  A voucher header may collect
+// many source lines, while the same source line may be allocated partially
+// across more than one voucher.
+export async function ensureTargetFinanceWorkflowSchema() {
+  // 部分既有公司目標庫是由較早版本建立，只有應收／應付基本表，
+  // 尚未建立銀行三表。先以增量方式補齊核心表，避免新公司啟動時因 ALTER
+  // 找不到資料表而整個服務無法啟動；不會碰觸來源 ERP 資料庫。
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_open_items (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL, account_type ENUM('AR','AP') NOT NULL,
+    document_no VARCHAR(60) NOT NULL, document_date DATE NOT NULL, due_date DATE NULL, party_code VARCHAR(30) NOT NULL,
+    currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD', source_kind VARCHAR(30) NOT NULL, source_document_id BIGINT UNSIGNED NULL,
+    source_document_no VARCHAR(60) NULL, original_amount DECIMAL(24,6) NOT NULL, settled_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    balance_amount DECIMAL(24,6) NOT NULL, status ENUM('draft','approved','open','partial','settled','voided') NOT NULL DEFAULT 'draft',
+    note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL,
+    posted_by BIGINT UNSIGNED NULL, posted_at DATETIME NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_open_item(tenant_id,company_id,source_system,account_type,document_no),
+    UNIQUE KEY uq_finance_source(tenant_id,company_id,source_system,account_type,source_kind,source_document_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_opening_balances (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    account_type ENUM('AR','AP') NOT NULL, opening_no VARCHAR(60) NOT NULL,
+    opening_date DATE NOT NULL, due_date DATE NULL, party_code VARCHAR(30) NOT NULL,
+    source_document_no VARCHAR(80) NULL, currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD',
+    original_amount DECIMAL(24,6) NOT NULL,
+    status ENUM('draft','approved','posted','voided') NOT NULL DEFAULT 'draft',
+    note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL,
+    approved_at DATETIME NULL, posted_by BIGINT UNSIGNED NULL, posted_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_opening_balance(tenant_id,company_id,source_system,source_database,account_type,opening_no),
+    KEY ix_finance_opening_balance(source_database,account_type,opening_date,status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_settlements (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL, account_type ENUM('AR','AP') NOT NULL,
+    settlement_no VARCHAR(60) NOT NULL, settlement_date DATE NOT NULL, party_code VARCHAR(30) NOT NULL,
+    payment_method VARCHAR(30) NULL, bank_code VARCHAR(30) NULL, reference_no VARCHAR(80) NULL, amount DECIMAL(24,6) NOT NULL,
+    status ENUM('draft','approved','posted','voided') NOT NULL DEFAULT 'draft', note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL,
+    posted_by BIGINT UNSIGNED NULL, posted_at DATETIME NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_settlement(tenant_id,company_id,source_system,account_type,settlement_no)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_allocations (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, settlement_id BIGINT UNSIGNED NOT NULL, open_item_id BIGINT UNSIGNED NOT NULL,
+    allocated_amount DECIMAL(24,6) NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_allocation(settlement_id,open_item_id),
+    CONSTRAINT fk_finance_allocation_settlement FOREIGN KEY(settlement_id) REFERENCES finance_settlements(id) ON DELETE CASCADE,
+    CONSTRAINT fk_finance_allocation_open_item FOREIGN KEY(open_item_id) REFERENCES finance_open_items(id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_notes (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL, account_type ENUM('AR','AP') NOT NULL,
+    note_no VARCHAR(60) NOT NULL, note_type VARCHAR(20) NOT NULL, issue_date DATE NOT NULL, due_date DATE NOT NULL,
+    party_code VARCHAR(30) NOT NULL, bank_code VARCHAR(30) NULL, bank_account VARCHAR(60) NULL, amount DECIMAL(24,6) NOT NULL,
+    settlement_id BIGINT UNSIGNED NULL, status ENUM('draft','received','issued','deposited','cashed','honored','dishonored','voided') NOT NULL DEFAULT 'draft',
+    memo VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_note(tenant_id,company_id,source_system,account_type,note_no),
+    KEY ix_finance_note(source_database,account_type,due_date,status),
+    CONSTRAINT fk_finance_note_settlement FOREIGN KEY(settlement_id) REFERENCES finance_settlements(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_bank_accounts (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL, bank_code VARCHAR(30) NOT NULL,
+    bank_name VARCHAR(120) NOT NULL, account_no VARCHAR(80) NOT NULL, currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD',
+    opening_balance DECIMAL(24,6) NOT NULL DEFAULT 0, current_balance DECIMAL(24,6) NOT NULL DEFAULT 0,
+    is_active TINYINT(1) NOT NULL DEFAULT 1, note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_bank_account(tenant_id,company_id,source_system,source_database,bank_code,account_no),
+    KEY ix_finance_bank_account(source_database,is_active)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_bank_transactions (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL, bank_account_id BIGINT UNSIGNED NOT NULL,
+    transaction_no VARCHAR(60) NOT NULL, transaction_date DATE NOT NULL, transaction_type VARCHAR(30) NOT NULL,
+    direction ENUM('in','out') NOT NULL, amount DECIMAL(24,6) NOT NULL, reference_type VARCHAR(40) NULL,
+    reference_id BIGINT UNSIGNED NULL, reference_no VARCHAR(80) NULL, counterparty VARCHAR(80) NULL, memo VARCHAR(500) NULL,
+    status ENUM('draft','posted','voided') NOT NULL DEFAULT 'draft', reconciled TINYINT(1) NOT NULL DEFAULT 0,
+    reconciled_at DATETIME NULL, created_by BIGINT UNSIGNED NULL, posted_by BIGINT UNSIGNED NULL, posted_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_bank_transaction(tenant_id,company_id,source_system,source_database,transaction_no),
+    KEY ix_finance_bank_transaction(bank_account_id,transaction_date,status,reconciled),
+    CONSTRAINT fk_finance_bank_transaction_account FOREIGN KEY(bank_account_id) REFERENCES finance_bank_accounts(id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_bank_reconciliations (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL, bank_account_id BIGINT UNSIGNED NOT NULL,
+    reconciliation_date DATE NOT NULL, statement_balance DECIMAL(24,6) NOT NULL, book_balance DECIMAL(24,6) NOT NULL,
+    difference_amount DECIMAL(24,6) NOT NULL, status ENUM('draft','completed','difference') NOT NULL DEFAULT 'draft',
+    note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, completed_by BIGINT UNSIGNED NULL, completed_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, KEY ix_finance_bank_reconciliation(bank_account_id,reconciliation_date,status),
+    CONSTRAINT fk_finance_bank_reconciliation_account FOREIGN KEY(bank_account_id) REFERENCES finance_bank_accounts(id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await addColumnIfMissing('finance_open_items', 'adjustment_amount', 'DECIMAL(24,6) NOT NULL DEFAULT 0');
+  await addColumnIfMissing('finance_open_items', 'base_adjustment_amount', 'DECIMAL(24,6) NOT NULL DEFAULT 0');
+  await addColumnIfMissing('finance_open_items', 'exchange_rate', 'DECIMAL(18,8) NOT NULL DEFAULT 1');
+  await addColumnIfMissing('finance_open_items', 'base_original_amount', 'DECIMAL(24,6) NOT NULL DEFAULT 0');
+  await addColumnIfMissing('finance_open_items', 'base_settled_amount', 'DECIMAL(24,6) NOT NULL DEFAULT 0');
+  await addColumnIfMissing('finance_open_items', 'base_balance_amount', 'DECIMAL(24,6) NOT NULL DEFAULT 0');
+  await addColumnIfMissing('finance_settlements', 'currency_code', "VARCHAR(10) NOT NULL DEFAULT 'TWD'");
+  await addColumnIfMissing('finance_settlements', 'exchange_rate', 'DECIMAL(18,8) NOT NULL DEFAULT 1');
+  await addColumnIfMissing('finance_settlements', 'base_amount', 'DECIMAL(24,6) NOT NULL DEFAULT 0');
+  await addColumnIfMissing('finance_settlements', 'exchange_difference', 'DECIMAL(24,6) NOT NULL DEFAULT 0');
+  await addColumnIfMissing('finance_allocations', 'base_allocated_amount', 'DECIMAL(24,6) NOT NULL DEFAULT 0');
+  await addColumnIfMissing('finance_allocations', 'exchange_difference', 'DECIMAL(24,6) NOT NULL DEFAULT 0');
+  for (const [column, definition] of [
+    ['bank_account_id', 'BIGINT UNSIGNED NULL'], ['status_date', 'DATE NULL'],
+    ['status_by', 'BIGINT UNSIGNED NULL'], ['status_note', 'VARCHAR(500) NULL']
+  ]) await addColumnIfMissing('finance_notes', column, definition);
+  // R07：銀行與票據異動要保留可追溯的分錄、沖回及逐筆對帳關聯。
+  // 這些增量表只存在目標 ERP，不會寫回 SH／SC 原始資料庫。
+  for (const [column, definition] of [
+    ['accounting_draft_id', 'BIGINT UNSIGNED NULL'],
+    ['counter_account_code', 'VARCHAR(30) NULL'],
+    ['counter_account_name', 'VARCHAR(120) NULL'],
+    ['reversal_of_id', 'BIGINT UNSIGNED NULL'],
+    ['reversal_reason', 'VARCHAR(500) NULL']
+  ]) await addColumnIfMissing('finance_bank_transactions', column, definition);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_note_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, note_id BIGINT UNSIGNED NOT NULL,
+    from_status VARCHAR(20) NULL, to_status VARCHAR(20) NOT NULL, event_date DATE NOT NULL,
+    bank_transaction_id BIGINT UNSIGNED NULL, accounting_draft_id BIGINT UNSIGNED NULL,
+    reason VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_finance_note_event(note_id,event_date,id),
+    KEY ix_finance_note_event_source(source_database,event_date),
+    CONSTRAINT fk_finance_note_event_note FOREIGN KEY(note_id) REFERENCES finance_notes(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_bank_transaction_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, transaction_id BIGINT UNSIGNED NOT NULL,
+    event_kind VARCHAR(30) NOT NULL, before_status VARCHAR(20) NULL, after_status VARCHAR(20) NULL,
+    reversal_transaction_id BIGINT UNSIGNED NULL, accounting_draft_id BIGINT UNSIGNED NULL,
+    reason VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_finance_bank_transaction_event(transaction_id,created_at,id),
+    KEY ix_finance_bank_transaction_event_source(source_database,created_at),
+    CONSTRAINT fk_finance_bank_transaction_event_transaction FOREIGN KEY(transaction_id) REFERENCES finance_bank_transactions(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_bank_reconciliation_items (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    reconciliation_id BIGINT UNSIGNED NOT NULL, bank_transaction_id BIGINT UNSIGNED NOT NULL,
+    matched_amount DECIMAL(24,6) NOT NULL, statement_date DATE NULL, statement_reference_no VARCHAR(80) NULL,
+    status ENUM('matched','unmatched') NOT NULL DEFAULT 'matched', note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_reconciliation_item(reconciliation_id,bank_transaction_id),
+    KEY ix_finance_reconciliation_transaction(bank_transaction_id,status),
+    CONSTRAINT fk_finance_reconciliation_item_header FOREIGN KEY(reconciliation_id) REFERENCES finance_bank_reconciliations(id) ON DELETE CASCADE,
+    CONSTRAINT fk_finance_reconciliation_item_transaction FOREIGN KEY(bank_transaction_id) REFERENCES finance_bank_transactions(id) ON DELETE RESTRICT
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_vouchers (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL,
+    company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL,
+    account_type ENUM('AR','AP') NOT NULL,
+    document_type VARCHAR(20) NOT NULL,
+    voucher_no VARCHAR(60) NOT NULL,
+    voucher_date DATE NOT NULL,
+    due_date DATE NULL,
+    party_code VARCHAR(30) NOT NULL,
+    currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD',
+    settlement_mode ENUM('direct','manual','batch') NOT NULL DEFAULT 'direct',
+    invoice_no VARCHAR(60) NULL,
+    invoice_date DATE NULL,
+    net_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    tax_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    total_amount DECIMAL(24,6) NOT NULL,
+    status ENUM('draft','approved','posted','voided') NOT NULL DEFAULT 'draft',
+    note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL,
+    approved_by BIGINT UNSIGNED NULL,
+    approved_at DATETIME NULL,
+    posted_by BIGINT UNSIGNED NULL,
+    posted_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_voucher(tenant_id,company_id,source_system,account_type,voucher_no),
+    KEY ix_finance_voucher_source(source_database,account_type,voucher_date,status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_voucher_sources (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    voucher_id BIGINT UNSIGNED NOT NULL,
+    source_kind VARCHAR(40) NOT NULL,
+    source_document_id BIGINT UNSIGNED NULL,
+    source_document_item_id BIGINT UNSIGNED NULL,
+    source_document_type VARCHAR(20) NULL,
+    source_document_no VARCHAR(60) NULL,
+    source_line_no INT UNSIGNED NULL,
+    source_date DATE NULL,
+    item_code VARCHAR(40) NULL,
+    quantity DECIMAL(24,6) NULL,
+    unit_price DECIMAL(24,6) NULL,
+    source_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    tax_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    allocated_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    note VARCHAR(255) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_finance_voucher_source_lookup(source_kind,source_document_id,source_document_item_id),
+    KEY ix_finance_voucher_source_voucher(voucher_id),
+    CONSTRAINT fk_finance_voucher_source_header FOREIGN KEY(voucher_id) REFERENCES finance_vouchers(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  for (const [column, definition] of [
+    ['closing_basis',"ENUM('manual','unified','customer') NOT NULL DEFAULT 'manual'"],
+    ['source_code',"VARCHAR(10) NOT NULL DEFAULT '1'"],
+    ['invoice_type','VARCHAR(20) NULL'],['tax_id','VARCHAR(20) NULL'],
+    ['invoice_status',"ENUM('none','pending','issued','received','voided') NOT NULL DEFAULT 'none'"],
+    ['exchange_rate','DECIMAL(18,8) NOT NULL DEFAULT 1'],
+    ['base_net_amount','DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['base_tax_amount','DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['base_total_amount','DECIMAL(24,6) NOT NULL DEFAULT 0']
+  ]) await addColumnIfMissing('finance_vouchers', column, definition);
+  // 發票補登、作廢與重開不得覆蓋歷程；保留每一次異動，讓財務稽核可以
+  // 回看原發票、作廢原因與重新開立的發票資料。這張表只存在目標 ERP，
+  // 不會回寫 SH／SC 原始資料庫。
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_invoice_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL,
+    company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL,
+    voucher_id BIGINT UNSIGNED NOT NULL,
+    event_kind ENUM('supplement','update','void','reopen') NOT NULL,
+    before_invoice_no VARCHAR(60) NULL,
+    before_invoice_date DATE NULL,
+    before_invoice_type VARCHAR(20) NULL,
+    before_tax_id VARCHAR(20) NULL,
+    before_invoice_status VARCHAR(20) NULL,
+    after_invoice_no VARCHAR(60) NULL,
+    after_invoice_date DATE NULL,
+    after_invoice_type VARCHAR(20) NULL,
+    after_tax_id VARCHAR(20) NULL,
+    after_invoice_status VARCHAR(20) NULL,
+    reason VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_finance_invoice_event_voucher(voucher_id,created_at),
+    KEY ix_finance_invoice_event_source(source_database,created_at),
+    CONSTRAINT fk_finance_invoice_event_voucher FOREIGN KEY(voucher_id) REFERENCES finance_vouchers(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_closing_settings (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, account_type ENUM('AR','AP') NOT NULL,
+    unified_closing_day TINYINT UNSIGNED NOT NULL DEFAULT 31, base_currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD',
+    exchange_gain_account_code VARCHAR(30) NOT NULL DEFAULT '7161', exchange_gain_account_name VARCHAR(120) NOT NULL DEFAULT '兌換利益',
+    exchange_loss_account_code VARCHAR(30) NOT NULL DEFAULT '7162', exchange_loss_account_name VARCHAR(120) NOT NULL DEFAULT '兌換損失',
+    auto_generate TINYINT(1) NOT NULL DEFAULT 0, note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_closing_setting(tenant_id,company_id,source_system,source_database,account_type)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_return_adjustments (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    sales_return_id BIGINT UNSIGNED NOT NULL, sales_return_item_id BIGINT UNSIGNED NOT NULL, shipment_item_id BIGINT UNSIGNED NULL,
+    open_item_id BIGINT UNSIGNED NULL, adjustment_date DATE NOT NULL, return_amount DECIMAL(24,6) NOT NULL,
+    receivable_offset_amount DECIMAL(24,6) NOT NULL DEFAULT 0, customer_credit_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    refund_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending', note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL,
+    processed_by BIGINT UNSIGNED NULL, processed_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_return_adjustment(source_database,sales_return_item_id),
+    KEY ix_finance_return_customer(source_database,adjustment_date),
+    CONSTRAINT fk_finance_return_open_item FOREIGN KEY(open_item_id) REFERENCES finance_open_items(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await addColumnIfMissing('finance_return_adjustments', 'refund_amount', 'DECIMAL(24,6) NOT NULL DEFAULT 0');
+  await addColumnIfMissing('finance_return_adjustments', 'processed_by', 'BIGINT UNSIGNED NULL');
+  await addColumnIfMissing('finance_return_adjustments', 'processed_at', 'DATETIME NULL');
+  // Older installations created this as ENUM(offset/credit/mixed).  Pending
+  // means the return is already recorded but the original AR has not been
+  // posted yet, so the target schema must allow it explicitly.
+  await pool.query("ALTER TABLE finance_return_adjustments MODIFY COLUMN status VARCHAR(20) NOT NULL DEFAULT 'pending'");
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_return_adjustment_allocations (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    adjustment_id BIGINT UNSIGNED NOT NULL, open_item_id BIGINT UNSIGNED NOT NULL,
+    allocated_amount DECIMAL(24,6) NOT NULL, base_allocated_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_return_adjustment_allocation(adjustment_id,open_item_id),
+    KEY ix_finance_return_adjustment_open_item(open_item_id),
+    CONSTRAINT fk_finance_return_allocation_adjustment FOREIGN KEY(adjustment_id) REFERENCES finance_return_adjustments(id) ON DELETE CASCADE,
+    CONSTRAINT fk_finance_return_allocation_open_item FOREIGN KEY(open_item_id) REFERENCES finance_open_items(id) ON DELETE RESTRICT
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_customer_credits (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    party_code VARCHAR(30) NOT NULL, currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD', credit_date DATE NOT NULL,
+    source_adjustment_id BIGINT UNSIGNED NOT NULL, original_amount DECIMAL(24,6) NOT NULL,
+    applied_amount DECIMAL(24,6) NOT NULL DEFAULT 0, refunded_amount DECIMAL(24,6) NOT NULL DEFAULT 0, balance_amount DECIMAL(24,6) NOT NULL,
+    status ENUM('available','partial','applied','refunded') NOT NULL DEFAULT 'available', note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_customer_credit(source_adjustment_id),
+    KEY ix_finance_customer_credit(source_database,party_code,status,credit_date),
+    CONSTRAINT fk_finance_customer_credit_adjustment FOREIGN KEY(source_adjustment_id) REFERENCES finance_return_adjustments(id) ON DELETE RESTRICT
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_customer_credit_movements (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, credit_id BIGINT UNSIGNED NOT NULL,
+    movement_date DATE NOT NULL, movement_kind ENUM('apply','refund') NOT NULL, amount DECIMAL(24,6) NOT NULL,
+    open_item_id BIGINT UNSIGNED NULL, reference_no VARCHAR(80) NULL, note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_finance_credit_movement(credit_id,movement_date),
+    CONSTRAINT fk_finance_credit_movement_credit FOREIGN KEY(credit_id) REFERENCES finance_customer_credits(id) ON DELETE CASCADE,
+    CONSTRAINT fk_finance_credit_movement_open_item FOREIGN KEY(open_item_id) REFERENCES finance_open_items(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_periods (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, period_code VARCHAR(10) NOT NULL,
+    start_date DATE NOT NULL, end_date DATE NOT NULL,
+    status ENUM('open','closed') NOT NULL DEFAULT 'open',
+    closed_by BIGINT UNSIGNED NULL, closed_at DATETIME NULL,
+    reopened_by BIGINT UNSIGNED NULL, reopened_at DATETIME NULL,
+    note VARCHAR(255) NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_period(tenant_id,company_id,source_system,period_code),
+    KEY ix_accounting_period_date(source_database,start_date,end_date,status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_auto_rules (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, rule_code VARCHAR(60) NOT NULL,
+    module_code VARCHAR(20) NOT NULL, document_kind VARCHAR(40) NOT NULL DEFAULT '*',
+    document_type VARCHAR(20) NOT NULL DEFAULT '*', entry_role VARCHAR(30) NOT NULL,
+    debit_account_code VARCHAR(30) NOT NULL, debit_account_name VARCHAR(120) NOT NULL,
+    credit_account_code VARCHAR(30) NOT NULL, credit_account_name VARCHAR(120) NOT NULL,
+    is_active TINYINT(1) NOT NULL DEFAULT 1, note VARCHAR(255) NULL,
+    created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_auto_rule(tenant_id,company_id,source_system,rule_code),
+    KEY ix_accounting_auto_rule_lookup(source_database,module_code,document_kind,document_type,entry_role,is_active)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_advances (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    account_type ENUM('AR','AP') NOT NULL, advance_kind ENUM('prepayment','overpayment') NOT NULL, advance_no VARCHAR(60) NOT NULL, advance_date DATE NOT NULL, party_code VARCHAR(30) NOT NULL,
+    currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD', exchange_rate DECIMAL(18,8) NOT NULL DEFAULT 1, original_amount DECIMAL(24,6) NOT NULL, applied_amount DECIMAL(24,6) NOT NULL DEFAULT 0, refunded_amount DECIMAL(24,6) NOT NULL DEFAULT 0, balance_amount DECIMAL(24,6) NOT NULL,
+    source_settlement_id BIGINT UNSIGNED NULL, source_document_no VARCHAR(80) NULL, status ENUM('draft','available','partial','applied','refunded','voided') NOT NULL DEFAULT 'draft', note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_advance(tenant_id,company_id,source_system,account_type,advance_no), KEY ix_finance_advance(source_database,account_type,party_code,status,advance_date)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_advance_movements (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, advance_id BIGINT UNSIGNED NOT NULL, movement_date DATE NOT NULL, movement_kind ENUM('apply','refund','offset') NOT NULL, amount DECIMAL(24,6) NOT NULL, open_item_id BIGINT UNSIGNED NULL, related_open_item_id BIGINT UNSIGNED NULL, reference_no VARCHAR(80) NULL, note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_finance_advance_movement(advance_id,movement_date), CONSTRAINT fk_finance_advance_movement_header FOREIGN KEY(advance_id) REFERENCES finance_advances(id) ON DELETE CASCADE, CONSTRAINT fk_finance_advance_movement_open FOREIGN KEY(open_item_id) REFERENCES finance_open_items(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_party_links (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL, customer_code VARCHAR(30) NOT NULL, supplier_code VARCHAR(30) NOT NULL, relationship_type VARCHAR(30) NOT NULL DEFAULT 'customer_supplier', is_active TINYINT(1) NOT NULL DEFAULT 1, note VARCHAR(255) NULL, created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_party_link(tenant_id,company_id,source_system,source_database,customer_code,supplier_code)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_drafts (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    draft_no VARCHAR(60) NOT NULL, draft_date DATE NOT NULL, source_kind VARCHAR(40) NOT NULL, source_id BIGINT UNSIGNED NULL, source_document_no VARCHAR(80) NULL, account_type VARCHAR(10) NULL, party_code VARCHAR(30) NULL,
+    debit_account_code VARCHAR(30) NOT NULL, debit_account_name VARCHAR(120) NOT NULL, credit_account_code VARCHAR(30) NOT NULL, credit_account_name VARCHAR(120) NOT NULL, amount DECIMAL(24,6) NOT NULL, status ENUM('draft','approved','posted','restored') NOT NULL DEFAULT 'draft', restore_reason VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL, posted_by BIGINT UNSIGNED NULL, posted_at DATETIME NULL, restored_by BIGINT UNSIGNED NULL, restored_at DATETIME NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_draft(tenant_id,company_id,source_system,draft_no), KEY ix_accounting_draft_source(source_database,source_kind,source_id,status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  // 會計底稿必須保留「產生、維護、核准、拋轉、還原」的可稽核鏈。
+  // 舊版只有一組借貸欄位，以下欄位與明細表以增量方式補上，既有資料仍可讀取，
+  // 但新底稿一律以多行明細與來源鎖定保存，不能透過修改原始來源繞過流程。
+  for (const [column, definition] of [
+    ['source_locked', 'TINYINT(1) NOT NULL DEFAULT 0'],
+    ['source_locked_at', 'DATETIME NULL'],
+    ['source_locked_by', 'BIGINT UNSIGNED NULL'],
+    ['memo', 'VARCHAR(500) NULL']
+  ]) await addColumnIfMissing('accounting_drafts', column, definition);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_draft_lines (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    draft_id BIGINT UNSIGNED NOT NULL,
+    line_no INT UNSIGNED NOT NULL,
+    account_code VARCHAR(30) NOT NULL,
+    account_name VARCHAR(120) NOT NULL,
+    debit_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    credit_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    party_code VARCHAR(30) NULL,
+    description VARCHAR(500) NULL,
+    required_clearing TINYINT(1) NOT NULL DEFAULT 0,
+    clearing_type VARCHAR(20) NULL,
+    clearing_ref VARCHAR(255) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_draft_line(draft_id,line_no),
+    KEY ix_accounting_draft_line_account(draft_id,account_code),
+    CONSTRAINT fk_accounting_draft_line_header FOREIGN KEY(draft_id) REFERENCES accounting_drafts(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_draft_sources (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    draft_id BIGINT UNSIGNED NOT NULL,
+    source_kind VARCHAR(40) NOT NULL,
+    source_id BIGINT UNSIGNED NOT NULL,
+    source_document_no VARCHAR(80) NULL,
+    source_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    locked_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_draft_source(draft_id,source_kind,source_id),
+    KEY ix_accounting_draft_source_lock(source_kind,source_id,draft_id),
+    CONSTRAINT fk_accounting_draft_source_header FOREIGN KEY(draft_id) REFERENCES accounting_drafts(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_draft_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    draft_id BIGINT UNSIGNED NOT NULL,
+    event_kind VARCHAR(30) NOT NULL,
+    before_status VARCHAR(20) NULL,
+    after_status VARCHAR(20) NULL,
+    reason VARCHAR(500) NULL,
+    user_id BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_accounting_draft_event(draft_id,created_at),
+    CONSTRAINT fk_accounting_draft_event_header FOREIGN KEY(draft_id) REFERENCES accounting_drafts(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  // 將舊版單一借貸欄位轉成唯讀歷史明細；新流程不再只依賴 header 上的兩個科目欄位。
+  await pool.query(`INSERT IGNORE INTO accounting_draft_lines
+    (draft_id,line_no,account_code,account_name,debit_amount,credit_amount,party_code,description)
+    SELECT d.id,1,d.debit_account_code,d.debit_account_name,d.amount,0,d.party_code,'歷史底稿借方'
+    FROM accounting_drafts d
+    WHERE NOT EXISTS (SELECT 1 FROM accounting_draft_lines l WHERE l.draft_id=d.id)`);
+  await pool.query(`INSERT IGNORE INTO accounting_draft_lines
+    (draft_id,line_no,account_code,account_name,debit_amount,credit_amount,party_code,description)
+    SELECT d.id,2,d.credit_account_code,d.credit_account_name,0,d.amount,d.party_code,'歷史底稿貸方'
+    FROM accounting_drafts d
+    WHERE NOT EXISTS (SELECT 1 FROM accounting_draft_lines l WHERE l.draft_id=d.id AND l.line_no=2)`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_month_closings (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    period_code VARCHAR(10) NOT NULL, close_date DATE NOT NULL, status ENUM('draft','closed','reopened') NOT NULL DEFAULT 'draft', note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, closed_by BIGINT UNSIGNED NULL, closed_at DATETIME NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_month_close(tenant_id,company_id,source_system,source_database,period_code)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_year_closings (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, fiscal_year CHAR(4) NOT NULL, closing_no VARCHAR(60) NOT NULL,
+    close_date DATE NOT NULL, retained_earnings_account_code VARCHAR(30) NOT NULL DEFAULT '3201',
+    retained_earnings_account_name VARCHAR(120) NOT NULL DEFAULT '保留盈餘',
+    net_income DECIMAL(24,6) NOT NULL DEFAULT 0, journal_id BIGINT UNSIGNED NULL,
+    status ENUM('draft','posted','voided') NOT NULL DEFAULT 'draft', note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, posted_by BIGINT UNSIGNED NULL, posted_at DATETIME NULL,
+    line_count INT UNSIGNED NOT NULL DEFAULT 0, carry_forward_count INT UNSIGNED NOT NULL DEFAULT 0,
+    total_debit DECIMAL(24,6) NOT NULL DEFAULT 0, total_credit DECIMAL(24,6) NOT NULL DEFAULT 0,
+    reconciliation_status VARCHAR(20) NOT NULL DEFAULT 'pending', next_fiscal_year CHAR(4) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_year_closing(tenant_id,company_id,source_system,source_database,fiscal_year),
+    KEY ix_accounting_year_closing(source_database,fiscal_year,status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  // R08：期初導入與月底／年度結轉要有獨立批次、明細及事件鏈，
+  // 不把銀行、票據、應收／應付與總帳期初混成一筆不可追蹤的調整資料。
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_opening_batches (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, batch_no VARCHAR(60) NOT NULL, opening_date DATE NOT NULL,
+    source_label VARCHAR(255) NULL, note VARCHAR(500) NULL,
+    status ENUM('draft','validated','approved','posted','voided') NOT NULL DEFAULT 'draft',
+    bank_total DECIMAL(24,6) NOT NULL DEFAULT 0, ar_total DECIMAL(24,6) NOT NULL DEFAULT 0,
+    ap_total DECIMAL(24,6) NOT NULL DEFAULT 0, ar_note_total DECIMAL(24,6) NOT NULL DEFAULT 0,
+    ap_note_total DECIMAL(24,6) NOT NULL DEFAULT 0, gl_debit_total DECIMAL(24,6) NOT NULL DEFAULT 0,
+    gl_credit_total DECIMAL(24,6) NOT NULL DEFAULT 0, line_count INT UNSIGNED NOT NULL DEFAULT 0,
+    journal_id BIGINT UNSIGNED NULL,
+    created_by BIGINT UNSIGNED NULL, validated_by BIGINT UNSIGNED NULL, validated_at DATETIME NULL,
+    approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL, posted_by BIGINT UNSIGNED NULL, posted_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_opening_batch(tenant_id,company_id,source_system,source_database,batch_no),
+    KEY ix_accounting_opening_batch_date(source_database,opening_date,status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_opening_lines (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    batch_id BIGINT UNSIGNED NOT NULL, line_no INT UNSIGNED NOT NULL,
+    entry_kind VARCHAR(20) NOT NULL, account_type VARCHAR(10) NULL,
+    account_code VARCHAR(30) NULL, account_name VARCHAR(120) NULL,
+    party_code VARCHAR(30) NULL, currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD',
+    amount DECIMAL(24,6) NOT NULL DEFAULT 0, debit_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    credit_amount DECIMAL(24,6) NOT NULL DEFAULT 0, document_no VARCHAR(80) NULL,
+    document_date DATE NULL, due_date DATE NULL, source_document_no VARCHAR(80) NULL,
+    bank_code VARCHAR(30) NULL, bank_name VARCHAR(120) NULL, bank_account_no VARCHAR(80) NULL,
+    note_no VARCHAR(60) NULL, note_type VARCHAR(20) NULL, note_status VARCHAR(20) NULL,
+    validation_status VARCHAR(20) NOT NULL DEFAULT 'pending', validation_message VARCHAR(500) NULL,
+    created_target_id BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_opening_line(batch_id,line_no),
+    KEY ix_accounting_opening_line_kind(batch_id,entry_kind,validation_status),
+    CONSTRAINT fk_accounting_opening_line_batch FOREIGN KEY(batch_id) REFERENCES accounting_opening_batches(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_opening_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, batch_id BIGINT UNSIGNED NOT NULL, event_kind VARCHAR(30) NOT NULL,
+    before_status VARCHAR(20) NULL, after_status VARCHAR(20) NULL, reason VARCHAR(500) NULL,
+    user_id BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_accounting_opening_event(batch_id,created_at,id),
+    CONSTRAINT fk_accounting_opening_event_batch FOREIGN KEY(batch_id) REFERENCES accounting_opening_batches(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_month_closing_lines (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    closing_id BIGINT UNSIGNED NOT NULL, line_no INT UNSIGNED NOT NULL,
+    account_code VARCHAR(30) NOT NULL, account_name VARCHAR(120) NOT NULL, account_type VARCHAR(20) NULL,
+    opening_debit DECIMAL(24,6) NOT NULL DEFAULT 0, opening_credit DECIMAL(24,6) NOT NULL DEFAULT 0,
+    period_debit DECIMAL(24,6) NOT NULL DEFAULT 0, period_credit DECIMAL(24,6) NOT NULL DEFAULT 0,
+    ending_debit DECIMAL(24,6) NOT NULL DEFAULT 0, ending_credit DECIMAL(24,6) NOT NULL DEFAULT 0,
+    ending_balance DECIMAL(24,6) NOT NULL DEFAULT 0, line_kind VARCHAR(20) NOT NULL DEFAULT 'balance',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_month_closing_line(closing_id,line_no),
+    KEY ix_accounting_month_closing_account(closing_id,account_code),
+    CONSTRAINT fk_accounting_month_closing_line_header FOREIGN KEY(closing_id) REFERENCES accounting_month_closings(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_year_closing_lines (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    closing_id BIGINT UNSIGNED NOT NULL, line_no INT UNSIGNED NOT NULL,
+    account_code VARCHAR(30) NOT NULL, account_name VARCHAR(120) NOT NULL, account_type VARCHAR(20) NULL,
+    opening_debit DECIMAL(24,6) NOT NULL DEFAULT 0, opening_credit DECIMAL(24,6) NOT NULL DEFAULT 0,
+    period_debit DECIMAL(24,6) NOT NULL DEFAULT 0, period_credit DECIMAL(24,6) NOT NULL DEFAULT 0,
+    ending_debit DECIMAL(24,6) NOT NULL DEFAULT 0, ending_credit DECIMAL(24,6) NOT NULL DEFAULT 0,
+    carry_forward_debit DECIMAL(24,6) NOT NULL DEFAULT 0, carry_forward_credit DECIMAL(24,6) NOT NULL DEFAULT 0,
+    balance_amount DECIMAL(24,6) NOT NULL DEFAULT 0, line_kind VARCHAR(20) NOT NULL DEFAULT 'balance',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_year_closing_line(closing_id,line_no),
+    KEY ix_accounting_year_closing_account(closing_id,account_code),
+    CONSTRAINT fk_accounting_year_closing_line_header FOREIGN KEY(closing_id) REFERENCES accounting_year_closings(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_period_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, period_id BIGINT UNSIGNED NOT NULL, event_kind VARCHAR(30) NOT NULL,
+    before_status VARCHAR(20) NULL, after_status VARCHAR(20) NULL, reason VARCHAR(500) NULL,
+    user_id BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_accounting_period_event(period_id,created_at,id),
+    CONSTRAINT fk_accounting_period_event_period FOREIGN KEY(period_id) REFERENCES accounting_periods(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  for (const [table, column, definition] of [
+    ['finance_opening_balances','opening_batch_id','BIGINT UNSIGNED NULL'],
+    ['finance_opening_balances','opening_line_id','BIGINT UNSIGNED NULL'],
+    ['finance_opening_balances','journal_id','BIGINT UNSIGNED NULL'],
+    ['finance_notes','opening_batch_id','BIGINT UNSIGNED NULL'],
+    ['finance_notes','opening_line_id','BIGINT UNSIGNED NULL'],
+    ['finance_bank_accounts','opening_batch_id','BIGINT UNSIGNED NULL'],
+    ['finance_bank_accounts','opening_date','DATE NULL'],
+    ['accounting_month_closings','line_count','INT UNSIGNED NOT NULL DEFAULT 0'],
+    ['accounting_month_closings','total_debit','DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['accounting_month_closings','total_credit','DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['accounting_month_closings','reconciliation_status',"VARCHAR(20) NOT NULL DEFAULT 'pending'"],
+    ['accounting_month_closings','next_period_code','VARCHAR(10) NULL'],
+    ['accounting_year_closings','line_count','INT UNSIGNED NOT NULL DEFAULT 0'],
+    ['accounting_year_closings','carry_forward_count','INT UNSIGNED NOT NULL DEFAULT 0'],
+    ['accounting_year_closings','total_debit','DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['accounting_year_closings','total_credit','DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['accounting_year_closings','reconciliation_status',"VARCHAR(20) NOT NULL DEFAULT 'pending'"],
+    ['accounting_year_closings','next_fiscal_year','CHAR(4) NULL']
+  ]) await addColumnIfMissing(table, column, definition);
+  // 同一家公司可能匯入多個來源 ERP；單別規則與會計期間必須連同來源資料庫隔離，
+  // 否則 SH 建立的規則會阻擋 SC 建立同名規則。
+  for (const [table,index,columns] of [
+    ['accounting_periods','uq_accounting_period',['tenant_id','company_id','source_system','source_database','period_code']],
+    ['accounting_auto_rules','uq_accounting_auto_rule',['tenant_id','company_id','source_system','source_database','rule_code']]
+  ]) {
+    const [parts] = await pool.query(`SELECT column_name FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name=? AND index_name=? ORDER BY seq_in_index`,[table,index]);
+    const current=parts.map(x=>x.column_name);
+    if (current.join('|') !== columns.join('|')) {
+      await pool.query(`ALTER TABLE \`${table}\` DROP INDEX \`${index}\`, ADD UNIQUE KEY \`${index}\` (${columns.map(x=>`\`${x}\``).join(',')})`);
+    }
+  }
 }
 
 export async function tx(work) {

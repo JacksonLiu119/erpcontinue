@@ -21,10 +21,15 @@ function hideLogin() { $('#loginGate').hidden = true; $('#loginStatus').textCont
 async function beginAuthenticatedApp() {
   try {
     const profile = await authenticatedApi('/api/auth/me');
+    const access = await authenticatedApi('/api/auth/access');
     currentUser = profile; localStorage.setItem('erp-auth-user', JSON.stringify(profile));
     hideLogin();
     accessState.activeRoleId = Number(profile.role_id); localStorage.setItem('erp-active-role-id', String(profile.role_id));
-    renderAll(); await loadCompanyOptions(); await loadDatabaseOptions(); await refresh();
+    accessState.isAdmin = Boolean(access.is_admin); accessState.permissions = access.permissions || [];
+    const userLabel = $('#currentUserLabel'); const userAvatar = $('#currentUserAvatar');
+    if (userLabel) userLabel.textContent = `${profile.display_name}（${profile.username}｜${profile.role_name}）`;
+    if (userAvatar) userAvatar.textContent = String(profile.username || profile.display_name || '--').slice(0, 2).toUpperCase();
+    await loadCompanyOptions(); await loadDatabaseOptions(); renderAll(); await refresh();
   } catch (error) {
     console.error('ERP login initialization failed:', error);
     showLogin(`登入後初始化失敗：${error.message}`);

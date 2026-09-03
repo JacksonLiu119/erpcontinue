@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS erp_data_sources (
   host VARCHAR(255) NOT NULL DEFAULT '127.0.0.1',
   port INT UNSIGNED NOT NULL DEFAULT 3306,
   database_name VARCHAR(120) NOT NULL,
+  target_database VARCHAR(120) NULL,
   username VARCHAR(120) NOT NULL DEFAULT 'root',
   password_env VARCHAR(120) NULL,
   tenant_id VARCHAR(60) NOT NULL DEFAULT 'SH',
@@ -22,9 +23,7 @@ CREATE TABLE IF NOT EXISTS erp_data_sources (
 
 INSERT INTO erp_data_sources (source_key, label, adapter_code, database_name, username, read_only, sort_order)
 VALUES
-  ('SH', 'SH（鼎新營運資料）', 'ism-sh', 'sh', 'root', 1, 10),
-  ('SMARTDSCSYS', 'SMARTDSCSYS（鼎新系統資料）', 'ism-smartdscsys', 'smartdscsys', 'root', 1, 20),
-  ('DSCRPT', 'DSCRPT（鼎新報表資料）', 'ism-dscrpt', 'dscrpt', 'root', 1, 30)
+  ('SH', 'SH（鼎新營運資料）', 'ism-sh', 'sh', 'root', 1, 10)
 ON DUPLICATE KEY UPDATE label = VALUES(label), adapter_code = VALUES(adapter_code);
 
 UPDATE erp_data_sources SET tenant_id = source_key, company_id = source_key, source_system = 'iSM';
@@ -302,6 +301,61 @@ CREATE TABLE IF NOT EXISTS erp_import_logs (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY ix_erp_import_logs_batch (batch_id, created_at),
   CONSTRAINT fk_erp_import_logs_batch FOREIGN KEY (batch_id) REFERENCES erp_import_batches(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Import quality findings belong to the application/control database.  They
+-- preserve the source key and target reference while keeping SH/SC read-only.
+CREATE TABLE IF NOT EXISTS erp_import_quality_issues (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  batch_id BIGINT UNSIGNED NULL,
+  tenant_id VARCHAR(60) NOT NULL,
+  company_id VARCHAR(60) NOT NULL,
+  source_system VARCHAR(60) NOT NULL,
+  source_database VARCHAR(60) NOT NULL,
+  issue_code VARCHAR(80) NOT NULL,
+  severity ENUM('info','warning','error') NOT NULL DEFAULT 'warning',
+  status ENUM('open','acknowledged','correction_pending','resolved','ignored') NOT NULL DEFAULT 'open',
+  source_table VARCHAR(120) NOT NULL,
+  source_key VARCHAR(255) NOT NULL,
+  target_table VARCHAR(120) NULL,
+  target_id BIGINT UNSIGNED NULL,
+  document_kind VARCHAR(60) NULL,
+  document_type VARCHAR(30) NULL,
+  document_no VARCHAR(120) NULL,
+  line_no INT UNSIGNED NULL,
+  item_code VARCHAR(60) NULL,
+  expected_json JSON NULL,
+  actual_json JSON NULL,
+  rule_description VARCHAR(1000) NOT NULL,
+  recommended_action VARCHAR(1000) NULL,
+  resolution_type VARCHAR(40) NULL,
+  resolution_note VARCHAR(1000) NULL,
+  correction_no VARCHAR(60) NULL,
+  decided_by BIGINT UNSIGNED NULL,
+  decided_at DATETIME NULL,
+  resolved_by BIGINT UNSIGNED NULL,
+  resolved_at DATETIME NULL,
+  last_seen_at DATETIME NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_erp_import_quality_issue (source_database, issue_code, source_key),
+  KEY ix_erp_import_quality_context (tenant_id, company_id, source_system, source_database, status, severity),
+  KEY ix_erp_import_quality_document (source_database, document_no, document_kind),
+  KEY ix_erp_import_quality_batch (batch_id),
+  CONSTRAINT fk_erp_import_quality_batch FOREIGN KEY (batch_id) REFERENCES erp_import_batches(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS erp_import_quality_events (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  issue_id BIGINT UNSIGNED NOT NULL,
+  action_code VARCHAR(40) NOT NULL,
+  from_status VARCHAR(30) NULL,
+  to_status VARCHAR(30) NOT NULL,
+  note VARCHAR(1000) NULL,
+  actor_id BIGINT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY ix_erp_import_quality_event_issue (issue_id, created_at),
+  CONSTRAINT fk_erp_import_quality_event_issue FOREIGN KEY (issue_id) REFERENCES erp_import_quality_issues(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS customers (

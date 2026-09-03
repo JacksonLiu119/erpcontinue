@@ -47,18 +47,39 @@ const routeCapability = [
   [/^\/master\/companies/, 'basicdata'], [/^\/master\/code-rules/, 'basicdata'], [/^\/master\/common-parameters/, 'basicdata'],
   [/^\/master\/(job-categories|job-category-employees|currencies|currency-rates|payment-terms|calendars|calendar-days)/, 'basicdata'],
   [/^\/master\/item-categories/, 'item-categories'], [/^\/master\/items/, 'items'],
-  [/^\/import\//, 'import-monitor'],
+  [/^\/import\/data-quality(?:\/|$)/, 'data-quality'], [/^\/import\//, 'import-monitor'],
+  [/^\/reports\/operations(?:\/|$)/, 'operations-reports'],
   [/^\/inventory-opening/, 'inventory-opening'],
   [/^\/sales-workflow\/document-types/, 'sales-document-types'],
   [/^\/sales-workflow\/order-changes/, 'sales-order-changes'],
+  [/^\/sales-workflow\/orders-for-reopen/, 'sales-order-changes'],
+  [/^\/sales-workflow\/orders\/\d+\/reopen/, 'sales-order-changes'],
   [/^\/sales-workflow\/progress/, 'sales-progress'],
   [/^\/sales-workflow\/documents/, 'sales-orders'], [/^\/sales-workflow\/items/, 'sales-orders'],
+  [/^\/finance-workflow\/banks\/reconciliations(?:\/|$)/, 'finance-reconcile'],
+  [/^\/finance-workflow\/banks\/transactions\/\d+\/(?:post|reverse|void)/, 'finance-cash'],
+  [/^\/finance-workflow\/banks\/transactions(?:\/|$)/, 'finance-cash'],
+  [/^\/finance-workflow\/banks\/accounts\/\d+/, 'finance-cash'],
+  [/^\/finance-workflow\/banks\/accounts(?:\/|$)/, 'finance-bookkeeping'],
+  [/^\/finance-workflow\/notes(?:\/|$)/, 'finance-cash'],
   [/^\/finance-workflow\//, 'finance-workflow'],
+  [/^\/accounting\/(periods)/, 'accounting-periods'],
+  [/^\/accounting\/(auto-rules)/, 'accounting-auto-rules'],
+  [/^\/accounting\/clearing/, 'accounting-clearing'],
+  [/^\/accounting\/(opening-batches)/, 'accounting-opening-balances'],
+  [/^\/accounting\/opening-balances/, 'accounting-opening-balances'],
+  [/^\/accounting\/(month-closings)/, 'accounting-periods'],
+  [/^\/accounting\/(trial-balance|account-balances|ledger-details|reconciliation)/, 'accounting-general-ledger'],
+  [/^\/accounting\/year-closings/, 'accounting-year-close'],
+  [/^\/accounting\/(drafts|sources)/, 'accounting-drafts'],
+  [/^\/accounting\/(accounts|ledger)/, 'accounting-general-ledger'],
+  [/^\/accounting\/journals/, 'accounting-general-ledger'],
   [/^\/inventory-workflow\/document-types/, 'inventory-document-types'],
   [/^\/inventory-workflow\/procurement/, 'inventory-posting'],
   [/^\/inventory-workflow\/documents\/\d+\/(approve|post)/, 'inventory-posting'],
   [/^\/inventory-workflow\/documents/, 'inventory-transactions'],
-  [/^\/inventory-workflow\/balances/, 'inventory-new-balance'], [/^\/inventory-workflow\/ledger/, 'inventory-new-ledger'],
+  [/^\/reversals/, 'inventory-reversals'],
+  [/^\/inventory-workflow\/(availability|balances)/, 'inventory-new-balance'], [/^\/inventory-workflow\/ledger/, 'inventory-new-ledger'],
   [/^\/sh\/basic-data/, 'basicdata'], [/^\/sh\/warehouses/, 'warehouses'], [/^\/sh\/departments/, 'departments'],
   [/^\/sh\/employees/, 'employees'], [/^\/sh\/customers/, 'source-customers'], [/^\/sh\/suppliers/, 'source-suppliers'],
   [/^\/sh\/inventory-details/, 'inventory-detail'], [/^\/sh\/inventory-ledger/, 'inventory-ledger'],
@@ -68,6 +89,7 @@ const routeCapability = [
   [/^\/procurement\/(requisition-maintenance|requisition-lines\/\d+\/(maintenance|convert))/, 'requisition-maintenance'],
   [/^\/procurement\/order-changes/, 'purchase-order-changes'],
   [/^\/procurement\/(pending-inspections|receipts\/\d+\/inspect)/, 'receipt-inspection'],
+  [/^\/procurement\/(rejected-items|rejected-returns|receipts\/\d+\/rejected-return)/, 'receipt-rejected-return'],
   [/^\/procurement\/(returns|returnable-receipts)/, 'purchase-returns'],
   [/^\/procurement\/progress/, 'purchase-progress'], [/^\/procurement\/open-orders/, 'open-purchase-orders'],
   [/^\/sh\/purchase-documents\/requisitions/, 'requisition-entry'], [/^\/sh\/purchase-documents\/orders/, 'purchase-order-entry'],
@@ -83,7 +105,36 @@ export async function authorizationMiddleware(req, _res, next) {
     const match = routeCapability.find(([pattern]) => pattern.test(req.path));
     if (!match || req.auth.role_code === 'ADMIN') return next();
     const featureCode = match[1];
-    const action = /\/(approve|post)$/.test(req.path) ? 'can_approve' : req.method === 'GET' ? 'can_view' : req.method === 'POST' ? 'can_create' : req.method === 'PUT' || req.method === 'PATCH' ? 'can_update' : req.method === 'DELETE' ? 'can_delete' : 'can_view';
+    const action = /\/(approve|post|close|reopen|restore|complete|reverse|validate|void|scan|acknowledge|correction|resolve|ignore)$/.test(req.path) ? 'can_approve' : req.method === 'GET' ? 'can_view' : req.method === 'POST' ? 'can_create' : req.method === 'PUT' || req.method === 'PATCH' ? 'can_update' : req.method === 'DELETE' ? 'can_delete' : 'can_view';
+    // 管帳角色可以查詢票據／銀行明細，但不能建立、過帳、沖回或變更資金。
+    // 寫入仍由 finance-cash／finance-reconcile 的權限單獨控管。
+    if (req.method === 'GET' && /^\/finance-workflow\/(notes|banks\/transactions)(?:\/|$)/.test(req.path)) {
+      const [[permission]] = await pool.query(`SELECT MAX(can_view) AS allowed
+        FROM access_role_permissions WHERE role_id=? AND feature_code IN ('finance-bookkeeping','finance-cash')`, [req.auth.role_id]);
+      if (!permission || !Number(permission.allowed)) throw forbidden();
+      return next();
+    }
+    // 同一份近期進貨 API 同時供「進貨建立作業」及唯讀的「進貨入庫明細」使用。
+    // GET 允許具備任一畫面查詢權限的角色；新增進貨仍由 receipt-entry 的 can_create 控制。
+    if (req.method === 'GET' && /^\/procurement\/documents\/receipts(?:\/|$)/.test(req.path)) {
+      const [[permission]] = await pool.query(`SELECT MAX(can_view) AS allowed
+        FROM access_role_permissions
+        WHERE role_id=? AND feature_code IN ('receipt-entry','purchase-receipts')`, [req.auth.role_id]);
+      if (!permission || !Number(permission.allowed)) throw forbidden();
+      return next();
+    }
+    if (req.method === 'GET' && req.path === '/procurement/order-lines') {
+      const [[permission]] = await pool.query(`SELECT MAX(can_view) AS allowed FROM access_role_permissions
+        WHERE role_id=? AND feature_code IN ('purchase-order-entry','receipt-arrival','receipt-entry')`, [req.auth.role_id]);
+      if (!permission || !Number(permission.allowed)) throw forbidden();
+      return next();
+    }
+    if (/^\/inventory-workflow\/procurement(?:-|\/)/.test(req.path)) {
+      const [[permission]] = await pool.query(`SELECT MAX(${action}) AS allowed FROM access_role_permissions
+        WHERE role_id=? AND feature_code IN ('inventory-posting','receipt-posting')`, [req.auth.role_id]);
+      if (!permission || !Number(permission.allowed)) throw forbidden();
+      return next();
+    }
     const [[permission]] = await pool.query(`SELECT ${action} AS allowed FROM access_role_permissions WHERE role_id=? AND feature_code=?`, [req.auth.role_id, featureCode]);
     if (!permission || !Number(permission.allowed)) throw forbidden();
     next();
@@ -101,13 +152,23 @@ export function registerAuthRoutes(app) {
       if (!user || !user.is_active || !verifyPassword(password, user.password_hash)) throw unauthorized('帳號或密碼錯誤');
       const token = crypto.randomBytes(48).toString('base64url');
       const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-      await pool.query('DELETE FROM access_sessions WHERE expires_at <= NOW() OR user_id=?', [user.id]);
+      // 僅清除過期連線；允許同一使用者同時開啟多個 ERP 分頁，
+      // 避免重新登入或另一分頁登入時，讓既有分頁突然失效並顯示空資料。
+      await pool.query('DELETE FROM access_sessions WHERE expires_at <= NOW()');
       await pool.query('INSERT INTO access_sessions (user_id, token_hash, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? HOUR))', [user.id, tokenHash, SESSION_HOURS]);
       res.json({ ok: true, data: { token, user: { id:user.id, username:user.username, display_name:user.display_name, employee_code:user.employee_code, role_id:user.role_id, role_code:user.role_code, role_name:user.role_name, force_password_change:Boolean(user.force_password_change) } } });
     } catch (error) { next(error); }
   });
 
   app.get('/api/auth/me', (req, res) => res.json({ ok:true, data:req.auth }));
+  app.get('/api/auth/access', async (req, res, next) => {
+    try {
+      if (req.auth.role_code === 'ADMIN') return res.json({ ok:true, data:{ is_admin:true, permissions:[] } });
+      const [permissions] = await pool.query(`SELECT feature_code,can_view,can_create,can_update,can_delete,can_approve
+        FROM access_role_permissions WHERE role_id=?`, [req.auth.role_id]);
+      res.json({ ok:true, data:{ is_admin:false, permissions } });
+    } catch (error) { next(error); }
+  });
   app.post('/api/auth/admin-reset-password', async (req, res, next) => {
     try {
       if (req.auth?.role_code !== 'ADMIN') throw forbidden('僅系統管理員可重設密碼');

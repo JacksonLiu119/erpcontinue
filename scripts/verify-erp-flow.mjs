@@ -18,18 +18,19 @@ try {
   step.push(['主檔',TEST_ITEM]);
 
   const rq=await api('/procurement/requisitions','POST',{source_database:'SH',document_type:'RQ',requisition_date:date,requester_code:'admin',department_code:'100',warehouse_code:'101',item_code:TEST_ITEM,item_name:'流程驗證品號',unit:'PCS',qty_requested:qty,required_date:date,note:TEST_MARKER});
-  await api(`/procurement/documents/requisitions/${rq.id}/approve`,'POST',{}); const [[rqi]]=await db.query(`SELECT id FROM procurement_requisition_items WHERE requisition_id=?`,[rq.id]); step.push(['請購',rq.documentNo]);
+  await api(`/procurement/documents/requisitions/${rq.id}/approve`,'POST',{}); const [[rqi]]=await db.query(`SELECT id FROM procurement_requisition_items WHERE requisition_id=?`,[rq.id]);
+  await api(`/procurement/requisition-lines/${rqi.id}/maintenance`,'PUT',{source_database:'SH',suggested_supplier_code:'FLOW-SUPP',suggested_unit_price:cost,required_date:date,purchase_locked:1,note:TEST_MARKER}); step.push(['請購',rq.documentNo]);
   const po=await api('/procurement/orders','POST',{source_database:'SH',document_type:'3310',requisition_item_id:rqi.id,order_date:date,supplier_code:'FLOW-SUPP',expected_date:date,currency_code:'TWD',item_code:TEST_ITEM,item_name:'流程驗證品號',warehouse_code:'101',unit:'PCS',qty_ordered:qty,unit_price:cost,note:TEST_MARKER});
-  await api(`/procurement/documents/orders/${po.id}/approve`,'POST',{}); const [[poi]]=await db.query(`SELECT id FROM procurement_order_items WHERE purchase_order_id=?`,[po.id]); step.push(['採購',po.documentNo]);
+  const [[poState]]=await db.query('SELECT status FROM procurement_orders WHERE id=?',[po.id]); if(poState?.status==='draft')await api(`/procurement/documents/orders/${po.id}/approve`,'POST',{}); const [[poi]]=await db.query(`SELECT id FROM procurement_order_items WHERE purchase_order_id=?`,[po.id]); step.push(['採購',po.documentNo]);
   const gr=await api('/procurement/receipts','POST',{source_database:'SH',document_type:'3411',purchase_order_item_id:poi.id,receipt_date:date,supplier_code:'FLOW-SUPP',warehouse_code:'101',item_code:TEST_ITEM,item_name:'流程驗證品號',unit:'PCS',qty_received:qty,unit_cost:cost,note:TEST_MARKER});
   await api(`/procurement/receipts/${gr.id}/inspect`,'POST',{qty_accepted:qty,qty_rejected:0,inspection_note:TEST_MARKER});
   await api(`/inventory-workflow/procurement/receipt/${gr.id}/post`,'POST',{}); step.push(['進貨驗收與庫存',gr.documentNo]);
 
   const quote=await api('/sales-workflow/documents','POST',{source_database:'SH',document_kind:'quotation',document_type:'QT',document_date:date,customer_code:'FLOW-CUST',warehouse_code:'101',item_code:TEST_ITEM,item_name:'流程驗證品號',unit:'PCS',quantity:sellQty,unit_price:price,unit_cost:cost,note:TEST_MARKER});
   await api(`/sales-workflow/documents/${quote.id}/approve`,'POST',{}); step.push(['報價',quote.document_no]);
-  const so=await api(`/sales-workflow/items/${quote.item_id}/convert`,'POST',{document_date:date,warehouse_code:'101',quantity:sellQty});
+  const so=await api(`/sales-workflow/items/${quote.item_id}/convert`,'POST',{document_type:'SO',document_date:date,warehouse_code:'101',quantity:sellQty});
   await api(`/sales-workflow/documents/${so.id}/approve`,'POST',{}); step.push(['訂單',so.document_no]);
-  const ship=await api(`/sales-workflow/items/${so.item_id}/convert`,'POST',{document_date:date,warehouse_code:'101',quantity:sellQty,unit_cost:cost});
+  const ship=await api(`/sales-workflow/items/${so.item_id}/convert`,'POST',{document_type:'SA',document_date:date,warehouse_code:'101',quantity:sellQty,unit_cost:cost});
   await api(`/sales-workflow/documents/${ship.id}/approve`,'POST',{}); await api(`/sales-workflow/documents/${ship.id}/post`,'POST',{}); step.push(['銷貨與扣庫',ship.document_no]);
 
   const ar=await api('/finance-workflow/open-items','POST',{source_database:'SH',account_type:'AR',document_date:date,due_date:date,party_code:'FLOW-CUST',currency_code:'TWD',source_kind:'shipment',source_document_id:ship.id,source_document_no:ship.document_no,original_amount:sellQty*price,note:TEST_MARKER});

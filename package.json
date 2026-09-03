@@ -8,7 +8,20 @@
     "dev": "node --watch src/server.js",
     "import:sh": "node scripts/import-sh-legacy.mjs SH",
     "verify:flow": "node scripts/verify-erp-flow.mjs",
-    "cleanup:flow-test": "node scripts/cleanup-erp-flow.mjs"
+    "cleanup:flow-test": "node scripts/cleanup-erp-flow.mjs",
+    "audit:flow:july": "node scripts/audit-erp-flow-july.mjs",
+    "cleanup:audit:july": "node scripts/audit-erp-flow-july.mjs --cleanup",
+    "verify:audit:roots": "node scripts/verify-flow-audit-roots.mjs",
+    "verify:document-natures": "node scripts/verify-document-nature-routing.mjs",
+    "verify:procurement-closure": "node scripts/verify-procurement-closure.mjs",
+    "verify:sales-return-finance": "node scripts/verify-sales-return-finance.mjs",
+    "verify:finance-settlement-modes": "node scripts/verify-finance-settlement-modes.mjs",
+    "verify:accounting-drafts": "node scripts/verify-accounting-drafts.mjs",
+    "verify:bank-note-reconciliation": "node scripts/verify-bank-note-reconciliation.mjs",
+    "verify:accounting-period-rollforward": "node scripts/verify-accounting-period-rollforward.mjs",
+    "verify:import-quality": "node scripts/verify-import-quality.mjs",
+    "verify:company-regression": "node scripts/verify-company-regression.mjs",
+    "backup:github": "powershell -ExecutionPolicy Bypass -File scripts/backup-github.ps1"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
