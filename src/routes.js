@@ -3968,7 +3968,7 @@ function registerFinanceWorkflowRoutes(app){
   }
   const financeAccounts = [
     ['1001','銀行存款','asset'], ['1101','應收帳款','asset'], ['1121','應收票據','asset'],
-    ['1122','應收票據託收','asset'], ['1201','商品存貨','asset'], ['2101','應付帳款','liability'],
+    ['1122','應收票據託收','asset'], ['1131','預付貨款','asset'], ['1201','商品存貨','asset'], ['2101','應付帳款','liability'], ['2201','客戶預收款','liability'],
     ['2141','應付票據','liability'], ['4101','銷貨收入','revenue'], ['5101','銷貨成本','expense'],
     ['7161','兌換利益','revenue'], ['7162','兌換損失','expense']
   ];
@@ -4029,6 +4029,70 @@ function registerFinanceWorkflowRoutes(app){
     await conn.query(`INSERT INTO accounting_draft_events(draft_id,event_kind,before_status,after_status,reason,user_id)
       VALUES(?,'generated',NULL,'draft',?,?)`, [header.insertId, memo || '銀行／票據異動產生分錄底稿', userId || null]);
     return { id: header.insertId, draft_no: draftNo, debit_total: checked.debitTotal, credit_total: checked.creditTotal, line_count: checked.lines.length };
+  }
+  const FINANCE_EPS = 0.000001;
+  function financeRateValue(value) {
+    const rate = Number(value === undefined || value === null || value === '' ? 1 : value);
+    if (!Number.isFinite(rate) || rate <= 0) throw badRequest('匯率必須大於 0');
+    return rate;
+  }
+  function financeRulePair(rule, debitAmount, creditAmount, debitParty = null, creditParty = debitParty, description = null) {
+    const memo = description || rule.note || rule.entry_role;
+    return [
+      { line_no: 1, account_code: rule.debit_account_code, account_name: rule.debit_account_name, debit_amount: Number(debitAmount), credit_amount: 0, party_code: debitParty, description: memo },
+      { line_no: 2, account_code: rule.credit_account_code, account_name: rule.credit_account_name, debit_amount: 0, credit_amount: Number(creditAmount), party_code: creditParty, description: memo }
+    ];
+  }
+  function appendFinanceExchangeLine(lines, debitBase, creditBase, partyCode, description) {
+    const difference = Number(debitBase) - Number(creditBase);
+    if (difference > FINANCE_EPS) lines.push({ line_no: lines.length + 1, account_code: '7161', account_name: '兌換利益', debit_amount: 0, credit_amount: difference, party_code: partyCode || null, description: description || '匯兌利益' });
+    else if (difference < -FINANCE_EPS) lines.push({ line_no: lines.length + 1, account_code: '7162', account_name: '兌換損失', debit_amount: Math.abs(difference), credit_amount: 0, party_code: partyCode || null, description: description || '匯兌損失' });
+    return difference;
+  }
+  async function insertFinanceRuleDraft(conn, { context, date, moduleCode, documentKind, documentType = '*', entryRole = 'main', debitAmount, creditAmount, debitParty = null, creditParty = debitParty, partyCode = null, sourceKind, sourceId, sourceDocumentNo, accountType = null, memo, userId }) {
+    if (sourceId) {
+      const [[existing]] = await conn.query(`SELECT id,draft_no,debit_account_code,debit_account_name,credit_account_code,credit_account_name,amount,status
+        FROM accounting_drafts WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND source_kind=? AND source_id=? AND status<>'restored' LIMIT 1`,
+        [context.tenant_id, context.company_id, context.source_system, context.source_database, sourceKind, sourceId]);
+      if (existing) return { ...existing, line_count: null, debit_total: Number(existing.amount || 0), credit_total: Number(existing.amount || 0) };
+    }
+    await seedAccountingAutoRules(conn, context, userId || null);
+    const rule = await findAccountingAutoRule(conn, context, moduleCode, documentKind, documentType, entryRole);
+    const lines = financeRulePair(rule, debitAmount, creditAmount, debitParty, creditParty, memo || rule.note);
+    appendFinanceExchangeLine(lines, debitAmount, creditAmount, partyCode, '匯兌差額');
+    return insertFinanceDraft(conn, { context, date, sourceKind, sourceId, sourceDocumentNo, accountType, partyCode, memo, lines, userId });
+  }
+  async function validateAdvanceSourceSettlement(conn, advance, context) {
+    const settlementId = Number(advance.source_settlement_id || 0);
+    if (!settlementId) return null;
+    const [[settlement]] = await conn.query(`SELECT * FROM finance_settlements
+      WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND status='posted' FOR UPDATE`,
+      [settlementId, context.tenant_id, context.company_id, context.source_system, context.source_database]);
+    if (!settlement) throw badRequest('預收／預付來源必須是目前公司已過帳的收付款單');
+    const settlementCurrency = String(settlement.currency_code || 'TWD').toUpperCase();
+    if (String(settlement.account_type) !== String(advance.account_type) || String(settlement.party_code) !== String(advance.party_code) || settlementCurrency !== String(advance.currency_code || 'TWD').toUpperCase()) {
+      throw badRequest('預收／預付來源收付款單必須符合同公司、同類別、同對象及同幣別');
+    }
+    assertChronologicalDate(advance.advance_date, settlement.settlement_date, '預收／預付日期');
+    const [[allocated]] = await conn.query(`SELECT COALESCE(SUM(a.allocated_amount),0) used_amount
+      FROM finance_allocations a JOIN finance_settlements s ON s.id=a.settlement_id
+      WHERE a.settlement_id=? AND s.status<>'voided'`, [settlementId]);
+    const [[reserved]] = await conn.query(`SELECT COALESCE(SUM(original_amount),0) reserved_amount FROM finance_advances
+      WHERE source_settlement_id=? AND status<>'voided' AND id<>?`, [settlementId, Number(advance.id || 0)]);
+    const available = Number(settlement.amount || 0) - Number(allocated?.used_amount || 0) - Number(reserved?.reserved_amount || 0);
+    if (Number(advance.original_amount) > available + FINANCE_EPS) throw badRequest(`來源收付款單可轉預收／預付餘額不足（可用 ${Math.max(available, 0)}）`);
+    return settlement;
+  }
+  async function findPartyRelationship(conn, context, customerCode, supplierCode) {
+    const [[relationship]] = await conn.query(`SELECT * FROM finance_party_links
+      WHERE id IS NOT NULL AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+        AND customer_code=? AND supplier_code=? AND is_active=1 LIMIT 1`,
+      [context.tenant_id, context.company_id, context.source_system, context.source_database, customerCode, supplierCode]);
+    if (!relationship) throw badRequest('客戶兼廠商對沖前，必須先建立同公司、同來源的有效關係');
+    return relationship;
+  }
+  function scopedFinanceStatus(balance, fullStatus) {
+    return Number(balance) <= FINANCE_EPS ? fullStatus : 'partial';
   }
   function financeStatusLines(note, fromStatus, toStatus, bankTransactionDirection = null) {
     const amount = Number(note.amount);
@@ -4120,11 +4184,198 @@ function registerFinanceWorkflowRoutes(app){
     }catch(e){next(e);}
   });
   app.get('/api/finance-workflow/customer-credits',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),c=ctx(db);const[rows]=await pool.query(`SELECT c.*,a.sales_return_id,a.return_amount,a.receivable_offset_amount,a.refund_amount,a.status adjustment_status,d.document_no sales_return_no FROM finance_customer_credits c JOIN finance_return_adjustments a ON a.id=c.source_adjustment_id JOIN sales_documents d ON d.id=a.sales_return_id WHERE c.tenant_id=? AND c.company_id=? AND c.source_system=? AND c.source_database=? ORDER BY c.credit_date DESC,c.id DESC LIMIT 100`,[c.tenant_id,c.company_id,c.source_system,db]);res.json({ok:true,data:rows});}catch(e){next(e);}});
-  app.get('/api/finance-workflow/advances',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'').toUpperCase(),c=ctx(db),w=['tenant_id=?','company_id=?','source_system=?','source_database=?'],p=[c.tenant_id,c.company_id,c.source_system,db];if(['AR','AP'].includes(type)){w.push('account_type=?');p.push(type);}const[rows]=await pool.query(`SELECT * FROM finance_advances WHERE ${w.join(' AND ')} ORDER BY advance_date DESC,id DESC LIMIT 200`,p);res.json({ok:true,data:rows});}catch(e){next(e);}});
-  app.post('/api/finance-workflow/advances',async(req,res,next)=>{try{await ensureFinance();const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),type=String(b.account_type||'AR').toUpperCase(),kind=String(b.advance_kind||'prepayment'),c=ctx(db),date=validDate(b.advance_date),amount=positiveNumber(b.original_amount,'金額');if(!['AR','AP'].includes(type)||!['prepayment','overpayment'].includes(kind)||!trim(b.party_code))throw badRequest('預收／預付類別、類型與對象不可空白');const out=await tx(async conn=>{const no=trim(b.advance_no)||await nextWorkflowNumber(conn,'finance_advances','advance_no',type==='AR'?'ARADV':'APADV',date);const rate=Number(b.exchange_rate||1);const[r]=await conn.query(`INSERT INTO finance_advances(tenant_id,company_id,source_system,source_database,account_type,advance_kind,advance_no,advance_date,party_code,currency_code,exchange_rate,original_amount,balance_amount,source_settlement_id,source_document_no,status,note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'draft',?,?)`,[c.tenant_id,c.company_id,c.source_system,db,type,kind,no,date,trim(b.party_code),trim(b.currency_code)||'TWD',rate,amount,amount,b.source_settlement_id||null,trim(b.source_document_no)||null,trim(b.note)||null,req.auth.id]);return{id:r.insertId,advance_no:no,status:'draft'};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
-  app.post('/api/finance-workflow/advances/:id/approve',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id);await tx(async conn=>{const[[r]]=await conn.query("SELECT * FROM finance_advances WHERE id=? AND status='draft' FOR UPDATE",[id]);if(!r)throw badRequest('只有草稿可以核准');await conn.query("UPDATE finance_advances SET status='available',approved_by=?,approved_at=NOW() WHERE id=?",[req.auth.id,id]);});res.json({ok:true,data:{id,status:'available'}});}catch(e){next(e);}});
-  app.post('/api/finance-workflow/advances/:id/apply',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id),openId=Number(req.body?.open_item_id),amount=positiveNumber(req.body?.amount,'轉抵金額'),date=validDate(req.body?.movement_date);const out=await tx(async conn=>{const[[a]]=await conn.query("SELECT * FROM finance_advances WHERE id=? AND status IN ('available','partial') FOR UPDATE",[id]);const[[o]]=await conn.query("SELECT * FROM finance_open_items WHERE id=? AND status IN ('open','partial') FOR UPDATE",[openId]);if(!a||!o||a.tenant_id!==o.tenant_id||a.company_id!==o.company_id||a.source_system!==o.source_system||a.source_database!==o.source_database||a.account_type!==o.account_type||a.party_code!==o.party_code||a.currency_code!==o.currency_code)throw badRequest('預收／預付與帳款必須屬於同公司、同來源、同類別、同對象及同幣別');if(amount>Number(a.balance_amount)+.000001||amount>Number(o.balance_amount)+.000001)throw badRequest('轉抵金額超過可用餘額');const ab=Number(a.balance_amount)-amount,ob=Number(o.balance_amount)-amount;await conn.query("UPDATE finance_advances SET applied_amount=applied_amount+?,balance_amount=?,status=CASE WHEN ?<=.000001 THEN 'applied' ELSE 'partial' END WHERE id=?",[amount,ab,ab,id]);await conn.query("UPDATE finance_open_items SET adjustment_amount=adjustment_amount+?,balance_amount=?,status=CASE WHEN ?<=.000001 THEN 'settled' ELSE 'partial' END WHERE id=?",[amount,Number(o.balance_amount)-amount,Number(o.balance_amount)-amount,openId]);await conn.query("INSERT INTO finance_advance_movements(advance_id,movement_date,movement_kind,amount,open_item_id,reference_no,note,created_by) VALUES(?,?, 'apply',?,?,?,?,?)",[id,date,amount,openId,trim(req.body?.reference_no),trim(req.body?.note),req.auth.id]);return{id,applied_amount:amount,balance_amount:ab};});res.json({ok:true,data:out});}catch(e){next(e);}});
-  app.post('/api/finance-workflow/advances/:id/refund',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id),amount=positiveNumber(req.body?.amount,'退回金額'),date=validDate(req.body?.movement_date);const out=await tx(async conn=>{const[[a]]=await conn.query("SELECT * FROM finance_advances WHERE id=? AND status IN ('available','partial') FOR UPDATE",[id]);if(!a||amount>Number(a.balance_amount)+.000001)throw badRequest('退回金額超過預收／預付餘額');const b=Number(a.balance_amount)-amount;await conn.query("UPDATE finance_advances SET refunded_amount=refunded_amount+?,balance_amount=?,status=CASE WHEN ?<=.000001 THEN 'refunded' ELSE 'partial' END WHERE id=?",[amount,b,b,id]);await conn.query("INSERT INTO finance_advance_movements(advance_id,movement_date,movement_kind,amount,reference_no,note,created_by) VALUES(?,?, 'refund',?,?,?,?)",[id,date,amount,trim(req.body?.reference_no),trim(req.body?.note),req.auth.id]);return{id,refunded_amount:amount,balance_amount:b};});res.json({ok:true,data:out});}catch(e){next(e);}});
+  // 立沖／預收預付：所有資料均以目前公司、來源系統與來源資料庫作為查詢及寫入範圍。
+  app.get('/api/finance-workflow/advances', async (req,res,next) => {
+    try {
+      await ensureFinance();
+      const db=String(req.query.source_database||'SH').toUpperCase(), type=String(req.query.account_type||'').toUpperCase(), c=ctx(db);
+      const conditions=['a.tenant_id=?','a.company_id=?','a.source_system=?','a.source_database=?'];
+      const params=[c.tenant_id,c.company_id,c.source_system,db];
+      if(['AR','AP'].includes(type)){conditions.push('a.account_type=?');params.push(type);}
+      const [rows]=await pool.query(`SELECT a.*,d.draft_no AS accounting_draft_no,d.status AS accounting_draft_status,
+          (SELECT COUNT(*) FROM finance_advance_movements m WHERE m.advance_id=a.id) movement_count,
+          (SELECT COALESCE(SUM(CASE WHEN m.movement_kind IN ('apply','offset') THEN m.amount ELSE 0 END),0) FROM finance_advance_movements m WHERE m.advance_id=a.id) used_amount,
+          (SELECT COALESCE(SUM(CASE WHEN m.movement_kind='refund' THEN m.amount ELSE 0 END),0) FROM finance_advance_movements m WHERE m.advance_id=a.id) movement_refunded_amount
+        FROM finance_advances a LEFT JOIN accounting_drafts d ON d.id=a.accounting_draft_id
+        WHERE ${conditions.join(' AND ')} ORDER BY a.advance_date DESC,a.id DESC LIMIT 200`,params);
+      res.json({ok:true,data:rows});
+    } catch(e){next(e);}
+  });
+  app.get('/api/finance-workflow/advances/:id/movements', async (req,res,next) => {
+    try {
+      await ensureFinance();
+      const db=String(req.query.source_database||'SH').toUpperCase(), c=ctx(db), id=Number(req.params.id);
+      const [[advance]]=await pool.query('SELECT * FROM finance_advances WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?',[id,c.tenant_id,c.company_id,c.source_system,db]);
+      if(!advance)throw notFound('找不到目前公司的立沖資料');
+      const [rows]=await pool.query(`SELECT m.*,o.document_no AS open_item_no,r.advance_no AS related_advance_no,
+          d.draft_no AS accounting_draft_no,d.status AS accounting_draft_status
+        FROM finance_advance_movements m LEFT JOIN finance_open_items o ON o.id=m.open_item_id
+        LEFT JOIN finance_advances r ON r.id=m.related_advance_id
+        LEFT JOIN accounting_drafts d ON d.id=m.accounting_draft_id
+        WHERE m.advance_id=? ORDER BY m.movement_date,m.id`,[id]);
+      res.json({ok:true,data:{rows,advance}});
+    } catch(e){next(e);}
+  });
+  app.get('/api/finance-workflow/cross-offsets', async (req,res,next) => {
+    try {
+      await ensureFinance();
+      const db=String(req.query.source_database||'SH').toUpperCase(), kind=String(req.query.offset_kind||'').toLowerCase(), c=ctx(db);
+      const conditions=['o.tenant_id=?','o.company_id=?','o.source_system=?','o.source_database=?'];
+      const params=[c.tenant_id,c.company_id,c.source_system,db];
+      if(['open_items','advances'].includes(kind)){conditions.push('o.offset_kind=?');params.push(kind);}
+      if(req.query.from_date){conditions.push('o.offset_date>=?');params.push(validDate(req.query.from_date));}
+      if(req.query.to_date){conditions.push('o.offset_date<=?');params.push(validDate(req.query.to_date));}
+      const [rows]=await pool.query(`SELECT o.*,d.draft_no AS accounting_draft_no,d.status AS accounting_draft_status,
+          pl.relationship_type
+        FROM finance_cross_offsets o LEFT JOIN accounting_drafts d ON d.id=o.accounting_draft_id
+        LEFT JOIN finance_party_links pl ON pl.id=o.relationship_id
+        WHERE ${conditions.join(' AND ')} ORDER BY o.offset_date DESC,o.id DESC LIMIT 200`,params);
+      res.json({ok:true,data:rows});
+    } catch(e){next(e);}
+  });
+  app.post('/api/finance-workflow/advances', async (req,res,next) => {
+    try {
+      await ensureFinance();
+      const b=req.body||{}, db=String(b.source_database||'SH').toUpperCase(), type=String(b.account_type||'AR').toUpperCase(), kind=String(b.advance_kind||'prepayment').toLowerCase(), c=ctx(db);
+      const date=validDate(b.advance_date), amount=positiveNumber(b.original_amount,'金額'), party=trim(b.party_code), currency=(trim(b.currency_code)||'TWD').toUpperCase(), rate=financeRateValue(b.exchange_rate);
+      if(!['AR','AP'].includes(type)||!['prepayment','overpayment'].includes(kind)||!party)throw badRequest('預收／預付類別、類型與對象不可空白');
+      const sourceSettlementId=trim(b.source_settlement_id)?Number(b.source_settlement_id):0;
+      if(sourceSettlementId&&!Number.isInteger(sourceSettlementId))throw badRequest('來源收付款單代號不正確');
+      const out=await tx(async conn=>{
+        await assertOpenAccountingPeriod(conn,c,date);
+        const no=trim(b.advance_no)||await nextWorkflowNumber(conn,'finance_advances','advance_no',type==='AR'?'ARADV':'APADV',date);
+        const advance={id:0,account_type:type,advance_kind:kind,advance_no:no,advance_date:date,party_code:party,currency_code:currency,exchange_rate:rate,original_amount:amount,source_settlement_id:sourceSettlementId||null};
+        if(sourceSettlementId)await validateAdvanceSourceSettlement(conn,advance,c);
+        const [r]=await conn.query(`INSERT INTO finance_advances
+          (tenant_id,company_id,source_system,source_database,account_type,advance_kind,advance_no,advance_date,party_code,currency_code,exchange_rate,original_amount,balance_amount,source_settlement_id,source_document_no,status,note,created_by)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'draft',?,?)`,
+          [c.tenant_id,c.company_id,c.source_system,db,type,kind,no,date,party,currency,rate,amount,amount,sourceSettlementId||null,trim(b.source_document_no)||null,trim(b.note)||null,req.auth.id]);
+        return{id:r.insertId,advance_no:no,status:'draft',source_settlement_id:sourceSettlementId||null};
+      });
+      res.status(201).json({ok:true,data:out});
+    } catch(e){next(e);}
+  });
+  app.post('/api/finance-workflow/advances/:id/approve', async (req,res,next) => {
+    try {
+      await ensureFinance();
+      const db=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase(), c=ctx(db), id=Number(req.params.id);
+      const out=await tx(async conn=>{
+        const [[advance]]=await conn.query(`SELECT * FROM finance_advances WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND status='draft' FOR UPDATE`,[id,c.tenant_id,c.company_id,c.source_system,db]);
+        if(!advance)throw badRequest('只有目前公司的預收／預付草稿可以核准');
+        await assertOpenAccountingPeriod(conn,c,advance.advance_date);
+        const settlement=await validateAdvanceSourceSettlement(conn,advance,c);
+        const base=Number(advance.original_amount)*financeRateValue(advance.exchange_rate);
+        const draft=await insertFinanceRuleDraft(conn,{context:c,date:dateText(advance.advance_date),moduleCode:advance.account_type,documentKind:'advance_create',entryRole:settlement?'reclass':'main',debitAmount:base,creditAmount:base,partyCode:advance.party_code,debitParty:advance.party_code,creditParty:advance.party_code,sourceKind:'finance_advance',sourceId:advance.id,sourceDocumentNo:advance.advance_no,accountType:advance.account_type,memo:settlement?'收付款轉預收／預付':'建立預收／預付與溢收／溢付',userId:req.auth.id});
+        await conn.query("UPDATE finance_advances SET status='available',accounting_draft_id=?,approved_by=?,approved_at=NOW() WHERE id=?",[draft.id,req.auth.id,id]);
+        return{id,advance_no:advance.advance_no,status:'available',accounting_draft_id:draft.id,draft_no:draft.draft_no,source_settlement_id:advance.source_settlement_id||null};
+      });
+      res.json({ok:true,data:out});
+    } catch(e){next(e);}
+  });
+  app.post('/api/finance-workflow/advances/:id/apply', async (req,res,next) => {
+    try {
+      await ensureFinance();
+      const db=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase(), c=ctx(db), id=Number(req.params.id), openId=Number(req.body?.open_item_id), amount=positiveNumber(req.body?.amount,'轉抵金額'), date=validDate(req.body?.movement_date);
+      if(!Number.isInteger(id)||id<1||!Number.isInteger(openId)||openId<1)throw badRequest('立沖或帳款代號不正確');
+      const out=await tx(async conn=>{
+        const [[advance]]=await conn.query(`SELECT * FROM finance_advances WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND status IN ('available','partial') FOR UPDATE`,[id,c.tenant_id,c.company_id,c.source_system,db]);
+        const [[item]]=await conn.query(`SELECT * FROM finance_open_items WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND status IN ('open','partial') FOR UPDATE`,[openId,c.tenant_id,c.company_id,c.source_system,db]);
+        if(!advance||!item||advance.account_type!==item.account_type||String(advance.party_code)!==String(item.party_code)||String(advance.currency_code||'TWD').toUpperCase()!==String(item.currency_code||'TWD').toUpperCase())throw badRequest('預收／預付與帳款必須屬於同公司、同來源、同類別、同對象及同幣別');
+        assertChronologicalDate(date,advance.advance_date,'轉抵日期');
+        assertChronologicalDate(date,item.document_date,'轉抵日期');
+        await assertOpenAccountingPeriod(conn,c,date);
+        if(amount>Number(advance.balance_amount)+FINANCE_EPS||amount>Number(item.balance_amount)+FINANCE_EPS)throw badRequest('轉抵金額超過可用餘額');
+        const advanceRate=financeRateValue(advance.exchange_rate), itemRate=financeRateValue(item.exchange_rate), advanceBase=amount*advanceRate, itemBase=amount*itemRate;
+        const advanceBalance=Math.max(Number(advance.balance_amount)-amount,0), itemBalance=Math.max(Number(item.balance_amount)-amount,0);
+        const itemBaseBalance=Math.max((Number(item.base_balance_amount||0)>FINANCE_EPS?Number(item.base_balance_amount):Number(item.balance_amount)*itemRate)-itemBase,0);
+        await conn.query("UPDATE finance_advances SET applied_amount=applied_amount+?,balance_amount=?,status=? WHERE id=?",[amount,advanceBalance,scopedFinanceStatus(advanceBalance,'applied'),id]);
+        await conn.query("UPDATE finance_open_items SET settled_amount=settled_amount+?,base_settled_amount=base_settled_amount+?,balance_amount=?,base_balance_amount=?,status=? WHERE id=?",[amount,itemBase,itemBalance,itemBaseBalance,scopedFinanceStatus(itemBalance,'settled'),openId]);
+        const [movement]=await conn.query(`INSERT INTO finance_advance_movements
+          (advance_id,movement_date,movement_kind,amount,base_amount,exchange_difference,open_item_id,reference_no,note,created_by)
+          VALUES(?,?, 'apply',?,?,?,?,?,?,?)`,[id,date,amount,advanceBase,advanceBase-itemBase,openId,trim(req.body?.reference_no),trim(req.body?.note),req.auth.id]);
+        const debitBase=advance.account_type==='AR'?advanceBase:itemBase, creditBase=advance.account_type==='AR'?itemBase:advanceBase;
+        const draft=await insertFinanceRuleDraft(conn,{context:c,date,moduleCode:advance.account_type,documentKind:'advance_apply',debitAmount:debitBase,creditAmount:creditBase,partyCode:advance.party_code,debitParty:advance.party_code,creditParty:advance.party_code,sourceKind:'finance_advance_movement',sourceId:movement.insertId,sourceDocumentNo:`${advance.advance_no}/${item.document_no}`.slice(0,80),accountType:advance.account_type,memo:'預收／預付分批轉抵應收／應付',userId:req.auth.id});
+        await conn.query('UPDATE finance_advance_movements SET accounting_draft_id=? WHERE id=?',[draft.id,movement.insertId]);
+        return{id,open_item_id:openId,movement_id:movement.insertId,applied_amount:amount,advance_balance_amount:advanceBalance,open_item_balance_amount:itemBalance,advance_base_amount:advanceBase,open_item_base_amount:itemBase,exchange_difference:advanceBase-itemBase,accounting_draft_id:draft.id,draft_no:draft.draft_no};
+      });
+      res.json({ok:true,data:out});
+    } catch(e){next(e);}
+  });
+  app.post('/api/finance-workflow/advances/:id/refund', async (req,res,next) => {
+    try {
+      await ensureFinance();
+      const db=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase(), c=ctx(db), id=Number(req.params.id), amount=positiveNumber(req.body?.amount,'退款／退回金額'), date=validDate(req.body?.movement_date);
+      const out=await tx(async conn=>{
+        const [[advance]]=await conn.query(`SELECT * FROM finance_advances WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND status IN ('available','partial') FOR UPDATE`,[id,c.tenant_id,c.company_id,c.source_system,db]);
+        if(!advance||amount>Number(advance.balance_amount)+FINANCE_EPS)throw badRequest('退款／退回金額超過預收／預付可用餘額');
+        assertChronologicalDate(date,advance.advance_date,'退款／退回日期');
+        await assertOpenAccountingPeriod(conn,c,date);
+        const balance=Math.max(Number(advance.balance_amount)-amount,0), base=amount*financeRateValue(advance.exchange_rate);
+        await conn.query("UPDATE finance_advances SET refunded_amount=refunded_amount+?,balance_amount=?,status=? WHERE id=?",[amount,balance,scopedFinanceStatus(balance,'refunded'),id]);
+        const [movement]=await conn.query(`INSERT INTO finance_advance_movements
+          (advance_id,movement_date,movement_kind,amount,base_amount,exchange_difference,reference_no,note,created_by)
+          VALUES(?,?, 'refund',?,?,?,?,?,?)`,[id,date,amount,base,0,trim(req.body?.reference_no),trim(req.body?.note),req.auth.id]);
+        const draft=await insertFinanceRuleDraft(conn,{context:c,date,moduleCode:advance.account_type,documentKind:'advance_refund',debitAmount:base,creditAmount:base,partyCode:advance.party_code,debitParty:advance.party_code,creditParty:advance.party_code,sourceKind:'finance_advance_movement',sourceId:movement.insertId,sourceDocumentNo:`${advance.advance_no}/退款`.slice(0,80),accountType:advance.account_type,memo:'預收／預付與溢收／溢付退款',userId:req.auth.id});
+        await conn.query('UPDATE finance_advance_movements SET accounting_draft_id=? WHERE id=?',[draft.id,movement.insertId]);
+        return{id,movement_id:movement.insertId,refunded_amount:amount,balance_amount:balance,accounting_draft_id:draft.id,draft_no:draft.draft_no};
+      });
+      res.json({ok:true,data:out});
+    } catch(e){next(e);}
+  });
+  app.post('/api/finance-workflow/cross-offsets', async (req,res,next) => {
+    try {
+      await ensureFinance();
+      const b=req.body||{}, db=String(b.source_database||'SH').toUpperCase(), c=ctx(db), kind=String(b.offset_kind||'open_items').toLowerCase(), date=validDate(b.offset_date||b.movement_date), amount=positiveNumber(b.amount,'對沖金額'), currency=(trim(b.currency_code)||'TWD').toUpperCase();
+      if(!['open_items','advances'].includes(kind))throw badRequest('對沖類型只能是應收／應付帳款或預收／預付');
+      const arId=Number(kind==='open_items'?(b.ar_open_item_id||b.ar_id):(b.ar_advance_id||b.ar_id)), apId=Number(kind==='open_items'?(b.ap_open_item_id||b.ap_id):(b.ap_advance_id||b.ap_id));
+      if(!Number.isInteger(arId)||arId<1||!Number.isInteger(apId)||apId<1)throw badRequest('對沖必須同時指定應收端與應付端');
+      const out=await tx(async conn=>{
+        let ar,ap,relationship;
+        if(kind==='open_items'){
+          [[ar]]=await conn.query(`SELECT * FROM finance_open_items WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND account_type='AR' AND status IN ('open','partial') FOR UPDATE`,[arId,c.tenant_id,c.company_id,c.source_system,db]);
+          [[ap]]=await conn.query(`SELECT * FROM finance_open_items WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND account_type='AP' AND status IN ('open','partial') FOR UPDATE`,[apId,c.tenant_id,c.company_id,c.source_system,db]);
+        } else {
+          [[ar]]=await conn.query(`SELECT * FROM finance_advances WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND account_type='AR' AND status IN ('available','partial') FOR UPDATE`,[arId,c.tenant_id,c.company_id,c.source_system,db]);
+          [[ap]]=await conn.query(`SELECT * FROM finance_advances WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND account_type='AP' AND status IN ('available','partial') FOR UPDATE`,[apId,c.tenant_id,c.company_id,c.source_system,db]);
+        }
+        if(!ar||!ap)throw badRequest('對沖來源不存在、已結清或不屬於目前公司');
+        if(String(ar.currency_code||'TWD').toUpperCase()!==String(ap.currency_code||'TWD').toUpperCase()||String(ar.currency_code||'TWD').toUpperCase()!==currency)throw badRequest('對沖必須使用同一公司、同一來源及同一幣別');
+        relationship=await findPartyRelationship(conn,c,String(ar.party_code),String(ap.party_code));
+        assertChronologicalDate(date,kind==='open_items'?ar.document_date:ar.advance_date,'對沖日期');
+        assertChronologicalDate(date,kind==='open_items'?ap.document_date:ap.advance_date,'對沖日期');
+        await assertOpenAccountingPeriod(conn,c,date);
+        if(amount>Number(ar.balance_amount)+FINANCE_EPS||amount>Number(ap.balance_amount)+FINANCE_EPS)throw badRequest('對沖金額超過應收／應付可用餘額');
+        const arRate=financeRateValue(ar.exchange_rate), apRate=financeRateValue(ap.exchange_rate), arBase=amount*arRate, apBase=amount*apRate;
+        const no=trim(b.offset_no)||await nextWorkflowNumber(conn,'finance_cross_offsets','offset_no','OFF',date);
+        const [header]=await conn.query(`INSERT INTO finance_cross_offsets
+          (tenant_id,company_id,source_system,source_database,offset_no,offset_date,offset_kind,customer_code,supplier_code,currency_code,amount,ar_base_amount,ap_base_amount,exchange_difference,ar_open_item_id,ap_open_item_id,ar_advance_id,ap_advance_id,relationship_id,reference_no,note,status,created_by)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,db,no,date,kind,String(ar.party_code),String(ap.party_code),currency,amount,arBase,apBase,apBase-arBase,kind==='open_items'?ar.id:null,kind==='open_items'?ap.id:null,kind==='advances'?ar.id:null,kind==='advances'?ap.id:null,relationship.id,trim(b.reference_no),trim(b.note),'posted',req.auth.id]);
+        let movementIds=[];
+        if(kind==='open_items'){
+          const arBalance=Math.max(Number(ar.balance_amount)-amount,0),apBalance=Math.max(Number(ap.balance_amount)-amount,0);
+          const arBaseBalance=Math.max((Number(ar.base_balance_amount||0)>FINANCE_EPS?Number(ar.base_balance_amount):Number(ar.balance_amount)*arRate)-arBase,0),apBaseBalance=Math.max((Number(ap.base_balance_amount||0)>FINANCE_EPS?Number(ap.base_balance_amount):Number(ap.balance_amount)*apRate)-apBase,0);
+          await conn.query("UPDATE finance_open_items SET settled_amount=settled_amount+?,base_settled_amount=base_settled_amount+?,balance_amount=?,base_balance_amount=?,status=? WHERE id=?",[amount,arBase,arBalance,arBaseBalance,scopedFinanceStatus(arBalance,'settled'),ar.id]);
+          await conn.query("UPDATE finance_open_items SET settled_amount=settled_amount+?,base_settled_amount=base_settled_amount+?,balance_amount=?,base_balance_amount=?,status=? WHERE id=?",[amount,apBase,apBalance,apBaseBalance,scopedFinanceStatus(apBalance,'settled'),ap.id]);
+        } else {
+          const arBalance=Math.max(Number(ar.balance_amount)-amount,0),apBalance=Math.max(Number(ap.balance_amount)-amount,0);
+          await conn.query("UPDATE finance_advances SET applied_amount=applied_amount+?,balance_amount=?,status=? WHERE id=?",[amount,arBalance,scopedFinanceStatus(arBalance,'applied'),ar.id]);
+          await conn.query("UPDATE finance_advances SET applied_amount=applied_amount+?,balance_amount=?,status=? WHERE id=?",[amount,apBalance,scopedFinanceStatus(apBalance,'applied'),ap.id]);
+          const [arMovement]=await conn.query(`INSERT INTO finance_advance_movements
+            (advance_id,movement_date,movement_kind,amount,base_amount,exchange_difference,related_advance_id,relationship_id,reference_no,note,created_by)
+            VALUES(?,?, 'offset',?,?,?,?,?,?,?,?)`,[ar.id,date,amount,arBase,arBase-apBase,ap.id,relationship.id,no,trim(b.note),req.auth.id]);
+          const [apMovement]=await conn.query(`INSERT INTO finance_advance_movements
+            (advance_id,movement_date,movement_kind,amount,base_amount,exchange_difference,related_advance_id,relationship_id,reference_no,note,created_by)
+            VALUES(?,?, 'offset',?,?,?,?,?,?,?,?)`,[ap.id,date,amount,apBase,apBase-arBase,ar.id,relationship.id,no,trim(b.note),req.auth.id]);
+          movementIds=[arMovement.insertId,apMovement.insertId];
+        }
+        const draft=await insertFinanceRuleDraft(conn,{context:c,date,moduleCode:'FIN',documentKind:'cross_offset',documentType:kind,debitAmount:apBase,creditAmount:arBase,debitParty:String(ap.party_code),creditParty:String(ar.party_code),sourceKind:'finance_cross_offset',sourceId:header.insertId,sourceDocumentNo:no,accountType:'FIN',memo:kind==='open_items'?'客戶兼廠商應收／應付帳款對沖':'客戶兼廠商預收／預付對沖',userId:req.auth.id});
+        await conn.query('UPDATE finance_cross_offsets SET accounting_draft_id=? WHERE id=?',[draft.id,header.insertId]);
+        if(movementIds.length)await conn.query(`UPDATE finance_advance_movements SET accounting_draft_id=? WHERE id IN (${movementIds.map(()=>'?').join(',')})`,[draft.id,...movementIds]);
+        return{id:header.insertId,offset_no:no,offset_kind:kind,amount,customer_code:ar.party_code,supplier_code:ap.party_code,relationship_id:relationship.id,accounting_draft_id:draft.id,draft_no:draft.draft_no,exchange_difference:apBase-arBase};
+      });
+      res.status(201).json({ok:true,data:out});
+    } catch(e){next(e);}
+  });
   app.get('/api/finance-workflow/party-links',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),c=ctx(db);const[rows]=await pool.query('SELECT * FROM finance_party_links WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND is_active=1 ORDER BY customer_code,supplier_code',[c.tenant_id,c.company_id,c.source_system,db]);res.json({ok:true,data:rows});}catch(e){next(e);}});
   app.post('/api/finance-workflow/party-links',async(req,res,next)=>{try{await ensureFinance();const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),c=ctx(db);if(!trim(b.customer_code)||!trim(b.supplier_code))throw badRequest('客戶代號與廠商代號不可空白');await pool.query('INSERT INTO finance_party_links(tenant_id,company_id,source_system,source_database,customer_code,supplier_code,relationship_type,note,created_by) VALUES(?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE is_active=1,relationship_type=VALUES(relationship_type),note=VALUES(note)',[c.tenant_id,c.company_id,c.source_system,db,trim(b.customer_code),trim(b.supplier_code),trim(b.relationship_type)||'customer_supplier',trim(b.note),req.auth.id]);res.status(201).json({ok:true});}catch(e){next(e);}});
   app.post('/api/finance-workflow/customer-credits/:id/apply',async(req,res,next)=>{
@@ -4429,7 +4680,7 @@ function registerFinanceWorkflowRoutes(app){
       res.json({ok:true,data:{id,synced_return_adjustments:synced}});
     }catch(e){next(e);}
   });
-  app.get('/api/finance-workflow/open-items',async(req,res,next)=>{try{const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'AR').toUpperCase(),limit=Math.min(Math.max(Number(req.query.limit)||10,1),100);const[rows]=await pool.query('SELECT * FROM finance_open_items WHERE source_database=? AND account_type=? ORDER BY document_date DESC,id DESC LIMIT ?',[db,type,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
+  app.get('/api/finance-workflow/open-items',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'AR').toUpperCase(),limit=Math.min(Math.max(Number(req.query.limit)||100,1),200),c=ctx(db);const conditions=['tenant_id=?','company_id=?','source_system=?','source_database=?','account_type=?','status IN (\'open\',\'partial\')'];const params=[c.tenant_id,c.company_id,c.source_system,db,type];if(req.query.party_code){conditions.push('party_code=?');params.push(trim(req.query.party_code));}if(req.query.currency_code){conditions.push('currency_code=?');params.push(String(req.query.currency_code).toUpperCase());}const[rows]=await pool.query(`SELECT * FROM finance_open_items WHERE ${conditions.join(' AND ')} ORDER BY document_date DESC,id DESC LIMIT ?`,[...params,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
    app.post(['/api/finance-workflow/settlements-enhanced','/api/finance-workflow/settlements'],async(req,res,next)=>{try{await ensureFinance();const b=req.body||{},date=validDate(b.settlement_date),selectedType=trim(b.document_type),raw=Array.isArray(b.allocations)?b.allocations:[{open_item_id:b.open_item_id,allocated_amount:b.amount}];if(!selectedType)throw badRequest('請選擇收付款單別');const allocations=raw.map(x=>({open_item_id:Number(x.open_item_id),allocated_amount:positiveNumber(x.allocated_amount??x.amount,'沖銷金額')})).filter(x=>x.open_item_id);if(!allocations.length)throw badRequest('至少選擇一筆未沖帳款');const out=await tx(async conn=>{const items=[];for(const a of allocations){const[[o]]=await conn.query("SELECT * FROM finance_open_items WHERE id=? AND status IN ('open','partial') FOR UPDATE",[a.open_item_id]);if(!o||a.allocated_amount>Number(o.balance_amount))throw badRequest('收付金額超過未沖餘額');items.push(o);}const first=items[0];if(items.some(o=>o.account_type!==first.account_type||o.party_code!==first.party_code||o.currency_code!==first.currency_code||o.source_database!==first.source_database))throw badRequest('不可混合不同對象、幣別或公司來源');const amount=allocations.reduce((s,x)=>s+x.allocated_amount,0),rate=Number(b.exchange_rate)||1,baseAmount=amount*rate;const no=trim(b.settlement_no)||await nextWorkflowNumber(conn,'finance_settlements','settlement_no',selectedType,date);let expectedBase=0;for(let i=0;i<items.length;i++)expectedBase+=allocations[i].allocated_amount*Number(items[i].exchange_rate||1);const diff=(first.account_type==='AR'?1:-1)*(baseAmount-expectedBase);const[r]=await conn.query(`INSERT INTO finance_settlements(tenant_id,company_id,source_system,source_database,account_type,settlement_no,settlement_date,party_code,currency_code,exchange_rate,base_amount,exchange_difference,payment_method,bank_code,reference_no,amount,status,note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?,?)`,[first.tenant_id,first.company_id,first.source_system,first.source_database,first.account_type,no,date,first.party_code,first.currency_code,rate,baseAmount,diff,trim(b.payment_method),trim(b.bank_code),trim(b.reference_no),amount,trim(b.note),req.auth.id]);for(let i=0;i<allocations.length;i++){const a=allocations[i],base=a.allocated_amount*rate,lineDiff=(first.account_type==='AR'?1:-1)*(base-a.allocated_amount*Number(items[i].exchange_rate||1));await conn.query('INSERT INTO finance_allocations(settlement_id,open_item_id,allocated_amount,base_allocated_amount,exchange_difference) VALUES(?,?,?,?,?)',[r.insertId,a.open_item_id,a.allocated_amount,base,lineDiff]);}return{id:r.insertId,settlement_no:no,amount,base_amount:baseAmount,exchange_difference:diff};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
    app.post(['/api/finance-workflow/settlements/:id/post-enhanced','/api/finance-workflow/settlements/:id/post'],async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id);await tx(async conn=>{const[[s]]=await conn.query("SELECT * FROM finance_settlements WHERE id=? AND status='draft' FOR UPDATE",[id]);if(!s)throw badRequest('找不到待過帳收付款單');await assertOpenAccountingPeriod(conn,contextFor(String(s.source_database).toUpperCase()),s.settlement_date);const[rows]=await conn.query('SELECT a.*,o.document_no,o.document_date,o.balance_amount,o.base_balance_amount FROM finance_allocations a JOIN finance_open_items o ON o.id=a.open_item_id WHERE a.settlement_id=? FOR UPDATE',[id]);for(const a of rows){assertChronologicalDate(s.settlement_date,a.document_date,'收付款日期');const balance=Number(a.balance_amount)-Number(a.allocated_amount),baseBalance=Number(a.base_balance_amount)-Number(a.allocated_amount)*(Number(a.base_balance_amount)/Math.max(Number(a.balance_amount),0.000001));await conn.query("UPDATE finance_open_items SET settled_amount=settled_amount+?,base_settled_amount=base_settled_amount+?,balance_amount=?,base_balance_amount=?,status=? WHERE id=?",[a.allocated_amount,a.base_allocated_amount,balance,Math.max(baseBalance,0),Math.abs(balance)<0.000001?'settled':'partial',a.open_item_id]);}await refreshProcurementPaidQuantities(conn,id);await conn.query("UPDATE finance_settlements SET status='posted',approved_by=?,approved_at=NOW(),posted_by=?,posted_at=NOW() WHERE id=?",[req.auth.id,req.auth.id,id]);});res.json({ok:true,data:{id,status:'posted'}});}catch(e){next(e);}});
   app.post('/api/finance-workflow/settlements',async(req,res,next)=>{try{const b=req.body||{},date=validDate(b.settlement_date),selectedType=trim(b.document_type),rawAllocations=Array.isArray(b.allocations)?b.allocations:[{open_item_id:b.open_item_id,allocated_amount:b.amount}];if(!selectedType)throw badRequest('請選擇收付款單別');const allocations=rawAllocations.map(x=>({open_item_id:Number(x.open_item_id),allocated_amount:positiveNumber(x.allocated_amount??x.amount,'沖銷金額')})).filter(x=>x.open_item_id);if(!allocations.length)throw badRequest('至少選擇一筆未沖帳款');const out=await tx(async conn=>{const items=[];for(const a of allocations){const[[o]]=await conn.query("SELECT * FROM finance_open_items WHERE id=? AND status IN ('open','partial') FOR UPDATE",[a.open_item_id]);if(!o||a.allocated_amount>Number(o.balance_amount))throw badRequest('收付金額超過未沖餘額');items.push(o);}const first=items[0];if(items.some(o=>o.account_type!==first.account_type||o.party_code!==first.party_code||o.currency_code!==first.currency_code||o.source_database!==first.source_database))throw badRequest('同一張收付款單不可混合不同對象、幣別或公司來源');const amount=allocations.reduce((sum,x)=>sum+x.allocated_amount,0);const no=trim(b.settlement_no)||await nextWorkflowNumber(conn,'finance_settlements','settlement_no',selectedType,date);const[r]=await conn.query(`INSERT INTO finance_settlements(tenant_id,company_id,source_system,source_database,account_type,settlement_no,settlement_date,party_code,payment_method,bank_code,reference_no,amount,status,note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'draft',?,?)`,[first.tenant_id,first.company_id,first.source_system,first.source_database,first.account_type,no,date,first.party_code,trim(b.payment_method),trim(b.bank_code),trim(b.reference_no),amount,trim(b.note),req.auth.id]);for(const a of allocations)await conn.query('INSERT INTO finance_allocations(settlement_id,open_item_id,allocated_amount) VALUES(?,?,?)',[r.insertId,a.open_item_id,a.allocated_amount]);return{id:r.insertId,settlement_no:no,allocation_count:allocations.length,amount};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
@@ -4479,7 +4730,17 @@ const defaultAccountingAutoRules = [
   ['AP-RECEIPT-MAIN','AP','purchase_receipt','*','main','1201','商品存貨','2101','應付帳款','進貨立帳'],
   ['AP-RETURN-MAIN','AP','purchase_return','*','main','2101','應付帳款','1201','商品存貨','採購退貨沖減應付'],
   ['AR-SETTLEMENT-MAIN','AR','settlement','*','main','1001','銀行存款','1101','應收帳款','收款沖銷'],
-  ['AP-SETTLEMENT-MAIN','AP','settlement','*','main','2101','應付帳款','1001','銀行存款','付款沖銷']
+  ['AP-SETTLEMENT-MAIN','AP','settlement','*','main','2101','應付帳款','1001','銀行存款','付款沖銷'],
+  ['AR-ADVANCE-CREATE','AR','advance_create','*','main','1001','銀行存款','2201','客戶預收款','建立客戶預收／溢收'],
+  ['AP-ADVANCE-CREATE','AP','advance_create','*','main','1131','預付貨款','1001','銀行存款','建立廠商預付／溢付'],
+  ['AR-ADVANCE-CREATE-RECLASS','AR','advance_create','*','reclass','1101','應收帳款','2201','客戶預收款','收款轉預收／溢收'],
+  ['AP-ADVANCE-CREATE-RECLASS','AP','advance_create','*','reclass','1131','預付貨款','2101','應付帳款','付款轉預付／溢付'],
+  ['AR-ADVANCE-APPLY','AR','advance_apply','*','main','2201','客戶預收款','1101','應收帳款','預收／溢收轉抵應收'],
+  ['AP-ADVANCE-APPLY','AP','advance_apply','*','main','2101','應付帳款','1131','預付貨款','預付／溢付轉抵應付'],
+  ['AR-ADVANCE-REFUND','AR','advance_refund','*','main','2201','客戶預收款','1001','銀行存款','客戶預收／溢收退款'],
+  ['AP-ADVANCE-REFUND','AP','advance_refund','*','main','1001','銀行存款','1131','預付貨款','廠商預付／溢付退款'],
+  ['FIN-CROSS-OPEN','FIN','cross_offset','open_items','main','2101','應付帳款','1101','應收帳款','客戶兼廠商帳款對沖'],
+  ['FIN-CROSS-ADVANCE','FIN','cross_offset','advances','main','2201','客戶預收款','1131','預付貨款','客戶兼廠商預收預付對沖']
 ];
 
 async function seedAccountingAutoRules(conn, context, userId = null) {
@@ -4526,7 +4787,7 @@ function accountingSettlementLines(rule, settlement, partyCode, description) {
 
 function registerAccountingWorkflowRoutes(app) {
   const accounts = [
-    ['1001','銀行存款','asset'],['1101','應收帳款','asset'],['1121','應收票據','asset'],['1122','應收票據託收','asset'],['1201','商品存貨','asset'],['2101','應付帳款','liability'],['2141','應付票據','liability'],
+    ['1001','銀行存款','asset'],['1101','應收帳款','asset'],['1121','應收票據','asset'],['1122','應收票據託收','asset'],['1131','預付貨款','asset'],['1201','商品存貨','asset'],['2101','應付帳款','liability'],['2141','應付票據','liability'],['2201','客戶預收款','liability'],
     ['3200','期初餘額調整','equity'],['3201','保留盈餘','equity'],['4101','銷貨收入','revenue'],['5101','銷貨成本','expense'],['7161','兌換利益','revenue'],['7162','兌換損失','expense']
   ];
   const ACCOUNTING_EPS = 0.000001;
@@ -5027,12 +5288,40 @@ function registerAccountingWorkflowRoutes(app) {
    } catch(e){next(e);} });
   app.get('/api/accounting/clearing', async (req,res,next) => { try {
     await ensureTargetFinanceWorkflowSchema();
-    const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'').toUpperCase(),party=trim(req.query.party_code),limit=Math.min(Math.max(Number(req.query.limit)||100,1),500),c=contextFor(db);
-    const conditions=['s.tenant_id=?','s.company_id=?','s.source_system=?','s.source_database=?'];const params=[c.tenant_id,c.company_id,c.source_system,db];
-    if(['AR','AP'].includes(type)){conditions.push('s.account_type=?');params.push(type);}if(party){conditions.push('s.party_code=?');params.push(party);}
-    const [rows]=await pool.query(`SELECT a.id allocation_id,a.allocated_amount,s.account_type,s.settlement_no,s.settlement_date,s.party_code,s.amount settlement_amount,s.status settlement_status,o.document_no,o.document_date,o.due_date,o.original_amount,o.settled_amount,o.balance_amount,o.status open_item_status FROM finance_allocations a JOIN finance_settlements s ON s.id=a.settlement_id JOIN finance_open_items o ON o.id=a.open_item_id WHERE ${conditions.join(' AND ')} ORDER BY s.settlement_date DESC,a.id DESC LIMIT ?`,[...params,limit]);
-    const [summaryRows]=await pool.query(`SELECT s.account_type,s.party_code,COUNT(DISTINCT o.id) open_item_count,COALESCE(SUM(o.balance_amount),0) open_balance,COALESCE(SUM(a.allocated_amount),0) allocated_amount FROM finance_allocations a JOIN finance_settlements s ON s.id=a.settlement_id JOIN finance_open_items o ON o.id=a.open_item_id WHERE ${conditions.join(' AND ')} GROUP BY s.account_type,s.party_code ORDER BY s.account_type,s.party_code`,params);
-    res.json({ok:true,data:{rows,summary:summaryRows}});
+    const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'').toUpperCase(),party=trim(req.query.party_code),limit=Math.min(Math.max(Number(req.query.limit)||200,1),500),c=contextFor(db);
+    const from=req.query.from_date?validDate(req.query.from_date):'1900-01-01',to=req.query.to_date?validDate(req.query.to_date):'2999-12-31';
+    if(from>to)throw badRequest('立沖查詢起日不可晚於迄日');
+    const allocationConditions=['s.tenant_id=?','s.company_id=?','s.source_system=?','s.source_database=?','s.settlement_date BETWEEN ? AND ?'];const allocationParams=[c.tenant_id,c.company_id,c.source_system,db,from,to];
+    if(['AR','AP'].includes(type)){allocationConditions.push('s.account_type=?');allocationParams.push(type);}if(party){allocationConditions.push('s.party_code=?');allocationParams.push(party);}
+    const [allocationRows]=await pool.query(`SELECT 'settlement' row_kind,a.id row_id,a.allocated_amount amount,s.account_type,s.settlement_no document_no,s.settlement_date movement_date,s.party_code,s.amount source_amount,s.status source_status,o.document_no related_document_no,o.document_date related_date,o.original_amount,o.settled_amount,o.balance_amount,o.status related_status,NULL movement_kind,NULL accounting_draft_id
+      FROM finance_allocations a JOIN finance_settlements s ON s.id=a.settlement_id JOIN finance_open_items o ON o.id=a.open_item_id
+      WHERE ${allocationConditions.join(' AND ')} ORDER BY s.settlement_date DESC,a.id DESC LIMIT ?`,[...allocationParams,limit]);
+    const advanceConditions=['a.tenant_id=?','a.company_id=?','a.source_system=?','a.source_database=?','m.movement_date BETWEEN ? AND ?'];const advanceParams=[c.tenant_id,c.company_id,c.source_system,db,from,to];
+    if(['AR','AP'].includes(type)){advanceConditions.push('a.account_type=?');advanceParams.push(type);}if(party){advanceConditions.push('a.party_code=?');advanceParams.push(party);}
+    const [advanceRows]=await pool.query(`SELECT 'advance' row_kind,m.id row_id,m.amount,m.base_amount,m.exchange_difference,a.account_type,a.advance_no document_no,m.movement_date,a.party_code,a.original_amount,a.applied_amount,a.refunded_amount,a.balance_amount,a.status related_status,m.movement_kind,m.reference_no related_document_no,d.id accounting_draft_id,d.draft_no accounting_draft_no
+      FROM finance_advance_movements m JOIN finance_advances a ON a.id=m.advance_id LEFT JOIN accounting_drafts d ON d.id=m.accounting_draft_id
+      WHERE ${advanceConditions.join(' AND ')} ORDER BY m.movement_date DESC,m.id DESC LIMIT ?`,[...advanceParams,limit]);
+    const creditConditions=['c.tenant_id=?','c.company_id=?','c.source_system=?','c.source_database=?','m.movement_date BETWEEN ? AND ?'];const creditParams=[c.tenant_id,c.company_id,c.source_system,db,from,to];
+    if(party){creditConditions.push('c.party_code=?');creditParams.push(party);}
+    const [creditRows]=await pool.query(`SELECT 'customer_credit' row_kind,m.id row_id,m.amount,c.party_code,c.credit_date movement_date,c.original_amount,c.applied_amount,c.refunded_amount,c.balance_amount,c.status related_status,m.movement_kind,m.reference_no,c.source_adjustment_id,NULL accounting_draft_id,NULL accounting_draft_no
+      FROM finance_customer_credit_movements m JOIN finance_customer_credits c ON c.id=m.credit_id
+      WHERE ${creditConditions.join(' AND ')} ORDER BY m.movement_date DESC,m.id DESC LIMIT ?`,[...creditParams,limit]);
+    const crossConditions=['o.tenant_id=?','o.company_id=?','o.source_system=?','o.source_database=?','o.offset_date BETWEEN ? AND ?'];const crossParams=[c.tenant_id,c.company_id,c.source_system,db,from,to];
+    if(party){crossConditions.push('(o.customer_code=? OR o.supplier_code=?)');crossParams.push(party,party);}
+    const [crossRows]=await pool.query(`SELECT 'cross_offset' row_kind,o.id row_id,o.amount,o.ar_base_amount,o.ap_base_amount,o.exchange_difference,'FIN' account_type,o.offset_no document_no,o.offset_date movement_date,o.customer_code,o.supplier_code,o.currency_code,o.offset_kind,o.status related_status,o.reference_no,o.note,d.id accounting_draft_id,d.draft_no accounting_draft_no
+      FROM finance_cross_offsets o LEFT JOIN accounting_drafts d ON d.id=o.accounting_draft_id
+      WHERE ${crossConditions.join(' AND ')} ORDER BY o.offset_date DESC,o.id DESC LIMIT ?`,[...crossParams,limit]);
+    const rows=[...allocationRows,...advanceRows,...creditRows,...crossRows].sort((a,b)=>String(b.movement_date||'').localeCompare(String(a.movement_date||''))||Number(b.row_id||0)-Number(a.row_id||0)).slice(0,limit);
+    const openConditions=['o.tenant_id=?','o.company_id=?','o.source_system=?','o.source_database=?','o.document_date<=?','o.status IN (\'open\',\'partial\')'];const openParams=[c.tenant_id,c.company_id,c.source_system,db,to];
+    if(['AR','AP'].includes(type)){openConditions.push('o.account_type=?');openParams.push(type);}if(party){openConditions.push('o.party_code=?');openParams.push(party);}
+    const [openSummary]=await pool.query(`SELECT o.account_type,o.party_code,COUNT(*) open_item_count,COALESCE(SUM(o.balance_amount),0) open_balance FROM finance_open_items o WHERE ${openConditions.join(' AND ')} GROUP BY o.account_type,o.party_code`,openParams);
+    const [allocationSummary]=await pool.query(`SELECT s.account_type,s.party_code,COALESCE(SUM(a.allocated_amount),0) allocated_amount FROM finance_allocations a JOIN finance_settlements s ON s.id=a.settlement_id WHERE ${allocationConditions.join(' AND ')} AND s.status='posted' GROUP BY s.account_type,s.party_code`,allocationParams);
+    const summaryMap=new Map();for(const row of openSummary)summaryMap.set(`${row.account_type}|${row.party_code}`,{account_type:row.account_type,party_code:row.party_code,open_item_count:Number(row.open_item_count||0),open_balance:Number(row.open_balance||0),allocated_amount:0});for(const row of allocationSummary){const key=`${row.account_type}|${row.party_code}`;const current=summaryMap.get(key)||{account_type:row.account_type,party_code:row.party_code,open_item_count:0,open_balance:0,allocated_amount:0};current.allocated_amount=Number(row.allocated_amount||0);summaryMap.set(key,current);}
+    const advanceSummaryConditions=['a.tenant_id=?','a.company_id=?','a.source_system=?','a.source_database=?','a.advance_date<=?'];const advanceSummaryParams=[c.tenant_id,c.company_id,c.source_system,db,to];if(['AR','AP'].includes(type)){advanceSummaryConditions.push('a.account_type=?');advanceSummaryParams.push(type);}if(party){advanceSummaryConditions.push('a.party_code=?');advanceSummaryParams.push(party);}
+    const [advanceSummary]=await pool.query(`SELECT a.account_type,a.party_code,COUNT(*) advance_count,COALESCE(SUM(a.original_amount),0) original_amount,COALESCE(SUM(a.applied_amount),0) used_amount,COALESCE(SUM(a.refunded_amount),0) refunded_amount,COALESCE(SUM(a.balance_amount),0) remaining_amount FROM finance_advances a WHERE ${advanceSummaryConditions.join(' AND ')} GROUP BY a.account_type,a.party_code`,advanceSummaryParams);
+    const [creditSummary]=await pool.query(`SELECT c.party_code,COUNT(*) credit_count,COALESCE(SUM(c.original_amount),0) original_amount,COALESCE(SUM(c.applied_amount),0) used_amount,COALESCE(SUM(c.refunded_amount),0) refunded_amount,COALESCE(SUM(c.balance_amount),0) remaining_amount FROM finance_customer_credits c WHERE c.tenant_id=? AND c.company_id=? AND c.source_system=? AND c.source_database=? AND c.credit_date<=?${party?' AND c.party_code=?':''} GROUP BY c.party_code`,[c.tenant_id,c.company_id,c.source_system,db,to,...(party?[party]:[])]);
+    const [crossSummary]=await pool.query(`SELECT offset_kind,COUNT(*) offset_count,COALESCE(SUM(amount),0) offset_amount,COALESCE(SUM(exchange_difference),0) exchange_difference FROM finance_cross_offsets o WHERE o.tenant_id=? AND o.company_id=? AND o.source_system=? AND o.source_database=? AND o.offset_date BETWEEN ? AND ?${party?' AND (o.customer_code=? OR o.supplier_code=?)':''} GROUP BY offset_kind`,[c.tenant_id,c.company_id,c.source_system,db,from,to,...(party?[party,party]:[])]);
+    res.json({ok:true,data:{rows,summary:[...summaryMap.values()].sort((a,b)=>`${a.account_type}${a.party_code}`.localeCompare(`${b.account_type}${b.party_code}`)),advance_summary:advanceSummary,credit_summary:creditSummary,cross_summary:crossSummary},source_database:db,from_date:from,to_date:to});
   } catch(e){next(e);} });
   app.get('/api/accounting/opening-balances', async (req,res,next) => { try {
     await ensureTargetFinanceWorkflowSchema();const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'').toUpperCase(),c=contextFor(db);const conditions=['tenant_id=?','company_id=?','source_system=?','source_database=?'];const params=[c.tenant_id,c.company_id,c.source_system,db];if(['AR','AP'].includes(type)){conditions.push('account_type=?');params.push(type);}const[rows]=await pool.query(`SELECT * FROM finance_opening_balances WHERE ${conditions.join(' AND ')} ORDER BY opening_date DESC,id DESC LIMIT 200`,params);res.json({ok:true,data:rows});

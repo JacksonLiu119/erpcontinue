@@ -1864,16 +1864,44 @@ export async function ensureTargetFinanceWorkflowSchema() {
     account_type ENUM('AR','AP') NOT NULL, advance_kind ENUM('prepayment','overpayment') NOT NULL, advance_no VARCHAR(60) NOT NULL, advance_date DATE NOT NULL, party_code VARCHAR(30) NOT NULL,
     currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD', exchange_rate DECIMAL(18,8) NOT NULL DEFAULT 1, original_amount DECIMAL(24,6) NOT NULL, applied_amount DECIMAL(24,6) NOT NULL DEFAULT 0, refunded_amount DECIMAL(24,6) NOT NULL DEFAULT 0, balance_amount DECIMAL(24,6) NOT NULL,
     source_settlement_id BIGINT UNSIGNED NULL, source_document_no VARCHAR(80) NULL, status ENUM('draft','available','partial','applied','refunded','voided') NOT NULL DEFAULT 'draft', note VARCHAR(500) NULL,
+    accounting_draft_id BIGINT UNSIGNED NULL,
     created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_finance_advance(tenant_id,company_id,source_system,account_type,advance_no), KEY ix_finance_advance(source_database,account_type,party_code,status,advance_date)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
   await pool.query(`CREATE TABLE IF NOT EXISTS finance_advance_movements (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, advance_id BIGINT UNSIGNED NOT NULL, movement_date DATE NOT NULL, movement_kind ENUM('apply','refund','offset') NOT NULL, amount DECIMAL(24,6) NOT NULL, open_item_id BIGINT UNSIGNED NULL, related_open_item_id BIGINT UNSIGNED NULL, reference_no VARCHAR(80) NULL, note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, advance_id BIGINT UNSIGNED NOT NULL, movement_date DATE NOT NULL, movement_kind ENUM('apply','refund','offset') NOT NULL, amount DECIMAL(24,6) NOT NULL, base_amount DECIMAL(24,6) NOT NULL DEFAULT 0, exchange_difference DECIMAL(24,6) NOT NULL DEFAULT 0, open_item_id BIGINT UNSIGNED NULL, related_open_item_id BIGINT UNSIGNED NULL, related_advance_id BIGINT UNSIGNED NULL, relationship_id BIGINT UNSIGNED NULL, accounting_draft_id BIGINT UNSIGNED NULL, reference_no VARCHAR(80) NULL, note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY ix_finance_advance_movement(advance_id,movement_date), CONSTRAINT fk_finance_advance_movement_header FOREIGN KEY(advance_id) REFERENCES finance_advances(id) ON DELETE CASCADE, CONSTRAINT fk_finance_advance_movement_open FOREIGN KEY(open_item_id) REFERENCES finance_open_items(id) ON DELETE SET NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
   await pool.query(`CREATE TABLE IF NOT EXISTS finance_party_links (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL, customer_code VARCHAR(30) NOT NULL, supplier_code VARCHAR(30) NOT NULL, relationship_type VARCHAR(30) NOT NULL DEFAULT 'customer_supplier', is_active TINYINT(1) NOT NULL DEFAULT 1, note VARCHAR(255) NULL, created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_finance_party_link(tenant_id,company_id,source_system,source_database,customer_code,supplier_code)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  for (const [column, definition] of [
+    ['accounting_draft_id', 'BIGINT UNSIGNED NULL']
+  ]) await addColumnIfMissing('finance_advances', column, definition);
+  for (const [column, definition] of [
+    ['base_amount', 'DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['exchange_difference', 'DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['related_open_item_id', 'BIGINT UNSIGNED NULL'],
+    ['related_advance_id', 'BIGINT UNSIGNED NULL'],
+    ['relationship_id', 'BIGINT UNSIGNED NULL'],
+    ['accounting_draft_id', 'BIGINT UNSIGNED NULL']
+  ]) await addColumnIfMissing('finance_advance_movements', column, definition);
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_cross_offsets (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    offset_no VARCHAR(60) NOT NULL, offset_date DATE NOT NULL, offset_kind ENUM('open_items','advances') NOT NULL,
+    customer_code VARCHAR(30) NOT NULL, supplier_code VARCHAR(30) NOT NULL, currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD',
+    amount DECIMAL(24,6) NOT NULL, ar_base_amount DECIMAL(24,6) NOT NULL DEFAULT 0, ap_base_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    exchange_difference DECIMAL(24,6) NOT NULL DEFAULT 0,
+    ar_open_item_id BIGINT UNSIGNED NULL, ap_open_item_id BIGINT UNSIGNED NULL,
+    ar_advance_id BIGINT UNSIGNED NULL, ap_advance_id BIGINT UNSIGNED NULL,
+    relationship_id BIGINT UNSIGNED NULL, accounting_draft_id BIGINT UNSIGNED NULL,
+    status ENUM('posted','voided') NOT NULL DEFAULT 'posted', reference_no VARCHAR(80) NULL, note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_finance_cross_offset(tenant_id,company_id,source_system,source_database,offset_no),
+    KEY ix_finance_cross_offset_date(source_database,offset_date,status),
+    KEY ix_finance_cross_offset_party(source_database,customer_code,supplier_code)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
   await pool.query(`CREATE TABLE IF NOT EXISTS accounting_drafts (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,

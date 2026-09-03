@@ -19,6 +19,7 @@
     "verify:accounting-drafts": "node scripts/verify-accounting-drafts.mjs",
     "verify:bank-note-reconciliation": "node scripts/verify-bank-note-reconciliation.mjs",
     "verify:accounting-period-rollforward": "node scripts/verify-accounting-period-rollforward.mjs",
+    "verify:advances-offset": "node scripts/verify-advances-offset.mjs",
     "verify:import-quality": "node scripts/verify-import-quality.mjs",
     "verify:company-regression": "node scripts/verify-company-regression.mjs",
     "backup:github": "powershell -ExecutionPolicy Bypass -File scripts/backup-github.ps1"
