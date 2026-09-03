@@ -2754,6 +2754,242 @@ function registerProcurementWorkflowRoutes(app) {
   });
 }
 
+const SALES_RETURN_FINANCE_EPS = 0.000001;
+
+function salesReturnFinanceContext(sourceDatabase) {
+  const db = String(sourceDatabase || '').trim().toUpperCase();
+  const source = sourceDatabases[db];
+  if (!source) throw badRequest('找不到資料來源：' + db);
+  return {
+    tenant_id: source.tenant_id || 'default',
+    company_id: source.company_id || db,
+    source_system: source.source_system || source.adapter_code || 'ism-sh',
+    source_database: db,
+  };
+}
+
+function salesReturnFinanceAmount(document, item) {
+  const quantity = Number(item?.quantity ?? item?.return_quantity ?? 0) || 0;
+  const unitPrice = Number(item?.unit_price ?? item?.return_unit_price ?? 0) || 0;
+  const allowance = Number(item?.allowance_amount ?? item?.return_allowance_amount ?? 0) || 0;
+  if (String(document?.return_type || '') === 'allowance') return Math.max(allowance || quantity * unitPrice, 0);
+  return Math.max(quantity * unitPrice - allowance, 0);
+}
+
+async function recordSalesReturnAdjustmentEvent(conn, adjustment, eventKind, beforeStatus, afterStatus, openItemId, amount, reason, userId) {
+  await conn.query(`INSERT INTO finance_return_adjustment_events(
+    tenant_id,company_id,source_system,source_database,adjustment_id,event_kind,
+    before_status,after_status,open_item_id,amount,reason,created_by)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    adjustment.tenant_id, adjustment.company_id, adjustment.source_system, adjustment.source_database,
+    adjustment.id, eventKind, beforeStatus || null, afterStatus || null, openItemId || null,
+    Number(amount || 0), reason || null, userId || null,
+  ]);
+}
+
+async function ensureSalesReturnAdjustment(conn, document, item, userId) {
+  const returnAmount = salesReturnFinanceAmount(document, item);
+  if (returnAmount <= SALES_RETURN_FINANCE_EPS) return null;
+  const c = salesReturnFinanceContext(document.source_database);
+  let [[adjustment]] = await conn.query(`SELECT * FROM finance_return_adjustments
+    WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND sales_return_item_id=? FOR UPDATE`,
+    [c.tenant_id, c.company_id, c.source_system, c.source_database, item.id]);
+  if (!adjustment) {
+    const [created] = await conn.query(`INSERT INTO finance_return_adjustments(
+      tenant_id,company_id,source_system,source_database,sales_return_id,sales_return_item_id,shipment_item_id,
+      adjustment_date,return_amount,receivable_offset_amount,customer_credit_amount,refund_amount,status,note,created_by)
+      VALUES(?,?,?,?,?,?,?,?,?,0,0,0,'pending',?,?)`, [
+      c.tenant_id, c.company_id, c.source_system, c.source_database, document.id, item.id,
+      Number(item.source_item_id || 0) || null, document.document_date, returnAmount,
+      '銷退／折讓 ' + document.document_no + ' 已記錄，等待原應收同步', userId,
+    ]);
+    [[adjustment]] = await conn.query('SELECT * FROM finance_return_adjustments WHERE id=? FOR UPDATE', [created.insertId]);
+    await recordSalesReturnAdjustmentEvent(conn, adjustment, 'created', null, 'pending', null, returnAmount,
+      '建立銷退應收處理紀錄：' + document.document_no, userId);
+  }
+  if (Math.abs(Number(adjustment.return_amount || 0) - returnAmount) > SALES_RETURN_FINANCE_EPS) {
+    throw badRequest('銷退 ' + document.document_no + ' 已有不同金額的應收處理紀錄');
+  }
+  return adjustment;
+}
+
+async function findSalesReturnFinanceOpenItems(conn, adjustment, document, item) {
+  const c = salesReturnFinanceContext(adjustment.source_database);
+  const shipmentItemId = Number(item?.source_item_id || adjustment.shipment_item_id || 0) || null;
+  if (!shipmentItemId) return [];
+  const [[shipment]] = await conn.query(`SELECT si.document_id,sd.customer_code,sd.currency_code
+    FROM sales_document_items si
+    JOIN sales_documents sd ON sd.id=si.document_id
+    WHERE si.id=? AND sd.source_database=? AND sd.document_kind='shipment' FOR UPDATE`,
+    [shipmentItemId, c.source_database]);
+  if (!shipment) return [];
+  const partyCode = trim(document.customer_code) || shipment.customer_code;
+  const currencyCode = trim(document.currency_code) || shipment.currency_code || 'TWD';
+  const [directOpenItems] = await conn.query(`SELECT oi.* FROM finance_open_items oi
+    WHERE oi.tenant_id=? AND oi.company_id=? AND oi.source_system=? AND oi.source_database=?
+      AND oi.account_type='AR' AND oi.source_kind='shipment' AND oi.source_document_id=?
+      AND oi.party_code=? AND oi.currency_code=?
+      AND oi.status IN ('approved','open','partial','settled')
+    ORDER BY oi.document_date,oi.id FOR UPDATE`, [
+    c.tenant_id, c.company_id, c.source_system, c.source_database, shipment.document_id,
+    partyCode, currencyCode,
+  ]);
+  const [voucherOpenItems] = await conn.query(`SELECT DISTINCT oi.* FROM finance_voucher_sources vs
+    JOIN finance_vouchers v ON v.id=vs.voucher_id
+    JOIN finance_open_items oi ON oi.source_kind='finance_voucher' AND oi.source_document_id=v.id
+    WHERE v.tenant_id=? AND v.company_id=? AND v.source_system=? AND v.source_database=?
+      AND v.account_type='AR' AND v.status IN ('approved','posted')
+      AND vs.source_kind='shipment' AND vs.source_document_item_id=?
+      AND oi.tenant_id=? AND oi.company_id=? AND oi.source_system=? AND oi.source_database=?
+      AND oi.party_code=? AND oi.currency_code=?
+      AND oi.status IN ('approved','open','partial','settled')
+    ORDER BY oi.document_date,oi.id FOR UPDATE`, [
+    c.tenant_id, c.company_id, c.source_system, c.source_database, shipmentItemId,
+    c.tenant_id, c.company_id, c.source_system, c.source_database, partyCode, currencyCode,
+  ]);
+  return [...new Map([...directOpenItems, ...voucherOpenItems].map(row => [Number(row.id), row])).values()]
+    .sort((a, b) => String(a.document_date).localeCompare(String(b.document_date)) || Number(a.id) - Number(b.id));
+}
+
+async function syncSalesReturnAdjustment(conn, adjustmentId, userId) {
+  let [[adjustment]] = await conn.query('SELECT * FROM finance_return_adjustments WHERE id=? FOR UPDATE', [adjustmentId]);
+  if (!adjustment) return null;
+  const [[returnLine]] = await conn.query(`SELECT d.*,i.id sales_return_item_id,i.source_item_id shipment_item_id,
+      i.quantity return_quantity,i.unit_price return_unit_price,i.allowance_amount return_allowance_amount
+    FROM sales_documents d
+    JOIN sales_document_items i ON i.document_id=d.id
+    WHERE d.id=? AND i.id=? AND d.document_kind='sales_return' FOR UPDATE`,
+    [adjustment.sales_return_id, adjustment.sales_return_item_id]);
+  if (!returnLine) return null;
+  const returnAmount = salesReturnFinanceAmount(returnLine, returnLine);
+  if (Math.abs(Number(adjustment.return_amount || 0) - returnAmount) > SALES_RETURN_FINANCE_EPS) {
+    throw badRequest('銷退 ' + returnLine.document_no + ' 的應收處理金額與原單不一致');
+  }
+  const openItems = await findSalesReturnFinanceOpenItems(conn, adjustment, returnLine, returnLine);
+  const beforeStatus = String(adjustment.status || 'pending');
+  let offsetTotal = Number(adjustment.receivable_offset_amount || 0);
+  const [[existingCredit]] = await conn.query('SELECT * FROM finance_customer_credits WHERE source_adjustment_id=? FOR UPDATE', [adjustment.id]);
+  // 舊版本若只建立了待抵資料、尚未回寫 adjustment.customer_credit_amount，
+  // 仍以待抵原始金額作為已處理額，避免後續自動同步重複沖帳。
+  let creditTotal = Math.max(Number(adjustment.customer_credit_amount || 0), Number(existingCredit?.original_amount || 0));
+  let remaining = Math.max(returnAmount - offsetTotal - creditTotal, 0);
+  let firstOpenItemId = Number(adjustment.open_item_id || 0) || null;
+  const allocationEvents = [];
+
+  for (const openItem of openItems) {
+    if (remaining <= SALES_RETURN_FINANCE_EPS) break;
+    const usable = Math.max(Number(openItem.balance_amount || 0), 0);
+    if (usable <= SALES_RETURN_FINANCE_EPS) continue;
+    const applied = Math.min(usable, remaining);
+    const rate = Number(openItem.exchange_rate || 1) || 1;
+    const balance = Math.max(usable - applied, 0);
+    const previousBaseBalance = Number(openItem.base_balance_amount || 0) || usable * rate;
+    const baseBalance = Math.max(previousBaseBalance - applied * rate, 0);
+    const adjustmentAmount = Number(openItem.adjustment_amount || 0) + applied;
+    const baseAdjustmentAmount = Number(openItem.base_adjustment_amount || 0) + applied * rate;
+    const nextStatus = balance <= SALES_RETURN_FINANCE_EPS
+      ? 'settled'
+      : (Number(openItem.settled_amount || 0) + adjustmentAmount > SALES_RETURN_FINANCE_EPS ? 'partial' : 'open');
+    await conn.query(`UPDATE finance_open_items SET adjustment_amount=?,base_adjustment_amount=?,
+      balance_amount=?,base_balance_amount=?,status=?,
+      note=TRIM(CONCAT(COALESCE(note,''),CASE WHEN COALESCE(note,'')='' THEN '' ELSE '；' END,?))
+      WHERE id=? AND status<>'voided'`, [
+      adjustmentAmount, baseAdjustmentAmount, balance, baseBalance, nextStatus,
+      '銷退 ' + returnLine.document_no + ' 自動沖減應收 ' + applied, openItem.id,
+    ]);
+    await conn.query(`INSERT INTO finance_return_adjustment_allocations(
+      adjustment_id,open_item_id,allocated_amount,base_allocated_amount,created_by)
+      VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE
+        allocated_amount=allocated_amount+VALUES(allocated_amount),
+        base_allocated_amount=base_allocated_amount+VALUES(base_allocated_amount)`, [
+      adjustment.id, openItem.id, applied, applied * rate, userId,
+    ]);
+    firstOpenItemId = firstOpenItemId || Number(openItem.id);
+    offsetTotal += applied;
+    remaining -= applied;
+    allocationEvents.push({ openItemId: Number(openItem.id), amount: applied });
+  }
+
+  let creditCreated = 0;
+  if (openItems.length && remaining > SALES_RETURN_FINANCE_EPS) {
+    if (!existingCredit) {
+      await conn.query(`INSERT INTO finance_customer_credits(
+        tenant_id,company_id,source_system,source_database,party_code,currency_code,credit_date,
+        source_adjustment_id,original_amount,balance_amount,status,note,created_by)
+        VALUES(?,?,?,?,?,?,?,?,?,?,'available',?,?)`, [
+        adjustment.tenant_id, adjustment.company_id, adjustment.source_system, adjustment.source_database,
+        returnLine.customer_code, returnLine.currency_code || 'TWD', returnLine.document_date, adjustment.id,
+        remaining, remaining, '銷退 ' + returnLine.document_no + ' 已收款／超過未收部分轉客戶待抵，可再轉抵或退款', userId,
+      ]);
+      creditTotal += remaining;
+      creditCreated = remaining;
+    }
+  }
+
+  const residual = Math.max(returnAmount - offsetTotal - creditTotal, 0);
+  const status = residual > SALES_RETURN_FINANCE_EPS
+    ? 'pending'
+    : (offsetTotal > SALES_RETURN_FINANCE_EPS && creditTotal > SALES_RETURN_FINANCE_EPS
+      ? 'mixed'
+      : offsetTotal > SALES_RETURN_FINANCE_EPS ? 'offset' : creditTotal > SALES_RETURN_FINANCE_EPS ? 'credit' : 'pending');
+  await conn.query(`UPDATE finance_return_adjustments SET open_item_id=COALESCE(open_item_id,?),
+    receivable_offset_amount=?,customer_credit_amount=?,status=?,processed_by=?,processed_at=NOW(),note=?
+    WHERE id=?`, [
+    firstOpenItemId, offsetTotal, creditTotal, status, userId,
+    '銷退／折讓 ' + returnLine.document_no + '：應收沖帳 ' + offsetTotal + '，客戶待抵 ' + creditTotal + '，待同步 ' + residual,
+    adjustment.id,
+  ]);
+  [[adjustment]] = await conn.query('SELECT * FROM finance_return_adjustments WHERE id=? FOR UPDATE', [adjustment.id]);
+  for (const event of allocationEvents) {
+    await recordSalesReturnAdjustmentEvent(conn, adjustment, 'offset', beforeStatus, status, event.openItemId,
+      event.amount, '銷退 ' + returnLine.document_no + ' 自動沖減原應收', userId);
+  }
+  if (creditCreated > SALES_RETURN_FINANCE_EPS) {
+    await recordSalesReturnAdjustmentEvent(conn, adjustment, 'credit', beforeStatus, status, null, creditCreated,
+      '銷退 ' + returnLine.document_no + ' 形成客戶待抵', userId);
+  }
+  if (!allocationEvents.length && creditCreated <= SALES_RETURN_FINANCE_EPS && beforeStatus !== status) {
+    await recordSalesReturnAdjustmentEvent(conn, adjustment, 'status_sync', beforeStatus, status, firstOpenItemId, 0,
+      '銷退 ' + returnLine.document_no + ' 應收狀態同步', userId);
+  }
+  return {
+    adjustment_id: Number(adjustment.id), status, return_amount: returnAmount,
+    receivable_offset_amount: offsetTotal, customer_credit_amount: creditTotal, residual,
+    open_item_id: firstOpenItemId, open_item_count: openItems.length,
+  };
+}
+
+async function syncPendingSalesReturnAdjustmentsForOpenItem(conn, openItemId, userId) {
+  const [[openItem]] = await conn.query(`SELECT * FROM finance_open_items WHERE id=? FOR UPDATE`, [openItemId]);
+  if (!openItem || openItem.account_type !== 'AR' || !['approved', 'open', 'partial', 'settled'].includes(String(openItem.status))) return [];
+  let shipmentItemIds = [];
+  if (openItem.source_kind === 'shipment') {
+    const [items] = await conn.query(`SELECT si.id FROM sales_document_items si
+      JOIN sales_documents sd ON sd.id=si.document_id
+      WHERE si.document_id=? AND sd.source_database=?`, [openItem.source_document_id, openItem.source_database]);
+    shipmentItemIds = items.map(row => Number(row.id)).filter(Boolean);
+  } else if (openItem.source_kind === 'finance_voucher') {
+    const [items] = await conn.query(`SELECT DISTINCT source_document_item_id id
+      FROM finance_voucher_sources WHERE voucher_id=? AND source_kind='shipment' AND source_document_item_id IS NOT NULL`, [openItem.source_document_id]);
+    shipmentItemIds = items.map(row => Number(row.id)).filter(Boolean);
+  }
+  if (!shipmentItemIds.length) return [];
+  const [adjustments] = await conn.query(`SELECT a.id FROM finance_return_adjustments a
+    WHERE a.tenant_id=? AND a.company_id=? AND a.source_system=? AND a.source_database=?
+      AND a.shipment_item_id IN (?)
+      AND a.return_amount-a.receivable_offset_amount-a.customer_credit_amount>?
+    ORDER BY a.adjustment_date,a.id FOR UPDATE`, [
+    openItem.tenant_id, openItem.company_id, openItem.source_system, openItem.source_database,
+    shipmentItemIds, SALES_RETURN_FINANCE_EPS,
+  ]);
+  const results = [];
+  for (const adjustment of adjustments) {
+    const result = await syncSalesReturnAdjustment(conn, adjustment.id, userId);
+    if (result) results.push(result);
+  }
+  return results;
+}
+
 function registerSalesWorkflowRoutes(app){
   const ctx=db=>{const s=sourceDatabases[db];if(!s)throw badRequest(`找不到資料來源：${db}`);return{tenant_id:s.tenant_id||'default',company_id:s.company_id||db,source_system:s.source_system||s.adapter_code||'ism-sh',source_database:db};};
   const EPS=0.000001;
@@ -2832,79 +3068,9 @@ function registerSalesWorkflowRoutes(app){
 
   async function applySalesReturnFinance(conn, document, items, userId) {
     if(document.document_kind!=='sales_return')return;
-    const c=ctx(String(document.source_database).toUpperCase());
     for(const item of items){
-      const returnAmount=document.return_type==='allowance'?Number(item.allowance_amount||0):Math.max(Number(item.quantity||0)*Number(item.unit_price||0)-Number(item.allowance_amount||0),0);
-      if(returnAmount<=EPS)continue;
-      let [[adjustment]]=await conn.query(`SELECT * FROM finance_return_adjustments
-        WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND sales_return_item_id=? FOR UPDATE`,
-        [c.tenant_id,c.company_id,c.source_system,c.source_database,item.id]);
-      if(!adjustment){
-        const [created]=await conn.query(`INSERT INTO finance_return_adjustments(
-          tenant_id,company_id,source_system,source_database,sales_return_id,sales_return_item_id,shipment_item_id,
-          adjustment_date,return_amount,receivable_offset_amount,customer_credit_amount,refund_amount,status,note,created_by)
-          VALUES(?,?,?,?,?,?,?,?,?,0,0,0,'pending',?,?)`,
-          [c.tenant_id,c.company_id,c.source_system,c.source_database,document.id,item.id,item.source_item_id||null,
-           document.document_date,returnAmount,`銷退／折讓 ${document.document_no} 已記錄，等待原應收同步`,userId]);
-        [[adjustment]]=await conn.query('SELECT * FROM finance_return_adjustments WHERE id=? FOR UPDATE',[created.insertId]);
-      }
-      if(Math.abs(Number(adjustment.return_amount||0)-returnAmount)>EPS) throw badRequest(`銷退 ${document.document_no} 已有不同金額的應收處理紀錄`);
-
-      let shipment=null;
-      if(item.source_item_id){
-        [[shipment]]=await conn.query(`SELECT si.document_id,sd.customer_code,sd.currency_code
-          FROM sales_document_items si JOIN sales_documents sd ON sd.id=si.document_id
-          WHERE si.id=? AND sd.source_database=? AND sd.document_kind='shipment' FOR UPDATE`,[item.source_item_id,c.source_database]);
-      }
-      const [directOpenItems]=shipment?await conn.query(`SELECT oi.* FROM finance_open_items oi
-        WHERE oi.tenant_id=? AND oi.company_id=? AND oi.source_system=? AND oi.source_database=?
-          AND oi.account_type='AR' AND oi.source_kind='shipment' AND oi.source_document_id=?
-          AND oi.party_code=? AND oi.currency_code=? AND oi.status IN ('approved','open','partial','settled')
-        ORDER BY oi.document_date,oi.id FOR UPDATE`,
-        [c.tenant_id,c.company_id,c.source_system,c.source_database,shipment.document_id,document.customer_code,document.currency_code||'TWD']):[[]];
-      const [voucherOpenItems]=item.source_item_id?await conn.query(`SELECT DISTINCT oi.*
-        FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id
-        JOIN finance_open_items oi ON oi.source_kind='finance_voucher' AND oi.source_document_id=v.id
-        WHERE v.tenant_id=? AND v.company_id=? AND v.source_system=? AND v.source_database=? AND v.account_type='AR'
-          AND v.status IN ('approved','posted') AND vs.source_kind='shipment' AND vs.source_document_item_id=?
-          AND oi.tenant_id=? AND oi.company_id=? AND oi.source_system=? AND oi.source_database=?
-          AND oi.party_code=? AND oi.currency_code=? AND oi.status IN ('approved','open','partial','settled')
-        ORDER BY oi.document_date,oi.id FOR UPDATE`,
-        [c.tenant_id,c.company_id,c.source_system,c.source_database,item.source_item_id,c.tenant_id,c.company_id,c.source_system,c.source_database,document.customer_code,document.currency_code||'TWD']):[[]];
-      const openItems=[...new Map([...directOpenItems,...voucherOpenItems].map(row=>[Number(row.id),row])).values()]
-        .sort((a,b)=>String(a.document_date).localeCompare(String(b.document_date))||Number(a.id)-Number(b.id));
-      const hasOriginalAr=openItems.length>0;
-      let offsetTotal=Number(adjustment.receivable_offset_amount||0),creditTotal=Number(adjustment.customer_credit_amount||0);
-      let remaining=Math.max(returnAmount-offsetTotal-creditTotal,0),firstOpenItemId=Number(adjustment.open_item_id||0)||null;
-      for(const openItem of openItems){
-        if(remaining<=EPS)break;
-        const usable=Math.max(Number(openItem.balance_amount||0),0);
-        if(usable<=EPS)continue;
-        const applied=Math.min(usable,remaining),rate=Number(openItem.exchange_rate||1)||1;
-        const balance=Math.max(usable-applied,0),baseBalance=Math.max((Number(openItem.base_balance_amount||0)||usable*rate)-applied*rate,0);
-        const adjustmentAmount=Number(openItem.adjustment_amount||0)+applied,baseAdjustmentAmount=Number(openItem.base_adjustment_amount||0)+applied*rate;
-        const nextStatus=balance<=EPS?'settled':(Number(openItem.settled_amount||0)+adjustmentAmount>EPS?'partial':'open');
-        await conn.query(`UPDATE finance_open_items SET adjustment_amount=?,base_adjustment_amount=?,balance_amount=?,base_balance_amount=?,status=?,
-          note=TRIM(CONCAT(COALESCE(note,''),CASE WHEN COALESCE(note,'')='' THEN '' ELSE '；' END,?)) WHERE id=? AND status<>'voided'`,
-          [adjustmentAmount,baseAdjustmentAmount,balance,baseBalance,nextStatus,`銷退 ${document.document_no} 自動沖減應收 ${applied}`,openItem.id]);
-        await conn.query(`INSERT INTO finance_return_adjustment_allocations(adjustment_id,open_item_id,allocated_amount,base_allocated_amount,created_by)
-          VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE allocated_amount=allocated_amount+VALUES(allocated_amount),base_allocated_amount=base_allocated_amount+VALUES(base_allocated_amount)`,
-          [adjustment.id,openItem.id,applied,applied*rate,userId]);
-        firstOpenItemId=firstOpenItemId||Number(openItem.id);offsetTotal+=applied;remaining-=applied;
-      }
-      if(hasOriginalAr && remaining>EPS){
-        const [[credit]]=await conn.query('SELECT * FROM finance_customer_credits WHERE source_adjustment_id=? FOR UPDATE',[adjustment.id]);
-        if(!credit){
-          await conn.query(`INSERT INTO finance_customer_credits(tenant_id,company_id,source_system,source_database,party_code,currency_code,credit_date,source_adjustment_id,original_amount,balance_amount,status,note,created_by)
-            VALUES(?,?,?,?,?,?,?,?,?,?,'available',?,?)`,
-            [c.tenant_id,c.company_id,c.source_system,c.source_database,document.customer_code,document.currency_code||'TWD',document.document_date,adjustment.id,remaining,remaining,`銷退 ${document.document_no} 已收款／超過未收部分轉客戶待抵，可再轉抵或退款`,userId]);
-          creditTotal+=remaining;
-        }
-      }
-      const residual=Math.max(returnAmount-offsetTotal-creditTotal,0);
-      const status=residual>EPS?'pending':(offsetTotal>EPS&&creditTotal>EPS?'mixed':offsetTotal>EPS?'offset':creditTotal>EPS?'credit':'pending');
-      await conn.query(`UPDATE finance_return_adjustments SET open_item_id=COALESCE(open_item_id,?),receivable_offset_amount=?,customer_credit_amount=?,status=?,processed_by=?,processed_at=NOW(),note=? WHERE id=?`,
-        [firstOpenItemId,offsetTotal,creditTotal,status,userId,`銷退／折讓 ${document.document_no}：應收沖帳 ${offsetTotal}，客戶待抵 ${creditTotal}，待同步 ${residual}`,adjustment.id]);
+      const adjustment=await ensureSalesReturnAdjustment(conn,document,item,userId);
+      if(adjustment)await syncSalesReturnAdjustment(conn,adjustment.id,userId);
     }
   }
   const defs=[['quotation','QT','報價單','QT'],['sales_order','SO','客戶訂單','SO'],['shipment','SA','銷貨單','SA'],['sales_return','SR','銷退折讓單','SR']];
@@ -3140,17 +3306,105 @@ async function loadFinanceTraceMap(sourceDatabase, accountType, sourceKinds, sou
     WHERE vs.source_kind IN (?) AND vs.source_document_item_id IN (?)
     GROUP BY vs.source_kind,vs.source_document_item_id`,
     [sourceDatabase, accountType, sourceKinds, sourceItemIds]);
-  const settlementMap=new Map(settlements.map(row=>[`${row.source_kind}:${row.source_document_item_id}`,row]));
-  return new Map(rows.map(row => {
-    const settlement=settlementMap.get(`${row.source_kind}:${row.source_document_item_id}`)||{};
-    return [`${row.source_kind}:${row.source_document_item_id}`, {
-      billed: flowAmount(row.billed_amount),
-      collected: flowAmount(row.collected_amount),
-      voucher_nos: row.voucher_nos || '', voucher_statuses: row.voucher_statuses || '',
-      open_item_statuses: row.open_item_statuses || '', settlement_nos: settlement.settlement_nos || '',
-      settlement_statuses: settlement.settlement_statuses || ''
-    }];
-  }));
+  const settlementMap=new Map(settlements.map(row=>[row.source_kind+':'+row.source_document_item_id,row]));
+  const emptyTrace=()=>({
+    billed:0,collected:0,voucher_nos:'',voucher_statuses:'',open_item_statuses:'',settlement_nos:'',settlement_statuses:'',
+    return_amount:0,return_offset_amount:0,return_credit_amount:0,return_refund_amount:0,return_pending_amount:0,
+    customer_credit_balance:0,customer_credit_original:0,customer_credit_applied:0,return_adjustment_statuses:''
+  });
+  const traceMap=new Map();
+  const mergeList=(oldValue,newValue)=>{
+    const values=[String(oldValue||''),String(newValue||'')].flatMap(value=>value.split('、')).map(value=>value.trim()).filter(Boolean);
+    return [...new Set(values)].join('、');
+  };
+  for(const row of rows){
+    const settlement=settlementMap.get(row.source_kind+':'+row.source_document_item_id)||{};
+    traceMap.set(row.source_kind+':'+row.source_document_item_id,{
+      ...emptyTrace(),
+      billed:flowAmount(row.billed_amount),collected:flowAmount(row.collected_amount),
+      voucher_nos:row.voucher_nos||'',voucher_statuses:row.voucher_statuses||'',
+      open_item_statuses:row.open_item_statuses||'',settlement_nos:settlement.settlement_nos||'',
+      settlement_statuses:settlement.settlement_statuses||''
+    });
+  }
+  if(sourceKinds.includes('shipment')){
+    const context=salesReturnFinanceContext(sourceDatabase);
+    const[directRows]=await pool.query(`SELECT si.id shipment_item_id,oi.id open_item_id,
+        oi.original_amount,oi.settled_amount,oi.status,
+        CASE WHEN COALESCE(totals.total_amount,0)>0
+          THEN GREATEST(si.quantity*si.unit_price-COALESCE(si.allowance_amount,0),0)/totals.total_amount ELSE 1 END line_ratio,
+        GROUP_CONCAT(DISTINCT oi.document_no ORDER BY oi.document_date,oi.id SEPARATOR '、') direct_open_item_nos,
+        GROUP_CONCAT(DISTINCT oi.status ORDER BY oi.status SEPARATOR '、') direct_open_item_statuses
+      FROM finance_open_items oi
+      JOIN sales_documents sd ON sd.id=oi.source_document_id AND sd.source_database=?
+      JOIN sales_document_items si ON si.document_id=sd.id AND si.id IN (?)
+      LEFT JOIN (
+        SELECT document_id,SUM(GREATEST(quantity*unit_price-COALESCE(allowance_amount,0),0)) total_amount
+        FROM sales_document_items GROUP BY document_id
+      ) totals ON totals.document_id=si.document_id
+      WHERE oi.tenant_id=? AND oi.company_id=? AND oi.source_system=? AND oi.source_database=?
+        AND oi.account_type=? AND oi.source_kind='shipment'
+        AND oi.status IN ('approved','open','partial','settled')
+      GROUP BY si.id,oi.id,oi.original_amount,oi.settled_amount,oi.status,totals.total_amount`,
+      [sourceDatabase,sourceItemIds,context.tenant_id,context.company_id,context.source_system,sourceDatabase,accountType]);
+    for(const row of directRows){
+      const key='shipment:'+row.shipment_item_id,current=traceMap.get(key)||emptyTrace(),ratio=Number(row.line_ratio||1)||1;
+      current.billed+=flowAmount(row.original_amount)*ratio;
+      current.collected+=flowAmount(row.settled_amount)*ratio;
+      current.voucher_nos=mergeList(current.voucher_nos,row.direct_open_item_nos);
+      current.open_item_statuses=mergeList(current.open_item_statuses,row.direct_open_item_statuses);
+      traceMap.set(key,current);
+    }
+    const[directSettlements]=await pool.query(`SELECT si.id shipment_item_id,
+        GROUP_CONCAT(DISTINCT s.settlement_no ORDER BY s.settlement_date,s.id SEPARATOR '、') settlement_nos,
+        GROUP_CONCAT(DISTINCT s.status ORDER BY s.status SEPARATOR '、') settlement_statuses
+      FROM finance_open_items oi
+      JOIN sales_documents sd ON sd.id=oi.source_document_id AND sd.source_database=?
+      JOIN sales_document_items si ON si.document_id=sd.id AND si.id IN (?)
+      JOIN finance_allocations a ON a.open_item_id=oi.id
+      JOIN finance_settlements s ON s.id=a.settlement_id
+      WHERE oi.tenant_id=? AND oi.company_id=? AND oi.source_system=? AND oi.source_database=?
+        AND oi.account_type=? AND oi.source_kind='shipment'
+      GROUP BY si.id`,
+      [sourceDatabase,sourceItemIds,context.tenant_id,context.company_id,context.source_system,sourceDatabase,accountType]);
+    for(const row of directSettlements){
+      const key='shipment:'+row.shipment_item_id,current=traceMap.get(key)||emptyTrace();
+      current.settlement_nos=mergeList(current.settlement_nos,row.settlement_nos);
+      current.settlement_statuses=mergeList(current.settlement_statuses,row.settlement_statuses);
+      traceMap.set(key,current);
+    }
+  }
+  const[returnRows]=await pool.query(`SELECT a.sales_return_item_id,a.shipment_item_id,
+      SUM(a.return_amount) return_amount,SUM(a.receivable_offset_amount) return_offset_amount,
+      SUM(a.customer_credit_amount) return_credit_amount,SUM(a.refund_amount) return_refund_amount,
+      SUM(GREATEST(a.return_amount-a.receivable_offset_amount-a.customer_credit_amount,0)) return_pending_amount,
+      COALESCE(SUM(cc.original_amount),0) customer_credit_original,
+      COALESCE(SUM(cc.applied_amount),0) customer_credit_applied,
+      COALESCE(SUM(cc.balance_amount),0) customer_credit_balance,
+      GROUP_CONCAT(DISTINCT a.status ORDER BY a.status SEPARATOR '、') return_adjustment_statuses
+    FROM finance_return_adjustments a
+    LEFT JOIN finance_customer_credits cc ON cc.source_adjustment_id=a.id
+    WHERE a.tenant_id=? AND a.company_id=? AND a.source_system=? AND a.source_database=?
+      AND (a.sales_return_item_id IN (?) OR a.shipment_item_id IN (?))
+    GROUP BY a.sales_return_item_id,a.shipment_item_id`,[salesReturnFinanceContext(sourceDatabase).tenant_id,salesReturnFinanceContext(sourceDatabase).company_id,salesReturnFinanceContext(sourceDatabase).source_system,sourceDatabase,sourceItemIds,sourceItemIds]);
+  const mergeReturn=(key,row)=>{
+    const current=traceMap.get(key)||emptyTrace();
+    current.return_amount+=flowAmount(row.return_amount);
+    current.return_offset_amount+=flowAmount(row.return_offset_amount);
+    current.return_credit_amount+=flowAmount(row.return_credit_amount);
+    current.return_refund_amount+=flowAmount(row.return_refund_amount);
+    current.return_pending_amount+=flowAmount(row.return_pending_amount);
+    current.customer_credit_original+=flowAmount(row.customer_credit_original);
+    current.customer_credit_applied+=flowAmount(row.customer_credit_applied);
+    current.customer_credit_balance+=flowAmount(row.customer_credit_balance);
+    current.return_adjustment_statuses=mergeList(current.return_adjustment_statuses,row.return_adjustment_statuses);
+    traceMap.set(key,current);
+  };
+  for(const row of returnRows){
+    if(Number(row.sales_return_item_id||0))mergeReturn('sales_return:'+row.sales_return_item_id,row);
+    if(Number(row.shipment_item_id||0))mergeReturn('shipment:'+row.shipment_item_id,row);
+  }
+  return traceMap;
 }
 
 function sumFlow(rows, field) {
@@ -3197,11 +3451,12 @@ async function loadSupplementalInventoryAudit(sourceDatabase, from, to, limit) {
 function flowNextStageSales(row) {
   const eps = 0.000001;
   if (row.remaining_quantity > eps) return '待銷貨';
-  if (row.return_unbilled_amount > eps) return '待轉應收折讓';
-  if (row.billed_amount < -eps) return '待處理應收退款／溢額';
+  if (row.return_pending_amount > eps || row.return_unbilled_amount > eps) return '待同步應收沖帳';
+  if (row.customer_credit_balance > eps) return '待退款／待抵';
   if (row.unbilled_amount > eps) return '待轉應收';
-  if (row.over_collected_amount > eps) return '待退款／沖抵';
   if (row.billed_amount > eps && row.uncollected_amount > eps) return '待收款';
+  if (row.returned_amount > eps && row.return_pending_amount <= eps && row.customer_credit_balance <= eps && row.uncollected_amount <= eps) return '已沖銷應收／已收款';
+  if (row.over_collected_amount > eps) return '待退款／沖抵';
   if (row.billed_amount > eps && row.uncollected_amount <= eps) return '已收款';
   if (row.returned_amount > eps && row.delivered_amount > eps && row.returned_amount >= row.delivered_amount - eps) return '已沖銷應收';
   return '待銷售流程';
@@ -3224,10 +3479,10 @@ function flowExceptionSales(row) {
   if (row.remaining_quantity>eps && ['completed','closed'].includes(row.order_status)) return '訂單已結案但仍有未交量';
   if (row.remaining_quantity>eps) return `尚有 ${row.remaining_quantity} 未銷貨`;
   if (row.delivered_quantity>eps && !row.shipment_nos) return '已交量與銷貨單追蹤不一致';
-  if (row.return_unbilled_amount>eps) return `銷退／折讓尚有 ${row.return_unbilled_amount} 未同步應收`;
-  if (row.billed_amount < -eps) return `銷退／折讓超過原應收 ${Math.abs(row.billed_amount)}，待處理退款／溢額`;
+  if (row.return_pending_amount>eps || row.return_unbilled_amount>eps) return `銷退／折讓尚有 ${row.return_pending_amount || row.return_unbilled_amount} 未同步應收沖帳`;
+  if (row.customer_credit_balance>eps) return `客戶待抵尚有 ${row.customer_credit_balance} 未轉抵／退款`;
   if (row.unbilled_amount>eps) return `銷貨已完成但尚有 ${row.unbilled_amount} 未轉應收`;
-  if (row.over_collected_amount>eps) return `原應收已收款，銷退／折讓後尚有 ${row.over_collected_amount} 待退款／沖抵`;
+  if (row.over_collected_amount>eps && row.returned_amount<=eps) return `應收收款超過立帳金額 ${row.over_collected_amount}，待退款／沖抵`;
   if (row.billed_amount>eps && row.uncollected_amount>eps) return `應收尚有 ${row.uncollected_amount} 未收款`;
   return '';
 }
@@ -3335,11 +3590,23 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
     const delivered = children.filter(row => row.shipment_status === 'posted').reduce((sum, row) => sum + flowAmount(row.shipment_quantity), 0);
     const deliveredAmount = children.filter(row => row.shipment_status === 'posted').reduce((sum, row) => sum + flowAmount(row.shipment_quantity) * flowAmount(row.shipment_unit_price || order.unit_price), 0);
     const shipmentBilled = children.reduce((sum, row) => sum + flowAmount(finance.get(`shipment:${row.shipment_item_id}`)?.billed), 0);
-    const collected = children.reduce((sum, row) => sum + flowAmount(finance.get(`shipment:${row.shipment_item_id}`)?.collected), 0);
+    const shipmentCollected = children.reduce((sum, row) => sum + flowAmount(finance.get(`shipment:${row.shipment_item_id}`)?.collected), 0);
     const returnedAmount = returnChildren.reduce((sum, row) => sum + salesReturnAmount(row), 0);
     const returnBilled = returnChildren.reduce((sum, row) => sum + flowAmount(finance.get(`sales_return:${row.return_item_id}`)?.billed), 0);
-    const returnUnbilled = Math.max(returnedAmount - Math.abs(returnBilled), 0);
-    const billed = shipmentBilled + returnBilled;
+    const returnTraces = returnChildren.map(row => finance.get(`sales_return:${row.return_item_id}`) || {});
+    const returnOffset = returnTraces.reduce((sum, row) => sum + flowAmount(row.return_offset_amount), 0);
+    const returnCredit = returnTraces.reduce((sum, row) => sum + flowAmount(row.return_credit_amount), 0);
+    const returnRefund = returnTraces.reduce((sum, row) => sum + flowAmount(row.return_refund_amount), 0);
+    const returnCreditBalance = returnTraces.reduce((sum, row) => sum + flowAmount(row.customer_credit_balance), 0);
+    const returnCollected = returnTraces.reduce((sum, row) => sum + flowAmount(row.collected), 0);
+    const returnUnbilled = returnChildren.reduce((sum, row) => {
+      const trace = finance.get(`sales_return:${row.return_item_id}`);
+      return sum + (trace && flowAmount(trace.return_amount) > 0
+        ? flowAmount(trace.return_pending_amount)
+        : Math.max(salesReturnAmount(row) - Math.abs(flowAmount(trace?.billed)), 0));
+    }, 0);
+    const billed = shipmentBilled + returnBilled - returnOffset - returnCredit;
+    const collected = shipmentCollected + returnCollected;
     const trace = [...children.map(row => finance.get(`shipment:${row.shipment_item_id}`)), ...returnChildren.map(row => finance.get(`sales_return:${row.return_item_id}`))].filter(Boolean);
     const orderQuantity = flowAmount(order.order_quantity);
     const orderAmount = orderQuantity * flowAmount(order.unit_price);
@@ -3357,19 +3624,24 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
       customer_code: order.customer_code, order_date: order.order_date, item_code: order.item_code, item_name: order.item_name,
       order_quantity: orderQuantity, delivered_quantity: delivered, returned_quantity: returnChildren.reduce((sum, row) => sum + (row.return_type === 'allowance' ? 0 : flowAmount(row.return_quantity)), 0), remaining_quantity: Math.max(orderQuantity - delivered, 0),
       order_amount: orderAmount, delivered_amount: deliveredAmount, returned_amount: returnedAmount, billed_amount: billed, collected_amount: collected,
-      unbilled_amount: Math.max(deliveredAmount - shipmentBilled, 0) + returnUnbilled, return_unbilled_amount: returnUnbilled, uncollected_amount: Math.max(billed - collected, 0), over_collected_amount: Math.max(collected - billed, 0),
+      unbilled_amount: Math.max(deliveredAmount - shipmentBilled, 0) + returnUnbilled, return_unbilled_amount: returnUnbilled,
+      return_offset_amount: returnOffset, return_credit_amount: returnCredit, return_refund_amount: returnRefund,
+      return_pending_amount: returnUnbilled, customer_credit_balance: returnCreditBalance,
+      uncollected_amount: Math.max(billed - collected, 0), over_collected_amount: Math.max(collected - billed, 0),
       quote_status: order.quote_status || '', order_status: order.order_status, next_stage: '', exception_reason: ''
     };
     row.next_stage = flowNextStageSales(row);
     row.exception_reason = flowExceptionSales(row);
-    row.audit_status = ['已收款','已沖銷應收'].includes(row.next_stage) && !row.exception_reason ? '流程完成' : `需處理：${row.exception_reason || row.next_stage}`;
+    row.audit_status = ['已收款','已沖銷應收','已沖銷應收／已收款'].includes(row.next_stage) && !row.exception_reason ? '流程完成' : `需處理：${row.exception_reason || row.next_stage}`;
     return row;
   });
   for (const shipment of standaloneShipments) {
     const trace = finance.get(`shipment:${shipment.shipment_item_id}`) || {};
     const delivered = shipment.shipment_status === 'posted' ? flowAmount(shipment.shipment_quantity) : 0;
     const deliveredAmount = delivered * flowAmount(shipment.shipment_unit_price || shipment.shipment_unit_cost);
-    const billed = flowAmount(trace.billed), collected = flowAmount(trace.collected);
+    const returnedAmount = flowAmount(trace.return_amount), returnOffset = flowAmount(trace.return_offset_amount);
+    const returnCredit = flowAmount(trace.return_credit_amount), returnPending = flowAmount(trace.return_pending_amount);
+    const billed = flowAmount(trace.billed) - returnOffset - returnCredit, collected = flowAmount(trace.collected);
     const invalidSource = Number(shipment.order_item_id || 0) > 0 && !Number(shipment.source_order_id || 0);
     const row = {
       source: `${invalidSource ? '孤兒銷貨' : '獨立銷貨'} ${shipment.shipment_no}`, root_kind: invalidSource ? 'orphan_shipment' : 'standalone_shipment', root_type: invalidSource ? '銷貨來源無效／孤兒單據' : '合法獨立銷貨起點',
@@ -3377,9 +3649,12 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
       shipment_statuses: shipment.shipment_status || '', ar_voucher_nos: trace.voucher_nos || '', ar_voucher_statuses: trace.voucher_statuses || '',
       ar_open_item_statuses: trace.open_item_statuses || '', ar_settlement_nos: trace.settlement_nos || '', ar_settlement_statuses: trace.settlement_statuses || '',
       customer_code: shipment.customer_code || '', order_date: shipment.shipment_date, item_code: shipment.item_code, item_name: shipment.item_name,
-      order_quantity: 0, quote_quantity: 0, delivered_quantity: delivered, returned_quantity: 0, remaining_quantity: 0,
-      order_amount: 0, delivered_amount: deliveredAmount, returned_amount: 0, billed_amount: billed, collected_amount: collected,
-      unbilled_amount: Math.max(deliveredAmount - billed, 0), return_unbilled_amount: 0, uncollected_amount: Math.max(billed - collected, 0), over_collected_amount: Math.max(collected - billed, 0),
+      order_quantity: 0, quote_quantity: 0, delivered_quantity: delivered, returned_quantity: Math.max(returnedAmount, 0), remaining_quantity: 0,
+      order_amount: 0, delivered_amount: deliveredAmount, returned_amount: returnedAmount, billed_amount: billed, collected_amount: collected,
+      unbilled_amount: Math.max(deliveredAmount - flowAmount(trace.billed), 0) + returnPending, return_unbilled_amount: returnPending,
+      return_offset_amount: returnOffset, return_credit_amount: returnCredit, return_refund_amount: flowAmount(trace.return_refund_amount),
+      return_pending_amount: returnPending, customer_credit_balance: flowAmount(trace.customer_credit_balance),
+      uncollected_amount: Math.max(billed - collected, 0), over_collected_amount: Math.max(collected - billed, 0),
       quote_status: '', order_status: '', next_stage: '', exception_reason: ''
     };
     if (invalidSource) {
@@ -3400,6 +3675,11 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
     const isLinkedOutsideRange = Number(ret.return_source_item_id || 0) > 0;
     const trace = finance.get(`sales_return:${ret.return_item_id}`) || {};
     const returnBilled = flowAmount(trace.billed), returnCollected = flowAmount(trace.collected);
+    const returnOffset = flowAmount(trace.return_offset_amount), returnCredit = flowAmount(trace.return_credit_amount);
+    const returnRefund = flowAmount(trace.return_refund_amount), returnPending = flowAmount(trace.return_pending_amount);
+    const customerCreditBalance = flowAmount(trace.customer_credit_balance);
+    const hasReturnAdjustment = flowAmount(trace.return_amount) > 0;
+    const effectiveReturnPending = hasReturnAdjustment ? returnPending : Math.max(returnedAmount - Math.abs(returnBilled), 0);
     const pendingStatus = !['posted'].includes(String(ret.return_status));
     const exception = pendingStatus ? `銷退／折讓尚未完成驗收／過帳（${ret.return_status || 'unknown'}）` : isLinkedOutsideRange ? '原銷貨／訂單不在目前日期範圍，銷退／折讓尚未併入流程列' : '銷退／折讓未關聯原銷貨，無法完整同步應收';
     rows.push({
@@ -3408,10 +3688,13 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
       quote_no: '', order_no: '', shipment_nos: '', customer_code: ret.customer_code || '', order_date: ret.return_date,
       item_code: ret.item_code, item_name: ret.item_name, order_quantity: 0, delivered_quantity: 0,
       returned_quantity: ret.return_type === 'allowance' ? 0 : flowAmount(ret.return_quantity), remaining_quantity: 0,
-      order_amount: 0, delivered_amount: 0, returned_amount: returnedAmount, billed_amount: returnBilled, collected_amount: returnCollected,
-      unbilled_amount: Math.max(returnedAmount - Math.abs(returnBilled), 0), return_unbilled_amount: Math.max(returnedAmount - Math.abs(returnBilled), 0), uncollected_amount: Math.max(returnBilled - returnCollected, 0),
+      order_amount: 0, delivered_amount: 0, returned_amount: returnedAmount, billed_amount: returnBilled - returnOffset - returnCredit, collected_amount: returnCollected,
+      unbilled_amount: effectiveReturnPending, return_unbilled_amount: effectiveReturnPending,
+      return_offset_amount: returnOffset, return_credit_amount: returnCredit, return_refund_amount: returnRefund,
+      return_pending_amount: effectiveReturnPending, customer_credit_balance: customerCreditBalance,
+      uncollected_amount: Math.max(returnBilled - returnOffset - returnCredit - returnCollected, 0), over_collected_amount: Math.max(returnCollected - (returnBilled - returnOffset - returnCredit), 0),
       quote_status: '', order_status: '', shipment_statuses: '', ar_voucher_nos: '', ar_voucher_statuses: '',
-      ar_open_item_statuses: trace.open_item_statuses || '', ar_settlement_nos: trace.settlement_nos || '', ar_settlement_statuses: trace.settlement_statuses || '', next_stage: pendingStatus ? '待銷退驗收／過帳' : isLinkedOutsideRange ? '待追蹤原銷貨／應收' : '待關聯原銷貨／應收',
+      ar_open_item_statuses: trace.open_item_statuses || '', ar_settlement_nos: trace.settlement_nos || '', ar_settlement_statuses: trace.settlement_statuses || '', next_stage: pendingStatus ? '待銷退驗收／過帳' : effectiveReturnPending > 0 ? '待同步應收沖帳' : customerCreditBalance > 0 ? '待退款／待抵' : isLinkedOutsideRange ? '待追蹤原銷貨／應收' : '待關聯原銷貨／應收',
       exception_reason: exception, audit_status: `需處理：${exception}`
     });
   }
@@ -3439,7 +3722,8 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
     order_count: new Set(rows.map(row => row.order_no).filter(Boolean)).size,
     quote_count: Object.keys(quoteSummary).length, order_quantity: sumFlow(rows, 'order_quantity'), delivered_quantity: sumFlow(rows, 'delivered_quantity'),
     remaining_quantity: sumFlow(rows, 'remaining_quantity'), order_amount: sumFlow(rows, 'order_amount'), delivered_amount: sumFlow(rows, 'delivered_amount'),
-    returned_amount: sumFlow(rows, 'returned_amount'), billed_amount: sumFlow(rows, 'billed_amount'), collected_amount: sumFlow(rows, 'collected_amount'), unbilled_amount: sumFlow(rows, 'unbilled_amount'), uncollected_amount: sumFlow(rows, 'uncollected_amount'),
+    returned_amount: sumFlow(rows, 'returned_amount'), return_offset_amount: sumFlow(rows, 'return_offset_amount'), return_credit_amount: sumFlow(rows, 'return_credit_amount'), return_refund_amount: sumFlow(rows, 'return_refund_amount'), return_pending_amount: sumFlow(rows, 'return_pending_amount'), customer_credit_balance: sumFlow(rows, 'customer_credit_balance'),
+    billed_amount: sumFlow(rows, 'billed_amount'), collected_amount: sumFlow(rows, 'collected_amount'), unbilled_amount: sumFlow(rows, 'unbilled_amount'), uncollected_amount: sumFlow(rows, 'uncollected_amount'),
     completed_count: rows.filter(row => row.audit_status === '流程完成').length, exception_count: rows.filter(row => row.audit_status !== '流程完成').length,
     next_stage: rows.reduce((out, row) => { out[row.next_stage] = (out[row.next_stage] || 0) + 1; return out; }, {})
   };
@@ -3785,6 +4069,56 @@ function registerFinanceWorkflowRoutes(app){
   app.get('/api/finance-workflow/closing-settings',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'AR').toUpperCase(),c=ctx(db);await pool.query(`INSERT IGNORE INTO finance_closing_settings(tenant_id,company_id,source_system,source_database,account_type) VALUES(?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,db,type]);const[[row]]=await pool.query('SELECT * FROM finance_closing_settings WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND account_type=?',[c.tenant_id,c.company_id,c.source_system,db,type]);res.json({ok:true,data:row});}catch(e){next(e);}});
   app.put('/api/finance-workflow/closing-settings',async(req,res,next)=>{try{await ensureFinance();const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),type=String(b.account_type||'AR').toUpperCase(),c=ctx(db),day=Math.min(Math.max(Number(b.unified_closing_day)||31,1),31);await pool.query(`INSERT INTO finance_closing_settings(tenant_id,company_id,source_system,source_database,account_type,unified_closing_day,base_currency_code,exchange_gain_account_code,exchange_gain_account_name,exchange_loss_account_code,exchange_loss_account_name,auto_generate,note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE unified_closing_day=VALUES(unified_closing_day),base_currency_code=VALUES(base_currency_code),exchange_gain_account_code=VALUES(exchange_gain_account_code),exchange_gain_account_name=VALUES(exchange_gain_account_name),exchange_loss_account_code=VALUES(exchange_loss_account_code),exchange_loss_account_name=VALUES(exchange_loss_account_name),auto_generate=VALUES(auto_generate),note=VALUES(note)`,[c.tenant_id,c.company_id,c.source_system,db,type,day,trim(b.base_currency_code)||'TWD',trim(b.exchange_gain_account_code)||'7161',trim(b.exchange_gain_account_name)||'兌換利益',trim(b.exchange_loss_account_code)||'7162',trim(b.exchange_loss_account_name)||'兌換損失',Number(b.auto_generate||0),trim(b.note),req.auth.id]);res.json({ok:true,data:{source_database:db,account_type:type}});}catch(e){next(e);}});
   app.get('/api/finance-workflow/closing-suggestion',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'AR').toUpperCase(),party=trim(req.query.party_code),basis=trim(req.query.closing_basis)||'customer',reference=validDate(req.query.reference_date),c=ctx(db);const table=type==='AR'?'erp_customers':'erp_suppliers',code=type==='AR'?'customer_code':'supplier_code';let master=null;if(party){const[rows]=await pool.query(`SELECT * FROM ${table} WHERE tenant_id=? AND company_id=? AND source_system=? AND ${code}=? LIMIT 1`,[c.tenant_id,c.company_id,c.source_system,party]);master=rows[0]||null;}const[[setting]]=await pool.query('SELECT * FROM finance_closing_settings WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND account_type=?',[c.tenant_id,c.company_id,c.source_system,db,type]);const day=basis==='unified'?setting?.unified_closing_day:master?.closing_day;const date=closingDate(reference,day||31),currency=master?.currency_code||setting?.base_currency_code||'TWD';const rate=await tx(conn=>financeRate(conn,currency,date,c));res.json({ok:true,data:{closing_basis:basis,voucher_date:date,due_date:date,party_code:party,currency_code:currency,invoice_type:master?.invoice_type||'',tax_id:master?.tax_id||'',exchange_rate:rate,closing_day:Number(day)||31}});}catch(e){next(e);}});
+  app.get('/api/finance-workflow/return-adjustments',async(req,res,next)=>{
+    try{
+      await ensureFinance();
+      const db=String(req.query.source_database||'SH').toUpperCase(),c=ctx(db);
+      const limit=Math.min(Math.max(Number(req.query.limit)||200,1),500);
+      const[rows]=await pool.query(`SELECT a.*,d.document_no sales_return_no,d.document_date sales_return_date,
+        d.customer_code,d.currency_code,d.return_type,d.status sales_return_status,i.item_code,i.item_name,i.quantity return_quantity,
+        (SELECT GROUP_CONCAT(DISTINCT oi.document_no ORDER BY oi.document_date,oi.id SEPARATOR '、')
+          FROM finance_return_adjustment_allocations aa JOIN finance_open_items oi ON oi.id=aa.open_item_id
+          WHERE aa.adjustment_id=a.id) open_item_nos,
+        (SELECT COUNT(*) FROM finance_return_adjustment_allocations aa WHERE aa.adjustment_id=a.id) allocation_count,
+        COALESCE((SELECT cc.original_amount FROM finance_customer_credits cc WHERE cc.source_adjustment_id=a.id LIMIT 1),0) credit_original_amount,
+        COALESCE((SELECT cc.applied_amount FROM finance_customer_credits cc WHERE cc.source_adjustment_id=a.id LIMIT 1),0) credit_applied_amount,
+        COALESCE((SELECT cc.refunded_amount FROM finance_customer_credits cc WHERE cc.source_adjustment_id=a.id LIMIT 1),0) credit_refunded_amount,
+        COALESCE((SELECT cc.balance_amount FROM finance_customer_credits cc WHERE cc.source_adjustment_id=a.id LIMIT 1),0) credit_balance_amount,
+        COALESCE((SELECT cc.status FROM finance_customer_credits cc WHERE cc.source_adjustment_id=a.id LIMIT 1),'') credit_status
+      FROM finance_return_adjustments a
+      JOIN sales_documents d ON d.id=a.sales_return_id AND d.source_database=a.source_database
+      JOIN sales_document_items i ON i.id=a.sales_return_item_id
+      WHERE a.tenant_id=? AND a.company_id=? AND a.source_system=? AND a.source_database=?
+      ORDER BY a.adjustment_date DESC,a.id DESC LIMIT ?`,[c.tenant_id,c.company_id,c.source_system,db,limit]);
+      res.json({ok:true,data:rows});
+    }catch(e){next(e);}
+  });
+  app.post('/api/finance-workflow/return-adjustments/:id/sync',async(req,res,next)=>{
+    try{
+      await ensureFinance();
+      const db=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase(),c=ctx(db),id=Number(req.params.id);
+      const result=await tx(async conn=>{
+        const[[row]]=await conn.query('SELECT id FROM finance_return_adjustments WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? FOR UPDATE',[id,c.tenant_id,c.company_id,c.source_system,db]);
+        if(!row)throw notFound('找不到目前公司別的銷退應收處理紀錄');
+        return syncSalesReturnAdjustment(conn,id,req.auth.id);
+      });
+      res.json({ok:true,data:result});
+    }catch(e){next(e);}
+  });
+  app.get('/api/finance-workflow/return-adjustments/:id/events',async(req,res,next)=>{
+    try{
+      await ensureFinance();
+      const db=String(req.query.source_database||'SH').toUpperCase(),c=ctx(db),id=Number(req.params.id);
+      const[[adjustment]]=await pool.query('SELECT id FROM finance_return_adjustments WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?',[id,c.tenant_id,c.company_id,c.source_system,db]);
+      if(!adjustment)throw notFound('找不到目前公司別的銷退應收處理紀錄');
+      const[rows]=await pool.query(`SELECT e.*,oi.document_no open_item_no
+        FROM finance_return_adjustment_events e
+        LEFT JOIN finance_open_items oi ON oi.id=e.open_item_id
+        WHERE e.adjustment_id=? AND e.tenant_id=? AND e.company_id=? AND e.source_system=? AND e.source_database=?
+        ORDER BY e.created_at,e.id`,[id,c.tenant_id,c.company_id,c.source_system,db]);
+      res.json({ok:true,data:rows});
+    }catch(e){next(e);}
+  });
   app.get('/api/finance-workflow/customer-credits',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),c=ctx(db);const[rows]=await pool.query(`SELECT c.*,a.sales_return_id,a.return_amount,a.receivable_offset_amount,a.refund_amount,a.status adjustment_status,d.document_no sales_return_no FROM finance_customer_credits c JOIN finance_return_adjustments a ON a.id=c.source_adjustment_id JOIN sales_documents d ON d.id=a.sales_return_id WHERE c.tenant_id=? AND c.company_id=? AND c.source_system=? AND c.source_database=? ORDER BY c.credit_date DESC,c.id DESC LIMIT 100`,[c.tenant_id,c.company_id,c.source_system,db]);res.json({ok:true,data:rows});}catch(e){next(e);}});
   app.get('/api/finance-workflow/advances',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'').toUpperCase(),c=ctx(db),w=['tenant_id=?','company_id=?','source_system=?','source_database=?'],p=[c.tenant_id,c.company_id,c.source_system,db];if(['AR','AP'].includes(type)){w.push('account_type=?');p.push(type);}const[rows]=await pool.query(`SELECT * FROM finance_advances WHERE ${w.join(' AND ')} ORDER BY advance_date DESC,id DESC LIMIT 200`,p);res.json({ok:true,data:rows});}catch(e){next(e);}});
   app.post('/api/finance-workflow/advances',async(req,res,next)=>{try{await ensureFinance();const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),type=String(b.account_type||'AR').toUpperCase(),kind=String(b.advance_kind||'prepayment'),c=ctx(db),date=validDate(b.advance_date),amount=positiveNumber(b.original_amount,'金額');if(!['AR','AP'].includes(type)||!['prepayment','overpayment'].includes(kind)||!trim(b.party_code))throw badRequest('預收／預付類別、類型與對象不可空白');const out=await tx(async conn=>{const no=trim(b.advance_no)||await nextWorkflowNumber(conn,'finance_advances','advance_no',type==='AR'?'ARADV':'APADV',date);const rate=Number(b.exchange_rate||1);const[r]=await conn.query(`INSERT INTO finance_advances(tenant_id,company_id,source_system,source_database,account_type,advance_kind,advance_no,advance_date,party_code,currency_code,exchange_rate,original_amount,balance_amount,source_settlement_id,source_document_no,status,note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'draft',?,?)`,[c.tenant_id,c.company_id,c.source_system,db,type,kind,no,date,trim(b.party_code),trim(b.currency_code)||'TWD',rate,amount,amount,b.source_settlement_id||null,trim(b.source_document_no)||null,trim(b.note)||null,req.auth.id]);return{id:r.insertId,advance_no:no,status:'draft'};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
@@ -3793,8 +4127,64 @@ function registerFinanceWorkflowRoutes(app){
   app.post('/api/finance-workflow/advances/:id/refund',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id),amount=positiveNumber(req.body?.amount,'退回金額'),date=validDate(req.body?.movement_date);const out=await tx(async conn=>{const[[a]]=await conn.query("SELECT * FROM finance_advances WHERE id=? AND status IN ('available','partial') FOR UPDATE",[id]);if(!a||amount>Number(a.balance_amount)+.000001)throw badRequest('退回金額超過預收／預付餘額');const b=Number(a.balance_amount)-amount;await conn.query("UPDATE finance_advances SET refunded_amount=refunded_amount+?,balance_amount=?,status=CASE WHEN ?<=.000001 THEN 'refunded' ELSE 'partial' END WHERE id=?",[amount,b,b,id]);await conn.query("INSERT INTO finance_advance_movements(advance_id,movement_date,movement_kind,amount,reference_no,note,created_by) VALUES(?,?, 'refund',?,?,?,?)",[id,date,amount,trim(req.body?.reference_no),trim(req.body?.note),req.auth.id]);return{id,refunded_amount:amount,balance_amount:b};});res.json({ok:true,data:out});}catch(e){next(e);}});
   app.get('/api/finance-workflow/party-links',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),c=ctx(db);const[rows]=await pool.query('SELECT * FROM finance_party_links WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND is_active=1 ORDER BY customer_code,supplier_code',[c.tenant_id,c.company_id,c.source_system,db]);res.json({ok:true,data:rows});}catch(e){next(e);}});
   app.post('/api/finance-workflow/party-links',async(req,res,next)=>{try{await ensureFinance();const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),c=ctx(db);if(!trim(b.customer_code)||!trim(b.supplier_code))throw badRequest('客戶代號與廠商代號不可空白');await pool.query('INSERT INTO finance_party_links(tenant_id,company_id,source_system,source_database,customer_code,supplier_code,relationship_type,note,created_by) VALUES(?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE is_active=1,relationship_type=VALUES(relationship_type),note=VALUES(note)',[c.tenant_id,c.company_id,c.source_system,db,trim(b.customer_code),trim(b.supplier_code),trim(b.relationship_type)||'customer_supplier',trim(b.note),req.auth.id]);res.status(201).json({ok:true});}catch(e){next(e);}});
-  app.post('/api/finance-workflow/customer-credits/:id/apply',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id),openItemId=Number(req.body?.open_item_id),date=validDate(req.body?.movement_date),requested=positiveNumber(req.body?.amount,'轉抵金額');const out=await tx(async conn=>{const[[credit]]=await conn.query("SELECT * FROM finance_customer_credits WHERE id=? AND status IN ('available','partial') FOR UPDATE",[id]);const[[item]]=await conn.query("SELECT * FROM finance_open_items WHERE id=? AND account_type='AR' AND status IN ('open','partial') FOR UPDATE",[openItemId]);if(!credit||!item||credit.tenant_id!==item.tenant_id||credit.company_id!==item.company_id||credit.source_system!==item.source_system||credit.source_database!==item.source_database||credit.party_code!==item.party_code||credit.currency_code!==item.currency_code)throw badRequest('待抵與應收帳款必須屬於同公司、同來源、客戶及幣別');const amount=Math.min(requested,Number(credit.balance_amount),Number(item.balance_amount));if(amount<=0||amount+0.000001<requested)throw badRequest('轉抵金額超過待抵或應收未沖餘額');const creditBalance=Number(credit.balance_amount)-amount,itemBalance=Number(item.balance_amount)-amount,rate=Number(item.exchange_rate||1)||1,newAdjustment=Number(item.adjustment_amount||0)+amount,newBaseAdjustment=Number(item.base_adjustment_amount||0)+amount*rate,newBaseBalance=Math.max((Number(item.base_balance_amount||0)||Number(item.balance_amount)*rate)-amount*rate,0);await conn.query("UPDATE finance_customer_credits SET applied_amount=applied_amount+?,balance_amount=?,status=CASE WHEN ?<=0.000001 THEN 'applied' ELSE 'partial' END WHERE id=?",[amount,creditBalance,creditBalance,id]);await conn.query("UPDATE finance_open_items SET adjustment_amount=?,base_adjustment_amount=?,balance_amount=?,base_balance_amount=?,status=CASE WHEN ?<=0.000001 THEN 'settled' ELSE 'partial' END WHERE id=?",[newAdjustment,newBaseAdjustment,itemBalance,newBaseBalance,itemBalance,openItemId]);await conn.query("INSERT INTO finance_customer_credit_movements(credit_id,movement_date,movement_kind,amount,open_item_id,reference_no,note,created_by) VALUES(?,?,'apply',?,?,?,?,?)",[id,date,amount,openItemId,trim(req.body?.reference_no),trim(req.body?.note),req.auth.id]);return{id,applied_amount:amount,balance_amount:creditBalance};});res.json({ok:true,data:out});}catch(e){next(e);}});
-  app.post('/api/finance-workflow/customer-credits/:id/refund',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id),date=validDate(req.body?.movement_date),amount=positiveNumber(req.body?.amount,'退款金額');const out=await tx(async conn=>{const[[credit]]=await conn.query("SELECT * FROM finance_customer_credits WHERE id=? AND status IN ('available','partial') FOR UPDATE",[id]);if(!credit||amount>Number(credit.balance_amount)+0.000001)throw badRequest('退款金額超過客戶待抵餘額');const balance=Number(credit.balance_amount)-amount;await conn.query("UPDATE finance_customer_credits SET refunded_amount=refunded_amount+?,balance_amount=?,status=CASE WHEN ?<=0.000001 THEN 'refunded' ELSE 'partial' END WHERE id=?",[amount,balance,balance,id]);await conn.query('UPDATE finance_return_adjustments SET refund_amount=refund_amount+?,processed_by=?,processed_at=NOW() WHERE id=?',[amount,req.auth.id,credit.source_adjustment_id]);await conn.query("INSERT INTO finance_customer_credit_movements(credit_id,movement_date,movement_kind,amount,reference_no,note,created_by) VALUES(?,?,'refund',?,?,?,?)",[id,date,amount,trim(req.body?.reference_no),trim(req.body?.note)||'退款已登錄，請依付款／銀行作業完成實際退款',req.auth.id]);return{id,refunded_amount:amount,balance_amount:balance};});res.json({ok:true,data:out});}catch(e){next(e);}});
+  app.post('/api/finance-workflow/customer-credits/:id/apply',async(req,res,next)=>{
+    try{
+      await ensureFinance();
+      const id=Number(req.params.id),openItemId=Number(req.body?.open_item_id),date=validDate(req.body?.movement_date),requested=positiveNumber(req.body?.amount,'轉抵金額'),db=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase(),c=ctx(db);
+      const out=await tx(async conn=>{
+        const[[credit]]=await conn.query("SELECT * FROM finance_customer_credits WHERE id=? AND status IN ('available','partial') FOR UPDATE",[id]);
+        const[[item]]=await conn.query("SELECT * FROM finance_open_items WHERE id=? AND account_type='AR' AND status IN ('open','partial') FOR UPDATE",[openItemId]);
+        if(!credit||!item||credit.tenant_id!==item.tenant_id||credit.company_id!==item.company_id||credit.source_system!==item.source_system||credit.source_database!==item.source_database||credit.party_code!==item.party_code||credit.currency_code!==item.currency_code)throw badRequest('待抵與應收帳款必須屬於同公司、同來源、客戶及幣別');
+        if(credit.source_database!==c.source_database)throw badRequest('待抵資料庫來源與目前公司別不一致');
+        await assertOpenAccountingPeriod(conn,c,date);
+        const amount=Math.min(requested,Number(credit.balance_amount),Number(item.balance_amount));
+        if(amount<=0||amount+SALES_RETURN_FINANCE_EPS<requested)throw badRequest('轉抵金額超過待抵或應收未沖餘額');
+        const creditBalance=Number(credit.balance_amount)-amount,itemBalance=Number(item.balance_amount)-amount,rate=Number(item.exchange_rate||1)||1;
+        const newAdjustment=Number(item.adjustment_amount||0)+amount,newBaseAdjustment=Number(item.base_adjustment_amount||0)+amount*rate;
+        const newBaseBalance=Math.max((Number(item.base_balance_amount||0)||Number(item.balance_amount)*rate)-amount*rate,0);
+        const[[adjustment]]=await conn.query('SELECT * FROM finance_return_adjustments WHERE id=? FOR UPDATE',[credit.source_adjustment_id]);
+        await conn.query("UPDATE finance_customer_credits SET applied_amount=applied_amount+?,balance_amount=?,status=CASE WHEN ?<=0.000001 THEN 'applied' ELSE 'partial' END WHERE id=?",[amount,creditBalance,creditBalance,id]);
+        await conn.query("UPDATE finance_open_items SET adjustment_amount=?,base_adjustment_amount=?,balance_amount=?,base_balance_amount=?,status=CASE WHEN ?<=0.000001 THEN 'settled' ELSE 'partial' END WHERE id=?",[newAdjustment,newBaseAdjustment,itemBalance,newBaseBalance,itemBalance,openItemId]);
+        await conn.query("INSERT INTO finance_customer_credit_movements(credit_id,movement_date,movement_kind,amount,open_item_id,reference_no,note,created_by) VALUES(?,?,'apply',?,?,?,?,?)",[id,date,amount,openItemId,trim(req.body?.reference_no),trim(req.body?.note),req.auth.id]);
+        if(adjustment)await recordSalesReturnAdjustmentEvent(conn,adjustment,'credit_apply',adjustment.status,adjustment.status,openItemId,amount,'客戶待抵轉入其他應收',req.auth.id);
+        return{id,applied_amount:amount,balance_amount:creditBalance,status:creditBalance<=SALES_RETURN_FINANCE_EPS?'applied':'partial'};
+      });
+      res.json({ok:true,data:out});
+    }catch(e){next(e);}
+  });
+  app.post('/api/finance-workflow/customer-credits/:id/refund',async(req,res,next)=>{
+    try{
+      await ensureFinance();
+      const id=Number(req.params.id),date=validDate(req.body?.movement_date),amount=positiveNumber(req.body?.amount,'退款金額'),db=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase(),c=ctx(db);
+      const out=await tx(async conn=>{
+        const[[credit]]=await conn.query("SELECT * FROM finance_customer_credits WHERE id=? AND status IN ('available','partial') FOR UPDATE",[id]);
+        if(!credit||credit.source_database!==c.source_database||amount>Number(credit.balance_amount)+SALES_RETURN_FINANCE_EPS)throw badRequest('退款金額超過目前公司別的客戶待抵餘額');
+        await assertOpenAccountingPeriod(conn,c,date);
+        const balance=Number(credit.balance_amount)-amount;
+        const[[adjustment]]=await conn.query('SELECT * FROM finance_return_adjustments WHERE id=? FOR UPDATE',[credit.source_adjustment_id]);
+        await conn.query("UPDATE finance_customer_credits SET refunded_amount=refunded_amount+?,balance_amount=?,status=CASE WHEN ?<=0.000001 THEN 'refunded' ELSE 'partial' END WHERE id=?",[amount,balance,balance,id]);
+        await conn.query('UPDATE finance_return_adjustments SET refund_amount=refund_amount+?,processed_by=?,processed_at=NOW() WHERE id=?',[amount,req.auth.id,credit.source_adjustment_id]);
+        await conn.query("INSERT INTO finance_customer_credit_movements(credit_id,movement_date,movement_kind,amount,reference_no,note,created_by) VALUES(?,?,'refund',?,?,?,?)",[id,date,amount,trim(req.body?.reference_no),trim(req.body?.note)||'退款已登錄，請依付款／銀行作業完成實際退款',req.auth.id]);
+        if(adjustment)await recordSalesReturnAdjustmentEvent(conn,adjustment,'credit_refund',adjustment.status,adjustment.status,null,amount,'客戶待抵登錄退款；實際出款由銀行／付款作業完成',req.auth.id);
+        return{id,refunded_amount:amount,balance_amount:balance,status:balance<=SALES_RETURN_FINANCE_EPS?'refunded':'partial'};
+      });
+      res.json({ok:true,data:out});
+    }catch(e){next(e);}
+  });
+  app.get('/api/finance-workflow/customer-credits/:id/movements',async(req,res,next)=>{
+    try{
+      await ensureFinance();
+      const id=Number(req.params.id),db=String(req.query.source_database||'SH').toUpperCase(),c=ctx(db);
+      const[rows]=await pool.query(`SELECT m.*,c.party_code,c.currency_code,a.sales_return_id,d.document_no sales_return_no
+        FROM finance_customer_credit_movements m
+        JOIN finance_customer_credits c ON c.id=m.credit_id
+        JOIN finance_return_adjustments a ON a.id=c.source_adjustment_id
+        JOIN sales_documents d ON d.id=a.sales_return_id
+        WHERE m.credit_id=? AND c.tenant_id=? AND c.company_id=? AND c.source_system=? AND c.source_database=?
+        ORDER BY m.movement_date,m.id`,[id,c.tenant_id,c.company_id,c.source_system,db]);
+      res.json({ok:true,data:rows});
+    }catch(e){next(e);}
+  });
   async function getFinanceSourceLine(conn, type, db, row) {
     const id=Number(row.source_document_id||0), itemId=Number(row.source_document_item_id||0);
     if (!id || !itemId) throw badRequest('財務來源必須指定單據與明細');
@@ -4003,12 +4393,42 @@ function registerFinanceWorkflowRoutes(app){
      });
      res.json({ok:true,data:out});
    }catch(e){next(e);}});
-   app.post(['/api/finance-workflow/vouchers/:id/approve-enhanced','/api/finance-workflow/vouchers/:id/approve'],async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id);const out=await tx(async conn=>{const[[v]]=await conn.query("SELECT * FROM finance_vouchers WHERE id=? AND status='draft' FOR UPDATE",[id]);if(!v)throw badRequest('只有草稿結帳／應付憑單可以核准');await assertOpenAccountingPeriod(conn,contextFor(String(v.source_database).toUpperCase()),v.voucher_date);const[[existing]]=await conn.query("SELECT id FROM finance_open_items WHERE source_kind='finance_voucher' AND source_document_id=? LIMIT 1",[id]);if(existing)throw badRequest('此憑單已建立帳款');const[r]=await conn.query(`INSERT INTO finance_open_items(tenant_id,company_id,source_system,source_database,account_type,document_no,document_date,due_date,party_code,currency_code,exchange_rate,source_kind,source_document_id,source_document_no,original_amount,balance_amount,base_original_amount,base_balance_amount,status,note,created_by,approved_by,approved_at,posted_by,posted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,NOW(),?,NOW())`,[v.tenant_id,v.company_id,v.source_system,v.source_database,v.account_type,v.voucher_no,v.voucher_date,v.due_date,v.party_code,v.currency_code,v.exchange_rate,'finance_voucher',id,v.voucher_no,v.total_amount,v.total_amount,v.base_total_amount,v.base_total_amount,v.note,req.auth.id,req.auth.id,req.auth.id]);await conn.query("UPDATE finance_vouchers SET status='approved',approved_by=?,approved_at=NOW() WHERE id=?",[req.auth.id,id]);return{id,voucher_no:v.voucher_no,open_item_id:r.insertId,status:'approved'};});res.json({ok:true,data:out});}catch(e){next(e);}});
+  app.post(['/api/finance-workflow/vouchers/:id/approve-enhanced','/api/finance-workflow/vouchers/:id/approve'],async(req,res,next)=>{
+    try{
+      await ensureFinance();
+      const id=Number(req.params.id);
+      const out=await tx(async conn=>{
+        const[[v]]=await conn.query("SELECT * FROM finance_vouchers WHERE id=? AND status='draft' FOR UPDATE",[id]);
+        if(!v)throw badRequest('只有草稿結帳／應付憑單可以核准');
+        await assertOpenAccountingPeriod(conn,contextFor(String(v.source_database).toUpperCase()),v.voucher_date);
+        const[[existing]]=await conn.query("SELECT id FROM finance_open_items WHERE source_kind='finance_voucher' AND source_document_id=? LIMIT 1",[id]);
+        if(existing)throw badRequest('此憑單已建立帳款');
+        const[r]=await conn.query(`INSERT INTO finance_open_items(tenant_id,company_id,source_system,source_database,account_type,document_no,document_date,due_date,party_code,currency_code,exchange_rate,source_kind,source_document_id,source_document_no,original_amount,balance_amount,base_original_amount,base_balance_amount,status,note,created_by,approved_by,approved_at,posted_by,posted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,NOW(),?,NOW())`,[v.tenant_id,v.company_id,v.source_system,v.source_database,v.account_type,v.voucher_no,v.voucher_date,v.due_date,v.party_code,v.currency_code,v.exchange_rate,'finance_voucher',id,v.voucher_no,v.total_amount,v.total_amount,v.base_total_amount,v.base_total_amount,v.note,req.auth.id,req.auth.id,req.auth.id]);
+        await conn.query("UPDATE finance_vouchers SET status='approved',approved_by=?,approved_at=NOW() WHERE id=?",[req.auth.id,id]);
+        const synced=await syncPendingSalesReturnAdjustmentsForOpenItem(conn,r.insertId,req.auth.id);
+        return{id,voucher_no:v.voucher_no,open_item_id:r.insertId,status:'approved',synced_return_adjustments:synced};
+      });
+      res.json({ok:true,data:out});
+    }catch(e){next(e);}
+  });
   app.post('/api/finance-workflow/vouchers',async(req,res,next)=>{try{await ensureFinance();const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),type=String(b.account_type||'AR').toUpperCase(),c=ctx(db),date=validDate(b.voucher_date||b.document_date),due=nullableDate(b.due_date),documentType=trim(b.document_type),mode=trim(b.settlement_mode)||'direct',sourceRows=Array.isArray(b.source_rows)?b.source_rows:[];if(!['AR','AP'].includes(type)||!documentType||!['direct','manual','batch'].includes(mode)||!trim(b.party_code)&&!sourceRows.length)throw badRequest('請輸入有效的結帳／應付憑單資料');if(mode==='direct'&&sourceRows.length!==1)throw badRequest('直接結帳必須只選一筆來源單據');if(mode==='batch'&&!sourceRows.length)throw badRequest('整批／月結至少要選擇一筆來源單據');if(mode==='manual'&&sourceRows.length)throw badRequest('手動結帳不可帶入來源單據，請直接輸入對象與金額');const out=await tx(async conn=>{const lines=[];for(const raw of sourceRows){const line=await getFinanceSourceLine(conn,type,db,raw);const usedParams=[line.source_kind,line.source_document_id,line.source_document_item_id];const [[used]]=await conn.query(`SELECT COALESCE(SUM(vs.allocated_amount),0) used_amount FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id WHERE v.status<>'voided' AND vs.source_kind=? AND vs.source_document_id=? AND COALESCE(vs.source_document_item_id,0)=COALESCE(?,0)`,usedParams);const sourceAmount=Number(line.source_amount),remaining=sourceAmount-Number(used.used_amount||0),requested=raw.allocated_amount===''||raw.allocated_amount==null?remaining:Number(raw.allocated_amount);if(!Number.isFinite(requested)||Math.abs(requested)<0.000001||Math.abs(requested)>Math.abs(remaining)+0.000001||Math.sign(requested)!==Math.sign(remaining))throw badRequest(`來源 ${line.source_document_no} 可立帳金額不足或方向錯誤`);assertChronologicalDate(date,line.document_date,'結帳日期');lines.push({...line,allocated_amount:requested,source_amount:sourceAmount});}const party=trim(b.party_code)||lines[0]?.party_code;if(!party)throw badRequest('對象不可空白');if(lines.some(x=>String(x.party_code)!==party))throw badRequest('同一張結帳／應付憑單不可混合不同客戶或廠商');const currency=trim(b.currency_code)||lines[0]?.currency_code||'TWD';if(lines.some(x=>String(x.currency_code||'TWD')!==currency))throw badRequest('同一張單據不可混合不同幣別');const total=lines.length?lines.reduce((sum,x)=>sum+Number(x.allocated_amount),0):Number(b.total_amount);const tax=Number(b.tax_amount||0);if(!Number.isFinite(total)||total===0)throw badRequest('結帳／應付憑單金額不可為零');const net=Number(b.net_amount??(total-tax));const prefix=type==='AR'?'ARV':'APV';const no=trim(b.voucher_no)||await nextWorkflowNumber(conn,'finance_vouchers','voucher_no',prefix,date);const[h]=await conn.query(`INSERT INTO finance_vouchers(tenant_id,company_id,source_system,source_database,account_type,document_type,voucher_no,voucher_date,due_date,party_code,currency_code,settlement_mode,invoice_no,invoice_date,net_amount,tax_amount,total_amount,status,note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?,?)`,[c.tenant_id,c.company_id,c.source_system,db,type,documentType,no,date,due,party,currency,mode,trim(b.invoice_no)||null,nullableDate(b.invoice_date),net,tax,total,trim(b.note),req.auth.id]);for(const line of lines)await conn.query(`INSERT INTO finance_voucher_sources(voucher_id,source_kind,source_document_id,source_document_item_id,source_document_type,source_document_no,source_line_no,source_date,item_code,quantity,unit_price,source_amount,tax_amount,allocated_amount) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[h.insertId,line.source_kind,line.source_document_id,line.source_document_item_id,line.source_document_type,line.source_document_no,line.line_no||null,line.document_date,line.item_code,line.quantity,line.unit_price,line.source_amount,0,line.allocated_amount]);return{id:h.insertId,voucher_no:no,total_amount:total,source_count:lines.length,status:'draft'};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
   app.post('/api/finance-workflow/vouchers/:id/approve',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id);const out=await tx(async conn=>{const[[v]]=await conn.query("SELECT * FROM finance_vouchers WHERE id=? AND status='draft' FOR UPDATE",[id]);if(!v)throw badRequest('只有草稿結帳／應付憑單可以核准');await assertOpenAccountingPeriod(conn,contextFor(String(v.source_database).toUpperCase()),v.voucher_date);const[[existing]]=await conn.query("SELECT id FROM finance_open_items WHERE source_kind='finance_voucher' AND source_document_id=? LIMIT 1",[id]);if(existing)throw badRequest('此憑單已建立帳款');const no=v.voucher_no;const[r]=await conn.query(`INSERT INTO finance_open_items(tenant_id,company_id,source_system,source_database,account_type,document_no,document_date,due_date,party_code,currency_code,source_kind,source_document_id,source_document_no,original_amount,balance_amount,status,note,created_by,approved_by,approved_at,posted_by,posted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,NOW(),?,NOW())`,[v.tenant_id,v.company_id,v.source_system,v.source_database,v.account_type,no,v.voucher_date,v.due_date,v.party_code,v.currency_code,'finance_voucher',id,no,v.total_amount,v.total_amount,v.note,req.auth.id,req.auth.id,req.auth.id]);await conn.query("UPDATE finance_vouchers SET status='approved',approved_by=?,approved_at=NOW() WHERE id=?",[req.auth.id,id]);return{id,voucher_no:no,open_item_id:r.insertId,status:'approved'};});res.json({ok:true,data:out});}catch(e){next(e);}});
   app.post('/api/finance-workflow/vouchers/:id/void',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id);await tx(async conn=>{const[[v]]=await conn.query("SELECT * FROM finance_vouchers WHERE id=? AND status<>'voided' FOR UPDATE",[id]);if(!v)throw badRequest('找不到可作廢的憑單');const[[o]]=await conn.query("SELECT id,status FROM finance_open_items WHERE source_kind='finance_voucher' AND source_document_id=? FOR UPDATE",[id]);if(o&&['settled','partial'].includes(o.status))throw badRequest('已沖銷的帳款不可作廢，請走沖銷更正流程');if(o)await conn.query("UPDATE finance_open_items SET status='voided' WHERE id=?",[o.id]);await conn.query("UPDATE finance_vouchers SET status='voided' WHERE id=?",[id]);});res.json({ok:true,data:{id,status:'voided'}});}catch(e){next(e);}});
   app.post('/api/finance-workflow/open-items',async(req,res,next)=>{try{const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),type=String(b.account_type||'AR').toUpperCase(),c=ctx(db),date=validDate(b.document_date),amount=Number(b.original_amount);if(!['AR','AP'].includes(type)||!trim(b.party_code)||!Number.isFinite(amount)||amount===0)throw badRequest('立帳類別、對象與金額不可空白');const prefix=type==='AR'?'AR':'AP',out=await tx(async conn=>{const no=trim(b.document_no)||await nextWorkflowNumber(conn,'finance_open_items','document_no',prefix,date);const[r]=await conn.query(`INSERT INTO finance_open_items(tenant_id,company_id,source_system,source_database,account_type,document_no,document_date,due_date,party_code,currency_code,source_kind,source_document_id,source_document_no,original_amount,balance_amount,status,note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?,?)`,[c.tenant_id,c.company_id,c.source_system,db,type,no,date,nullableDate(b.due_date),trim(b.party_code),trim(b.currency_code)||'TWD',trim(b.source_kind)||'manual',Number(b.source_document_id)||null,trim(b.source_document_no),amount,amount,trim(b.note),req.auth.id]);return{id:r.insertId,document_no:no};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
-  app.post('/api/finance-workflow/open-items/:id/approve',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id);await tx(async conn=>{const[[f]]=await conn.query("SELECT * FROM finance_open_items WHERE id=? AND status='draft' FOR UPDATE",[id]);if(!f)throw badRequest('只有草稿可以立帳');await assertOpenAccountingPeriod(conn,contextFor(String(f.source_database).toUpperCase()),f.document_date);await conn.query("UPDATE finance_open_items SET status='open',approved_by=?,approved_at=NOW(),posted_by=?,posted_at=NOW() WHERE id=?",[req.auth.id,req.auth.id,id]);});res.json({ok:true,data:{id}});}catch(e){next(e);}});
+  app.post('/api/finance-workflow/open-items/:id/approve',async(req,res,next)=>{
+    try{
+      await ensureFinance();
+      const id=Number(req.params.id);
+      const synced=await tx(async conn=>{
+        const[[f]]=await conn.query("SELECT * FROM finance_open_items WHERE id=? AND status='draft' FOR UPDATE",[id]);
+        if(!f)throw badRequest('只有草稿可以立帳');
+        await assertOpenAccountingPeriod(conn,contextFor(String(f.source_database).toUpperCase()),f.document_date);
+        await conn.query("UPDATE finance_open_items SET status='open',approved_by=?,approved_at=NOW(),posted_by=?,posted_at=NOW() WHERE id=?",[req.auth.id,req.auth.id,id]);
+        return syncPendingSalesReturnAdjustmentsForOpenItem(conn,id,req.auth.id);
+      });
+      res.json({ok:true,data:{id,synced_return_adjustments:synced}});
+    }catch(e){next(e);}
+  });
   app.get('/api/finance-workflow/open-items',async(req,res,next)=>{try{const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'AR').toUpperCase(),limit=Math.min(Math.max(Number(req.query.limit)||10,1),100);const[rows]=await pool.query('SELECT * FROM finance_open_items WHERE source_database=? AND account_type=? ORDER BY document_date DESC,id DESC LIMIT ?',[db,type,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
    app.post(['/api/finance-workflow/settlements-enhanced','/api/finance-workflow/settlements'],async(req,res,next)=>{try{await ensureFinance();const b=req.body||{},date=validDate(b.settlement_date),selectedType=trim(b.document_type),raw=Array.isArray(b.allocations)?b.allocations:[{open_item_id:b.open_item_id,allocated_amount:b.amount}];if(!selectedType)throw badRequest('請選擇收付款單別');const allocations=raw.map(x=>({open_item_id:Number(x.open_item_id),allocated_amount:positiveNumber(x.allocated_amount??x.amount,'沖銷金額')})).filter(x=>x.open_item_id);if(!allocations.length)throw badRequest('至少選擇一筆未沖帳款');const out=await tx(async conn=>{const items=[];for(const a of allocations){const[[o]]=await conn.query("SELECT * FROM finance_open_items WHERE id=? AND status IN ('open','partial') FOR UPDATE",[a.open_item_id]);if(!o||a.allocated_amount>Number(o.balance_amount))throw badRequest('收付金額超過未沖餘額');items.push(o);}const first=items[0];if(items.some(o=>o.account_type!==first.account_type||o.party_code!==first.party_code||o.currency_code!==first.currency_code||o.source_database!==first.source_database))throw badRequest('不可混合不同對象、幣別或公司來源');const amount=allocations.reduce((s,x)=>s+x.allocated_amount,0),rate=Number(b.exchange_rate)||1,baseAmount=amount*rate;const no=trim(b.settlement_no)||await nextWorkflowNumber(conn,'finance_settlements','settlement_no',selectedType,date);let expectedBase=0;for(let i=0;i<items.length;i++)expectedBase+=allocations[i].allocated_amount*Number(items[i].exchange_rate||1);const diff=(first.account_type==='AR'?1:-1)*(baseAmount-expectedBase);const[r]=await conn.query(`INSERT INTO finance_settlements(tenant_id,company_id,source_system,source_database,account_type,settlement_no,settlement_date,party_code,currency_code,exchange_rate,base_amount,exchange_difference,payment_method,bank_code,reference_no,amount,status,note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?,?)`,[first.tenant_id,first.company_id,first.source_system,first.source_database,first.account_type,no,date,first.party_code,first.currency_code,rate,baseAmount,diff,trim(b.payment_method),trim(b.bank_code),trim(b.reference_no),amount,trim(b.note),req.auth.id]);for(let i=0;i<allocations.length;i++){const a=allocations[i],base=a.allocated_amount*rate,lineDiff=(first.account_type==='AR'?1:-1)*(base-a.allocated_amount*Number(items[i].exchange_rate||1));await conn.query('INSERT INTO finance_allocations(settlement_id,open_item_id,allocated_amount,base_allocated_amount,exchange_difference) VALUES(?,?,?,?,?)',[r.insertId,a.open_item_id,a.allocated_amount,base,lineDiff]);}return{id:r.insertId,settlement_no:no,amount,base_amount:baseAmount,exchange_difference:diff};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
    app.post(['/api/finance-workflow/settlements/:id/post-enhanced','/api/finance-workflow/settlements/:id/post'],async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id);await tx(async conn=>{const[[s]]=await conn.query("SELECT * FROM finance_settlements WHERE id=? AND status='draft' FOR UPDATE",[id]);if(!s)throw badRequest('找不到待過帳收付款單');await assertOpenAccountingPeriod(conn,contextFor(String(s.source_database).toUpperCase()),s.settlement_date);const[rows]=await conn.query('SELECT a.*,o.document_no,o.document_date,o.balance_amount,o.base_balance_amount FROM finance_allocations a JOIN finance_open_items o ON o.id=a.open_item_id WHERE a.settlement_id=? FOR UPDATE',[id]);for(const a of rows){assertChronologicalDate(s.settlement_date,a.document_date,'收付款日期');const balance=Number(a.balance_amount)-Number(a.allocated_amount),baseBalance=Number(a.base_balance_amount)-Number(a.allocated_amount)*(Number(a.base_balance_amount)/Math.max(Number(a.balance_amount),0.000001));await conn.query("UPDATE finance_open_items SET settled_amount=settled_amount+?,base_settled_amount=base_settled_amount+?,balance_amount=?,base_balance_amount=?,status=? WHERE id=?",[a.allocated_amount,a.base_allocated_amount,balance,Math.max(baseBalance,0),Math.abs(balance)<0.000001?'settled':'partial',a.open_item_id]);}await refreshProcurementPaidQuantities(conn,id);await conn.query("UPDATE finance_settlements SET status='posted',approved_by=?,approved_at=NOW(),posted_by=?,posted_at=NOW() WHERE id=?",[req.auth.id,req.auth.id,id]);});res.json({ok:true,data:{id,status:'posted'}});}catch(e){next(e);}});

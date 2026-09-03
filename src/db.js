@@ -1085,7 +1085,7 @@ export function ensureProcurementSchema() {
       for (const role of defaultRoles) {
         await pool.query('INSERT IGNORE INTO access_roles (role_code, role_name, description, is_system) VALUES (?, ?, ?, ?)', role);
       }
-      const accessFeatures = ['sales-document-types','sales-quotations','sales-orders','sales-order-changes','sales-shipments','sales-returns','sales-progress','sales-open-orders','accounting-general-ledger','accounting-drafts','accounting-periods','accounting-auto-rules','accounting-clearing','accounting-opening-balances','accounting-year-close','bank-ledger','finance-bookkeeping','finance-cash','finance-reconcile','operations-health','operations-reports','sales-flow-audit','purchase-flow-audit','architecture-flow','access-control','import-monitor','data-quality', 'basicdata', 'warehouses', 'departments', 'employees', 'source-customers', 'source-suppliers', 'inventory-opening', 'inventory-document-types', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-reversals', 'inventory-new-ledger', 'inventory-new-balance', 'procurement-document-types', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'receipt-arrival', 'receipt-entry', 'receipt-inspection', 'receipt-rejected-return', 'receipt-posting', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts'];
+      const accessFeatures = ['sales-document-types','sales-quotations','sales-orders','sales-order-changes','sales-shipments','sales-returns','sales-progress','sales-open-orders','accounting-general-ledger','accounting-financial-preview','accounting-drafts','accounting-periods','accounting-auto-rules','accounting-clearing','accounting-opening-balances','accounting-year-close','bank-ledger','finance-bookkeeping','finance-cash','finance-reconcile','operations-health','operations-reports','sales-flow-audit','purchase-flow-audit','architecture-flow','access-control','import-monitor','data-quality', 'basicdata', 'warehouses', 'departments', 'employees', 'source-customers', 'source-suppliers', 'inventory-opening', 'inventory-document-types', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-reversals', 'inventory-new-ledger', 'inventory-new-balance', 'procurement-document-types', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'receipt-arrival', 'receipt-entry', 'receipt-inspection', 'receipt-rejected-return', 'receipt-posting', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts'];
       await pool.query("DELETE FROM access_role_permissions WHERE feature_code IN ('inventory-detail','inventory-ledger','inventory-balance','inventory-movement-stats','department-movement-stats')");
       const [[admin]] = await pool.query("SELECT id FROM access_roles WHERE role_code='ADMIN'");
       for (const feature of accessFeatures) {
@@ -1097,7 +1097,7 @@ export function ensureProcurementSchema() {
         REQUESTER: ['basicdata', 'requisition-entry', 'architecture-flow'],
         PURCHASER: ['basicdata', 'procurement-document-types', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'receipt-arrival', 'receipt-posting', 'purchase-returns', 'receipt-rejected-return', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts', 'purchase-flow-audit', 'operations-reports', 'architecture-flow'],
         WAREHOUSE: ['inventory-opening', 'inventory-document-types', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-reversals', 'inventory-new-ledger', 'inventory-new-balance', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'receipt-arrival', 'receipt-entry', 'receipt-inspection', 'receipt-rejected-return', 'receipt-posting', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts', 'operations-reports'],
-        FINANCE: ['basicdata', 'purchase-receipts', 'accounting-drafts', 'accounting-periods', 'accounting-auto-rules', 'accounting-general-ledger', 'accounting-clearing', 'accounting-opening-balances', 'accounting-year-close', 'bank-ledger', 'finance-bookkeeping', 'finance-cash', 'finance-reconcile', 'operations-health', 'operations-reports', 'sales-flow-audit', 'purchase-flow-audit', 'architecture-flow'],
+        FINANCE: ['basicdata', 'purchase-receipts', 'accounting-drafts', 'accounting-periods', 'accounting-auto-rules', 'accounting-general-ledger', 'accounting-financial-preview', 'accounting-clearing', 'accounting-opening-balances', 'accounting-year-close', 'bank-ledger', 'finance-bookkeeping', 'finance-cash', 'finance-reconcile', 'operations-health', 'operations-reports', 'sales-flow-audit', 'purchase-flow-audit', 'architecture-flow'],
         VIEWER: ['basicdata', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'purchase-receipts', 'operations-health', 'operations-reports', 'architecture-flow']
       };
       for (const [roleCode, features] of Object.entries(initialRoleFeatures)) {
@@ -1793,6 +1793,22 @@ export async function ensureTargetFinanceWorkflowSchema() {
     KEY ix_finance_return_adjustment_open_item(open_item_id),
     CONSTRAINT fk_finance_return_allocation_adjustment FOREIGN KEY(adjustment_id) REFERENCES finance_return_adjustments(id) ON DELETE CASCADE,
     CONSTRAINT fk_finance_return_allocation_open_item FOREIGN KEY(open_item_id) REFERENCES finance_open_items(id) ON DELETE RESTRICT
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  // 銷退應收沖帳不能只保留最後狀態；每次自動沖帳、形成待抵、轉抵或退款
+  // 都要留下事件，讓稽核可以回答「何時、由哪一張應收、以多少金額處理」。
+  // 本表只存在目標 ERP，不會回寫 SH／SC 原始唯讀資料庫。
+  await pool.query(`CREATE TABLE IF NOT EXISTS finance_return_adjustment_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    adjustment_id BIGINT UNSIGNED NOT NULL, event_kind VARCHAR(30) NOT NULL,
+    before_status VARCHAR(20) NULL, after_status VARCHAR(20) NULL,
+    open_item_id BIGINT UNSIGNED NULL, amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    reason VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_finance_return_adjustment_event(adjustment_id,created_at,id),
+    KEY ix_finance_return_adjustment_event_source(source_database,created_at),
+    CONSTRAINT fk_finance_return_adjustment_event_adjustment FOREIGN KEY(adjustment_id) REFERENCES finance_return_adjustments(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
   await pool.query(`CREATE TABLE IF NOT EXISTS finance_customer_credits (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,

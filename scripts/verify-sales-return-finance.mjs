@@ -50,6 +50,7 @@ async function cleanup(target){
   if(creditIds.length)await target.query('DELETE FROM finance_customer_credit_movements WHERE credit_id IN (?)',[creditIds]);
   if(creditIds.length)await target.query('DELETE FROM finance_customer_credits WHERE id IN (?)',[creditIds]);
   if(returnAdjustmentIds.length)await target.query('DELETE FROM finance_return_adjustment_allocations WHERE adjustment_id IN (?)',[returnAdjustmentIds]);
+  if(returnAdjustmentIds.length)await target.query('DELETE FROM finance_return_adjustment_events WHERE adjustment_id IN (?)',[returnAdjustmentIds]);
   if(returnAdjustmentIds.length)await target.query('DELETE FROM finance_return_adjustments WHERE id IN (?)',[returnAdjustmentIds]);
   if(settlementIds.length)await target.query('DELETE FROM finance_allocations WHERE settlement_id IN (?)',[settlementIds]);
   if(settlementIds.length)await target.query('DELETE FROM finance_settlements WHERE id IN (?)',[settlementIds]);
@@ -191,6 +192,13 @@ try{
   closeEnough(creditAfterRefund.balance_amount,150,'退款後客戶待抵餘額');
   closeEnough(creditAfterRefund.refunded_amount,50,'退款紀錄');
   closeEnough(adjustmentAfterRefund.refund_amount,50,'銷退沖帳退款紀錄');
+  const [refundEvents]=await target.query("SELECT event_kind FROM finance_return_adjustment_events WHERE adjustment_id=(SELECT id FROM finance_return_adjustments WHERE sales_return_id=?) ORDER BY id",[returnB.id]);
+  assert(refundEvents.some(row=>row.event_kind==='credit_refund'),'客戶待抵退款事件未留存');
+  const [[returnAdjustmentB]]=await target.query('SELECT id FROM finance_return_adjustments WHERE sales_return_id=?',[returnB.id]);
+  const returnEventRows=await request(token,`/finance-workflow/return-adjustments/${returnAdjustmentB.id}/events?source_database=${SOURCE}`);
+  assert(returnEventRows.some(row=>row.event_kind==='credit_refund'),'銷退應收事件查詢 API 未回傳退款事件');
+  const creditMovementRows=await request(token,`/finance-workflow/customer-credits/${creditRow.id}/movements?source_database=${SOURCE}`);
+  assert(creditMovementRows.some(row=>row.movement_kind==='refund'),'客戶待抵異動查詢 API 未回傳退款');
 
   const orderC=await createOrder(token,orderType.type_code,context,`${ITEM_PREFIX}C`,customerC,warehouse,4);
   const shipmentC=await createShipment(token,context,orderC.item,shipmentType.type_code,4);
@@ -198,7 +206,26 @@ try{
   const [[pendingAdjustment]]=await target.query('SELECT status,receivable_offset_amount,customer_credit_amount FROM finance_return_adjustments WHERE sales_return_id=?',[returnC.id]);
   assert(pendingAdjustment.status==='pending'&&Number(pendingAdjustment.receivable_offset_amount)===0&&Number(pendingAdjustment.customer_credit_amount)===0,'未立應收的銷退不應誤列客戶待抵，應保留 pending');
 
-  console.log(JSON.stringify({ok:true,checked:['sales return accepted then inventory increase','allowance decreases AR without inventory movement','unpaid AR offset','paid AR customer credit and refund','return quantity limit','controlled order reopen and version approval','unbilled return pending status']},null,2));
+  const openC=await createOpenItem(target,context,shipmentC,customerC,400,'C');
+  await approveOpenItem(token,openC);
+  const [[syncedAdjustmentC]]=await target.query('SELECT status,receivable_offset_amount,customer_credit_amount FROM finance_return_adjustments WHERE sales_return_id=?',[returnC.id]);
+  closeEnough(syncedAdjustmentC.receivable_offset_amount,100,'原應收建立後自動銷退沖帳');
+  assert(syncedAdjustmentC.status==='offset'&&Number(syncedAdjustmentC.customer_credit_amount)===0,'原應收建立後銷退未自動完成 offset');
+  const [[arAfterAutoSyncC]]=await target.query('SELECT balance_amount,adjustment_amount,status FROM finance_open_items WHERE id=?',[openC]);
+  closeEnough(arAfterAutoSyncC.balance_amount,300,'自動銷退沖帳後應收餘額');
+  closeEnough(arAfterAutoSyncC.adjustment_amount,100,'自動銷退沖帳後應收調整額');
+  assert(arAfterAutoSyncC.status==='partial','自動銷退沖帳後應收狀態');
+  const [syncEventsC]=await target.query('SELECT event_kind FROM finance_return_adjustment_events WHERE adjustment_id=(SELECT id FROM finance_return_adjustments WHERE sales_return_id=?) ORDER BY id',[returnC.id]);
+  assert(syncEventsC.some(row=>row.event_kind==='offset'),'原應收建立後自動沖帳事件未留存');
+
+  const salesAudit=await request(token,`/flow-audit/sales?source_database=${SOURCE}&from_date=${DATE}&to_date=${DATE}&limit=1000`);
+  const auditC=(salesAudit.rows||[]).find(row=>row.order_no===orderC.header.document_no);
+  assert(auditC,'銷售流程稽核未回傳自動沖帳訂單');
+  closeEnough(auditC.return_offset_amount,100,'流程稽核銷退沖帳金額');
+  closeEnough(auditC.customer_credit_balance,0,'流程稽核客戶待抵餘額');
+  assert(auditC.next_stage==='待收款','流程稽核自動沖帳後下一階段');
+
+  console.log(JSON.stringify({ok:true,checked:['sales return accepted then inventory increase','allowance decreases AR without inventory movement','unpaid AR offset','paid AR customer credit and refund','customer credit refund event and history API','return quantity limit','controlled order reopen and version approval','unbilled return pending then automatic AR sync','sales flow audit return offset and AR balance']},null,2));
 }finally{
   if(token){try{await request(token,'/auth/logout','POST');}catch(_){}}
   if(target){await cleanup(target);await target.end();}

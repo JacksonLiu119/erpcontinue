@@ -80,7 +80,7 @@ async function assertSourceTables(connection) {
   const [rows] = await connection.query(`
     SELECT LOWER(TABLE_NAME) AS table_name
     FROM information_schema.TABLES
-    WHERE TABLE_SCHEMA=DATABASE() AND LOWER(TABLE_NAME) IN ('actma','actta','acttb')
+    WHERE TABLE_SCHEMA=DATABASE() AND LOWER(TABLE_NAME) IN ('actma','actmb','actta','acttb')
   `);
   const found = new Set(rows.map(row => String(row.table_name).toLowerCase()));
   const missing = ['actma', 'actta', 'acttb'].filter(table => !found.has(table));
@@ -253,7 +253,7 @@ export function registerSourceFinancialPreviewRoutes(app) {
       const currencyCode = text(req.query.currency_code).toUpperCase();
       const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
       const connection = getSourcePool(sourceName);
-      await assertSourceTables(connection);
+      const sourceTables = await assertSourceTables(connection);
       const fromKey = fromDate.replaceAll('-', '');
       const toKey = toDate.replaceAll('-', '');
       const amountExpression = 'ABS(COALESCE(NULLIF(b.TB015,0),b.TB007,0))';
@@ -269,7 +269,7 @@ export function registerSourceFinancialPreviewRoutes(app) {
           [sourceCompanyCode, monthlyScope.year, ...monthlyCurrencyParams],
         ]
         : [
-          `SELECT a.COMPANY company, a.MA001 account_code,MAX(a.MA002) parent_code,MAX(a.MA003) account_name,MAX(a.MA005) account_nature,MAX(a.MA006) statement_class,MAX(a.MA007) report_direction,COUNT(DISTINCT CONCAT(TRIM(t.TA001),'/',TRIM(t.TA002))) voucher_count,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='1' THEN ${amountExpression} ELSE 0 END),0) debit_amount,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='-1' THEN ${amountExpression} ELSE 0 END),0) credit_amount FROM actma a JOIN acttb b ON b.COMPANY=a.COMPANY AND b.TB005=a.MA001 JOIN actta t ON t.COMPANY=b.COMPANY AND t.TA001=b.TB001 AND t.TA002=b.TB002 WHERE ${validHeader}${currencyFilter} AND TRIM(a.MA006)='2' GROUP BY a.COMPANY,a.MA001 ORDER BY a.MA001`,
+          `SELECT a.COMPANY company, a.MA001 account_code,MAX(a.MA002) parent_code,MAX(a.MA003) account_name,MAX(a.MA005) account_nature,MAX(a.MA006) statement_class,MAX(a.MA007) report_direction,COUNT(DISTINCT CONCAT(TRIM(t.TA001),'/',TRIM(t.TA002))) voucher_count,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='1' THEN ${amountExpression} ELSE 0 END),0) debit_amount,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='-1' THEN ${amountExpression} ELSE 0 END),0) credit_amount FROM actma a JOIN acttb b ON b.COMPANY=a.COMPANY AND b.TB005=a.MA001 JOIN actta t ON t.COMPANY=b.COMPANY AND t.TA001=b.TB001 AND t.TA002=b.TB002 WHERE ${validHeader}${currencyFilter} AND TRIM(a.MA006)='2' AND TRIM(a.MA008) IN ('2','3') GROUP BY a.COMPANY,a.MA001 ORDER BY a.MA001`,
           [sourceCompanyCode, fromKey, toKey, ...currencyParams],
         ];
       const balanceQuery = monthlyScope
@@ -286,7 +286,7 @@ export function registerSourceFinancialPreviewRoutes(app) {
             COALESCE(SUM(CASE WHEN t.TA003<=? AND TRIM(b.TB004)='1' THEN ${amountExpression} ELSE 0 END),0) ending_debit,
             COALESCE(SUM(CASE WHEN t.TA003<=? AND TRIM(b.TB004)='-1' THEN ${amountExpression} ELSE 0 END),0) ending_credit
           FROM actma a JOIN acttb b ON b.COMPANY=a.COMPANY AND b.TB005=a.MA001 JOIN actta t ON t.COMPANY=b.COMPANY AND t.TA001=b.TB001 AND t.TA002=b.TB002
-          WHERE t.COMPANY=? AND t.TA003 REGEXP '^[0-9]{8}$' AND t.TA003<=? AND TRIM(COALESCE(t.TA010,''))='Y' AND TRIM(COALESCE(t.TA011,''))='Y' AND COALESCE(NULLIF(TRIM(t.TA016),''),'N')<>'Y'${currencyCode ? ' AND TRIM(COALESCE(b.TB013,\'\'))=?' : ''} AND TRIM(a.MA006)='1'
+          WHERE t.COMPANY=? AND t.TA003 REGEXP '^[0-9]{8}$' AND t.TA003<=? AND TRIM(COALESCE(t.TA010,''))='Y' AND TRIM(COALESCE(t.TA011,''))='Y' AND COALESCE(NULLIF(TRIM(t.TA016),''),'N')<>'Y'${currencyCode ? ' AND TRIM(COALESCE(b.TB013,\'\'))=?' : ''} AND TRIM(a.MA006)='1' AND TRIM(a.MA008) IN ('2','3')
           GROUP BY a.COMPANY,a.MA001 ORDER BY a.MA001`,
           [fromKey, fromKey, fromKey, toKey, fromKey, toKey, toKey, toKey, sourceCompanyCode, toKey, ...currencyParams],
         ];
@@ -308,6 +308,10 @@ export function registerSourceFinancialPreviewRoutes(app) {
       const balanceSheet = balanceResult[0].map(balanceSheetRow);
       const sourceLines = sourceLinesResult[0];
       const cashFlow = buildCashFlow(sourceLines, cashBalanceResult[0], sourceCompanyCode);
+      const cashDetailCount = cashFlow.details.length;
+      cashFlow.details = cashFlow.details.slice(0, limit);
+      cashFlow.detail_count = cashDetailCount;
+      cashFlow.detail_limit = limit;
       const sourceDebit = number(line.debit_amount);
       const sourceCredit = number(line.credit_amount);
       const sourceHeaderDebit = number(header.header_debit);
@@ -338,8 +342,10 @@ export function registerSourceFinancialPreviewRoutes(app) {
         currency_code: currencyCode || 'ALL',
         available_periods: availablePeriods,
         available_currencies: availableCurrencies,
+        statement_basis: monthlyScope ? 'ACTMB（月摘要；期初 00 + 月份 01–12）' : 'ACTTA／ACTTB（依已核准過帳傳票日期彙總）',
         source_tables: [
           { table_name: 'ACTMA', purpose: '會計科目主檔／報表分類', key_rule: 'COMPANY + MA001' },
+          ...(sourceTables.has('actmb') ? [{ table_name: 'ACTMB', purpose: '會計月結／期初／期末摘要', key_rule: 'COMPANY + MB001 + MB002 + MB003 + MB008' }] : []),
           { table_name: 'ACTTA', purpose: '傳票表頭／日期／核准／過帳狀態', key_rule: 'COMPANY + TA001 + TA002' },
           { table_name: 'ACTTB', purpose: '傳票借貸明細／幣別／匯率', key_rule: 'COMPANY + TB001 + TB002 + TB003' },
         ],
