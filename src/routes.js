@@ -2,6 +2,7 @@ import { pool, getSourcePool, sourceDatabases, reloadSourceDatabases, runWithTar
 import { hashPassword } from './auth.js';
 import { registerImportQualityRoutes } from './import-quality.js';
 import { registerReportingRoutes } from './reports.js';
+import { registerSourceFinancialPreviewRoutes } from './source-financial-preview.js';
 
 const listTables = {
   customers: ['id', 'code', 'name', 'tax_id', 'contact_name', 'phone', 'email', 'address', 'credit_limit', 'is_active'],
@@ -881,6 +882,7 @@ export function registerApi(app) {
   registerFlowAuditRoutes(app);
   registerFinanceWorkflowRoutes(app);
   registerAccountingWorkflowRoutes(app);
+  registerSourceFinancialPreviewRoutes(app);
   registerInventoryWorkflowRoutes(app);
   registerReversalRoutes(app);
   registerAccessControlRoutes(app);
@@ -1697,6 +1699,84 @@ function assertConfiguredSource(documentType, sourceKind, hasSource, label) {
   }
 }
 
+const PROCUREMENT_EPS = 0.000001;
+
+function nonNegativeNumber(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function receiptExpenseTotal(row) {
+  return nonNegativeNumber(row.freight_amount) + nonNegativeNumber(row.insurance_amount) + nonNegativeNumber(row.other_expense_amount);
+}
+
+// 費用是進貨明細上的整筆費用，計價時依「已計價量／驗收合格量」分攤，
+// 讓分批計價、退貨與多筆合併應付可以用同一個基準核對。
+function receiptPricingValues(row, pricedQuantity = row.qty_priced) {
+  const accepted = Math.max(nonNegativeNumber(row.qty_accepted), 0);
+  const quantity = Math.max(nonNegativeNumber(pricedQuantity), 0);
+  const expense = receiptExpenseTotal(row);
+  const unitCost = Number(row.unit_cost || 0);
+  const allocatedExpense = accepted > PROCUREMENT_EPS ? expense * quantity / accepted : 0;
+  return {
+    pricedAmount: quantity * unitCost + allocatedExpense,
+    expenseAmount: expense,
+    acceptedQuantity: accepted,
+    quantity,
+    unitCost
+  };
+}
+
+function receiptDerivedQuantities(row) {
+  const accepted = nonNegativeNumber(row.qty_accepted);
+  const returned = nonNegativeNumber(row.qty_returned);
+  const priced = nonNegativeNumber(row.qty_priced);
+  const returnedPriced = nonNegativeNumber(row.qty_returned_priced);
+  const activePriced = Math.max(priced - returnedPriced, 0);
+  return {
+    pricingEligibleQuantity: Math.max(accepted - returned + returnedPriced, 0),
+    activePricedQuantity: activePriced,
+    unpricedQuantity: Math.max(accepted - returned - activePriced, 0)
+  };
+}
+
+async function getReceiptFinancialSummary(conn, receiptId, receiptItemId) {
+  const [[row]] = await conn.query(`
+    SELECT
+      COALESCE(SUM(CASE WHEN v.status<>'voided' THEN vs.allocated_amount ELSE 0 END),0) billed_amount,
+      COALESCE(SUM(CASE WHEN v.status IN ('approved','posted') AND oi.status<>'voided'
+        THEN vs.allocated_amount * LEAST(1,GREATEST(0,oi.settled_amount/NULLIF(oi.original_amount,0))) ELSE 0 END),0) paid_amount
+    FROM finance_voucher_sources vs
+    JOIN finance_vouchers v ON v.id=vs.voucher_id
+    LEFT JOIN finance_open_items oi ON oi.source_kind='finance_voucher' AND oi.source_document_id=v.id
+    WHERE vs.source_kind='purchase_receipt' AND vs.source_document_id=? AND COALESCE(vs.source_document_item_id,0)=COALESCE(?,0)`,
+    [receiptId, receiptItemId]);
+  return {
+    billedAmount: Number(row?.billed_amount || 0),
+    paidAmount: Number(row?.paid_amount || 0)
+  };
+}
+
+async function refreshProcurementPaidQuantities(conn, settlementId) {
+  const [refs] = await conn.query(`
+    SELECT DISTINCT vs.source_document_id receipt_id,vs.source_document_item_id receipt_item_id
+    FROM finance_allocations a
+    JOIN finance_open_items oi ON oi.id=a.open_item_id
+    JOIN finance_vouchers v ON v.id=oi.source_document_id AND oi.source_kind='finance_voucher'
+    JOIN finance_voucher_sources vs ON vs.voucher_id=v.id AND vs.source_kind='purchase_receipt'
+    WHERE a.settlement_id=? AND vs.source_document_id IS NOT NULL`, [settlementId]);
+  for (const ref of refs) {
+    const [[item]] = await conn.query('SELECT * FROM procurement_receipt_items WHERE id=? FOR UPDATE', [ref.receipt_item_id]);
+    if (!item) continue;
+    const pricing = receiptPricingValues(item, item.qty_priced);
+    const summary = await getReceiptFinancialSummary(conn, ref.receipt_id, ref.receipt_item_id);
+    const active = receiptDerivedQuantities(item).activePricedQuantity;
+    const ratio = pricing.pricedAmount > PROCUREMENT_EPS
+      ? Math.min(1, Math.max(0, summary.paidAmount / pricing.pricedAmount)) : 0;
+    await conn.query('UPDATE procurement_receipt_items SET qty_paid=? WHERE id=?', [Math.min(active, pricing.quantity * ratio), item.id]);
+  }
+}
+
 function registerDocumentNatureRoutes(app) {
   const ctx = db => {
     const source = sourceDatabases[db];
@@ -2014,6 +2094,82 @@ function registerProcurementWorkflowRoutes(app) {
     } catch (error) { next(error); }
   });
 
+  app.put('/api/procurement/receipts/:id/pricing', async (req, res, next) => {
+    try {
+      await ensureTargetReceiptWorkflowSchema();
+      await ensureTargetFinanceWorkflowSchema();
+      const receiptId = Number(req.params.id);
+      const body = req.body || {};
+      const sourceDatabase = String(body.source_database || req.query.source_database || 'SH').toUpperCase();
+      const rawLines = Array.isArray(body.lines) ? body.lines : [body];
+      if (!Number.isInteger(receiptId) || receiptId < 1 || !rawLines.length) throw badRequest('計價進貨與明細不可空白');
+      const itemIds = rawLines.map(line => Number(line.receipt_item_id || line.item_id || 0));
+      if (itemIds.some(id => !Number.isInteger(id) || id < 1) || new Set(itemIds).size !== itemIds.length) throw badRequest('計價明細識別碼錯誤或重複');
+      const result = await tx(async conn => {
+        const [[receipt]] = await conn.query(`SELECT id,status,inventory_status,source_database,tenant_id,company_id,source_system
+          FROM procurement_receipts WHERE id=? AND source_database=? FOR UPDATE`, [receiptId, sourceDatabase]);
+        if (!receipt) throw notFound('進貨單不存在');
+        if (receipt.inventory_status !== 'posted' || !['accepted','partially_accepted','posted'].includes(receipt.status)) {
+          throw badRequest('進貨必須完成驗收與庫存過帳後才能計價');
+        }
+        const updated = [];
+        for (const raw of rawLines) {
+          const itemId = Number(raw.receipt_item_id || raw.item_id);
+          const [[item]] = await conn.query(`SELECT * FROM procurement_receipt_items
+            WHERE id=? AND receipt_id=? FOR UPDATE`, [itemId, receiptId]);
+          if (!item) throw notFound(`找不到進貨明細 ${itemId}`);
+          if (!['accepted','partially_accepted'].includes(String(item.inspection_status))) throw badRequest(`進貨明細 ${item.line_no} 尚未完成驗收`);
+          const nextQuantity = Number(raw.qty_priced);
+          if (!Number.isFinite(nextQuantity) || nextQuantity < 0) throw badRequest(`第 ${item.line_no} 筆計價量必須是非負數`);
+          const currentQuantity = nonNegativeNumber(item.qty_priced);
+          const returnedPriced = nonNegativeNumber(item.qty_returned_priced);
+          const derived = receiptDerivedQuantities(item);
+          if (nextQuantity + PROCUREMENT_EPS < currentQuantity) throw badRequest(`第 ${item.line_no} 筆已計價量不可直接減少，請走反計價／更正流程`);
+          if (nextQuantity + PROCUREMENT_EPS < returnedPriced) throw badRequest(`第 ${item.line_no} 筆計價量不可小於已計價退回量 ${returnedPriced}`);
+          if (nextQuantity > derived.pricingEligibleQuantity + PROCUREMENT_EPS) throw badRequest(`第 ${item.line_no} 筆計價量不可超過可計價量 ${derived.pricingEligibleQuantity}`);
+          const freight = raw.freight_amount === undefined ? nonNegativeNumber(item.freight_amount) : Number(raw.freight_amount);
+          const insurance = raw.insurance_amount === undefined ? nonNegativeNumber(item.insurance_amount) : Number(raw.insurance_amount);
+          const otherExpense = raw.other_expense_amount === undefined ? nonNegativeNumber(item.other_expense_amount) : Number(raw.other_expense_amount);
+          if (![freight, insurance, otherExpense].every(Number.isFinite) || [freight, insurance, otherExpense].some(value => value < 0)) throw badRequest(`第 ${item.line_no} 筆運費、保險費與其他費用不可為負數`);
+          const summary = await getReceiptFinancialSummary(conn, receiptId, itemId);
+          const nextItem = { ...item, qty_priced: nextQuantity, freight_amount: freight, insurance_amount: insurance, other_expense_amount: otherExpense };
+          const newPricing = receiptPricingValues(nextItem, nextQuantity);
+          if (summary.billedAmount > newPricing.pricedAmount + PROCUREMENT_EPS) throw badRequest(`第 ${item.line_no} 筆計價金額不可低於已立應付 ${summary.billedAmount.toFixed(2)}`);
+          if (summary.paidAmount > newPricing.pricedAmount + PROCUREMENT_EPS) throw badRequest(`第 ${item.line_no} 筆計價金額不可低於已付款 ${summary.paidAmount.toFixed(2)}`);
+          const reason = trim(raw.reason || body.reason);
+          if (!reason) throw badRequest('計價異動必須輸入原因');
+          await conn.query(`INSERT INTO procurement_receipt_pricing_events
+            (tenant_id,company_id,source_system,source_database,receipt_id,receipt_item_id,event_kind,
+             before_qty_priced,after_qty_priced,before_unit_cost,after_unit_cost,before_freight_amount,after_freight_amount,
+             before_insurance_amount,after_insurance_amount,before_other_expense_amount,after_other_expense_amount,reason,created_by)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+            receipt.tenant_id || contextFor(sourceDatabase).tenant_id,
+            receipt.company_id || contextFor(sourceDatabase).company_id,
+            receipt.source_system || contextFor(sourceDatabase).source_system,
+            sourceDatabase, receiptId, itemId, currentQuantity ? 'adjust' : 'price',
+            currentQuantity, nextQuantity, Number(item.unit_cost || 0), Number(item.unit_cost || 0),
+            Number(item.freight_amount || 0), freight, Number(item.insurance_amount || 0), insurance,
+            Number(item.other_expense_amount || 0), otherExpense, reason, req.auth.id
+          ]);
+          await conn.query(`UPDATE procurement_receipt_items
+            SET qty_priced=?,freight_amount=?,insurance_amount=?,other_expense_amount=?,priced_at=NOW(),priced_by=?
+            WHERE id=?`, [nextQuantity, freight, insurance, otherExpense, req.auth.id, itemId]);
+          const after = receiptDerivedQuantities(nextItem);
+          updated.push({
+            receipt_item_id: itemId, qty_received: Number(item.qty_received || 0), qty_accepted: Number(item.qty_accepted || 0),
+            qty_rejected: Number(item.qty_rejected || 0), qty_returned: Number(item.qty_returned || 0),
+            qty_priced: nextQuantity, qty_returned_priced: returnedPriced,
+            active_priced_quantity: after.activePricedQuantity, unpriced_quantity: after.unpricedQuantity,
+            priced_amount: newPricing.pricedAmount, billed_amount: summary.billedAmount, paid_amount: summary.paidAmount,
+            unpaid_amount: Math.max(newPricing.pricedAmount - summary.paidAmount, 0)
+          });
+        }
+        return { receipt_id: receiptId, source_database: sourceDatabase, lines: updated };
+      });
+      res.json({ ok: true, data: result });
+    } catch (error) { next(error); }
+  });
+
   app.get('/api/procurement/documents/:kind', async (req, res, next) => {
     try {
       await ensureProcurementSchema();
@@ -2026,15 +2182,23 @@ function registerProcurementWorkflowRoutes(app) {
       else if (req.params.kind === 'receipts') sql = `SELECT r.id, r.document_type, r.receipt_no AS document_no, DATE_FORMAT(r.receipt_date,'%Y-%m-%d') AS document_date,
         DATE_FORMAT(r.arrival_date,'%Y-%m-%d') AS arrival_date,r.delivery_note_no,r.invoice_no,r.received_by,
         r.supplier_code, r.warehouse_code, r.status,r.inventory_status,DATE_FORMAT(r.inventory_posted_at,'%Y-%m-%d %H:%i') inventory_posted_at,r.note,
-        i.purchase_order_item_id AS source_line_id,o.purchase_order_no,i.item_code,i.item_name,i.specification,i.warehouse_code item_warehouse_code,i.unit,
+         i.id AS receipt_item_id,i.purchase_order_item_id AS source_line_id,o.purchase_order_no,i.item_code,i.item_name,i.specification,i.warehouse_code item_warehouse_code,i.unit,
         i.qty_received AS quantity,i.qty_accepted,i.qty_rejected,i.qty_rejected_returned,i.qty_returned,
+        i.qty_priced,i.qty_paid,i.qty_returned_priced,
         GREATEST(i.qty_accepted-i.qty_returned,0) returnable_quantity,
+        GREATEST(i.qty_accepted-i.qty_returned+COALESCE(i.qty_returned_priced,0),0) pricing_eligible_quantity,
+        GREATEST(COALESCE(i.qty_priced,0)-COALESCE(i.qty_returned_priced,0),0) active_priced_quantity,
+        GREATEST(i.qty_accepted-i.qty_returned-(COALESCE(i.qty_priced,0)-COALESCE(i.qty_returned_priced,0)),0) unpriced_quantity,
         i.freight_amount,i.insurance_amount,i.other_expense_amount,
-        (i.qty_accepted*i.unit_cost+i.freight_amount+i.insurance_amount+i.other_expense_amount) billable_amount,
+        (COALESCE(i.qty_priced,0)*i.unit_cost+(i.freight_amount+i.insurance_amount+i.other_expense_amount)*COALESCE(i.qty_priced,0)/NULLIF(i.qty_accepted,0)) priced_amount,
+        (GREATEST(COALESCE(i.qty_priced,0)-COALESCE(i.qty_returned_priced,0),0)*i.unit_cost+(i.freight_amount+i.insurance_amount+i.other_expense_amount)*GREATEST(COALESCE(i.qty_priced,0)-COALESCE(i.qty_returned_priced,0),0)/NULLIF(i.qty_accepted,0)) active_priced_amount,
+        (GREATEST(i.qty_accepted-i.qty_returned-(COALESCE(i.qty_priced,0)-COALESCE(i.qty_returned_priced,0)),0)*i.unit_cost+(i.freight_amount+i.insurance_amount+i.other_expense_amount)*GREATEST(i.qty_accepted-i.qty_returned-(COALESCE(i.qty_priced,0)-COALESCE(i.qty_returned_priced,0)),0)/NULLIF(i.qty_accepted,0)) unpriced_amount,
+        (COALESCE(i.qty_priced,0)*i.unit_cost+(i.freight_amount+i.insurance_amount+i.other_expense_amount)*COALESCE(i.qty_priced,0)/NULLIF(i.qty_accepted,0)) billable_amount,
         COALESCE((SELECT SUM(vs.quantity*ABS(vs.allocated_amount/NULLIF(vs.source_amount,0))) FROM finance_voucher_sources vs JOIN finance_vouchers fv ON fv.id=vs.voucher_id WHERE fv.status<>'voided' AND vs.source_kind='purchase_receipt' AND vs.source_document_id=r.id AND vs.source_document_item_id=i.id),0) billed_quantity,
         COALESCE((SELECT SUM(vs.allocated_amount) FROM finance_voucher_sources vs JOIN finance_vouchers fv ON fv.id=vs.voucher_id WHERE fv.status<>'voided' AND vs.source_kind='purchase_receipt' AND vs.source_document_id=r.id AND vs.source_document_item_id=i.id),0) billed_amount,
         COALESCE((SELECT SUM(vs.quantity*ABS(vs.allocated_amount/NULLIF(vs.source_amount,0))*LEAST(1,ABS(fo.settled_amount/NULLIF(fo.original_amount,0)))) FROM finance_voucher_sources vs JOIN finance_vouchers fv ON fv.id=vs.voucher_id JOIN finance_open_items fo ON fo.source_kind='finance_voucher' AND fo.source_document_id=fv.id WHERE fv.status='approved' AND vs.source_kind='purchase_receipt' AND vs.source_document_id=r.id AND vs.source_document_item_id=i.id),0) paid_quantity,
         COALESCE((SELECT SUM(vs.allocated_amount*LEAST(1,ABS(fo.settled_amount/NULLIF(fo.original_amount,0)))) FROM finance_voucher_sources vs JOIN finance_vouchers fv ON fv.id=vs.voucher_id JOIN finance_open_items fo ON fo.source_kind='finance_voucher' AND fo.source_document_id=fv.id WHERE fv.status='approved' AND vs.source_kind='purchase_receipt' AND vs.source_document_id=r.id AND vs.source_document_item_id=i.id),0) paid_amount,
+        CASE WHEN COALESCE(i.qty_priced,0)<=0 THEN 'unpriced' WHEN COALESCE(i.qty_priced,0)<GREATEST(i.qty_accepted-i.qty_returned+COALESCE(i.qty_returned_priced,0),0) THEN 'partial' ELSE 'priced' END pricing_status,
         i.inspection_status,i.inspection_note,DATE_FORMAT(i.inspected_at,'%Y-%m-%d %H:%i') inspected_at,i.unit_cost,i.lot_no,i.note AS item_note
         FROM procurement_receipts r JOIN procurement_receipt_items i ON i.receipt_id=r.id
         LEFT JOIN procurement_order_items oi ON oi.id=i.purchase_order_item_id LEFT JOIN procurement_orders o ON o.id=oi.purchase_order_id
@@ -2482,9 +2646,11 @@ function registerProcurementWorkflowRoutes(app) {
     try{
       const sourceDatabase=String(req.query.source_database||'SH').toUpperCase();
       const [rows]=await pool.query(`SELECT i.id receipt_item_id,r.receipt_no,r.receipt_date,r.supplier_code,
-        i.item_code,i.item_name,i.warehouse_code,i.unit,i.qty_accepted,i.qty_returned,
+        i.item_code,i.item_name,i.warehouse_code,i.unit,i.qty_accepted,i.qty_returned,i.qty_priced,i.qty_returned_priced,
         COALESCE((SELECT SUM(pri.return_quantity) FROM procurement_return_items pri JOIN procurement_returns pr ON pr.id=pri.return_id
           WHERE pri.receipt_item_id=i.id AND pr.status IN ('draft','approved') AND pr.return_type='return'),0) reserved_return_quantity,
+        COALESCE((SELECT SUM(pri.priced_quantity) FROM procurement_return_items pri JOIN procurement_returns pr ON pr.id=pri.return_id
+          WHERE pri.receipt_item_id=i.id AND pr.status IN ('draft','approved') AND pr.return_type='return'),0) reserved_priced_quantity,
         GREATEST(i.qty_accepted-i.qty_returned-COALESCE((SELECT SUM(pri.return_quantity) FROM procurement_return_items pri JOIN procurement_returns pr ON pr.id=pri.return_id
           WHERE pri.receipt_item_id=i.id AND pr.status IN ('draft','approved') AND pr.return_type='return'),0),0) returnable_quantity,i.unit_cost
         FROM procurement_receipts r JOIN procurement_receipt_items i ON i.receipt_id=r.id
@@ -2498,7 +2664,7 @@ function registerProcurementWorkflowRoutes(app) {
     try{
       const sourceDatabase=String(req.query.source_database||'SH').toUpperCase();
       const [rows]=await pool.query(`SELECT r.id,r.return_no,r.return_date,r.return_type,r.supplier_code,r.status,r.inventory_status,r.note,
-        i.receipt_item_id,i.item_code,i.item_name,i.warehouse_code,i.unit,i.return_quantity,i.allowance_amount,i.unit_cost,i.reason
+        i.receipt_item_id,i.item_code,i.item_name,i.warehouse_code,i.unit,i.return_quantity,i.priced_quantity,i.allowance_amount,i.unit_cost,i.reason
         FROM procurement_returns r JOIN procurement_return_items i ON i.return_id=r.id WHERE r.source_database=? ORDER BY r.return_date DESC,r.id DESC`,[sourceDatabase]);
       res.json({ok:true,data:rows});
     }catch(error){next(error);}
@@ -2535,14 +2701,20 @@ function registerProcurementWorkflowRoutes(app) {
     try{
       const id=Number(req.params.id),sourceDatabase=String(req.body?.source_database||'SH').toUpperCase();
       await tx(async conn=>{
-        const [[row]]=await conn.query(`SELECT r.status,r.return_type,i.receipt_item_id,i.return_quantity,ri.qty_accepted,ri.qty_returned,ri.purchase_order_item_id,rr.inventory_status receipt_inventory_status
+        const [[row]]=await conn.query(`SELECT r.status,r.return_type,i.id return_item_id,i.receipt_item_id,i.return_quantity,i.priced_quantity,
+          ri.qty_accepted,ri.qty_returned,ri.qty_priced,ri.qty_returned_priced,ri.purchase_order_item_id,rr.inventory_status receipt_inventory_status
           FROM procurement_returns r JOIN procurement_return_items i ON i.return_id=r.id LEFT JOIN procurement_receipt_items ri ON ri.id=i.receipt_item_id LEFT JOIN procurement_receipts rr ON rr.id=ri.receipt_id WHERE r.id=? AND r.source_database=? FOR UPDATE`,[id,sourceDatabase]);
         if(!row||row.status!=='draft') throw badRequest('只有草稿退貨／折讓單可以核準');
         if(row.return_type==='return'){
           if(row.receipt_inventory_status!=='posted') throw badRequest('來源進貨尚未完成入庫，不能核準實體退貨');
-          const [[reserved]]=await conn.query(`SELECT COALESCE(SUM(i.return_quantity),0) quantity FROM procurement_return_items i JOIN procurement_returns r ON r.id=i.return_id WHERE i.receipt_item_id=? AND r.return_type='return' AND r.status IN ('draft','approved') AND r.id<>? FOR UPDATE`,[row.receipt_item_id,id]);
+          const [[reserved]]=await conn.query(`SELECT COALESCE(SUM(i.return_quantity),0) quantity,COALESCE(SUM(i.priced_quantity),0) priced_quantity
+            FROM procurement_return_items i JOIN procurement_returns r ON r.id=i.return_id
+            WHERE i.receipt_item_id=? AND r.return_type='return' AND r.status IN ('draft','approved') AND r.id<>? FOR UPDATE`,[row.receipt_item_id,id]);
           const available=Number(row.qty_accepted)-Number(row.qty_returned)-Number(reserved.quantity||0);
           if(Number(row.return_quantity)>available) throw badRequest(`退貨數量超過目前可退量 ${available}`);
+          const pricedAvailable=Math.max(Number(row.qty_priced||0)-Number(row.qty_returned_priced||0)-Number(reserved.priced_quantity||0),0);
+          const pricedQuantity=Math.min(Number(row.return_quantity),pricedAvailable);
+          await conn.query('UPDATE procurement_return_items SET priced_quantity=? WHERE id=?',[pricedQuantity,row.return_item_id]);
           // 真正退貨須等庫存反向過帳才回沖採購已交量，避免「核准了但庫存未扣」的假性未交。
         }
         await conn.query("UPDATE procurement_returns SET status='approved',approved_by=?,approved_at=NOW() WHERE id=?",[req.auth.id,id]);
@@ -3635,14 +3807,22 @@ function registerFinanceWorkflowRoutes(app){
         WHERE d.source_database=? AND d.status='posted' AND d.document_kind IN ('shipment','sales_return') AND d.id=? AND i.id=?`,[db,id,itemId]);
     } else if (String(row.source_kind)==='purchase_return') {
       [[result]]=await conn.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_return' source_kind,r.document_type source_document_type,
-        r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.return_quantity quantity,
-        i.unit_cost unit_price,-(i.return_quantity*i.unit_cost+COALESCE(i.allowance_amount,0)) source_amount
+        r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,
+        CASE WHEN r.return_type='return' THEN COALESCE(i.priced_quantity,0) ELSE 0 END quantity,i.unit_cost unit_price,
+        CASE WHEN r.return_type='allowance' THEN -COALESCE(i.allowance_amount,0)
+          ELSE -(COALESCE(i.priced_quantity,0)*i.unit_cost+
+            (COALESCE(ri.freight_amount,0)+COALESCE(ri.insurance_amount,0)+COALESCE(ri.other_expense_amount,0))*COALESCE(i.priced_quantity,0)/NULLIF(ri.qty_accepted,0)) END source_amount,
+        i.return_quantity,COALESCE(i.priced_quantity,0) priced_quantity,i.allowance_amount
         FROM procurement_returns r JOIN procurement_return_items i ON i.return_id=r.id
+        LEFT JOIN procurement_receipt_items ri ON ri.id=i.receipt_item_id
         WHERE r.source_database=? AND ((r.return_type='return' AND r.status='posted' AND r.inventory_status='posted') OR (r.return_type='allowance' AND r.status='approved' AND r.inventory_status='not_applicable')) AND r.id=? AND i.id=?`,[db,id,itemId]);
     } else {
       [[result]]=await conn.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_receipt' source_kind,r.document_type source_document_type,
-        r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.qty_accepted quantity,
-        i.unit_cost unit_price,(i.qty_accepted*i.unit_cost+i.freight_amount+i.insurance_amount+i.other_expense_amount) source_amount
+        r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,
+        COALESCE(i.qty_priced,0) quantity,i.unit_cost unit_price,
+        (COALESCE(i.qty_priced,0)*i.unit_cost+(i.freight_amount+i.insurance_amount+i.other_expense_amount)*COALESCE(i.qty_priced,0)/NULLIF(i.qty_accepted,0)) source_amount,
+        i.qty_accepted qty_received,COALESCE(i.qty_priced,0) qty_priced,
+        (i.freight_amount+i.insurance_amount+i.other_expense_amount) expense_amount
         FROM procurement_receipts r JOIN procurement_receipt_items i ON i.receipt_id=r.id
         WHERE r.source_database=? AND r.inventory_status='posted' AND r.status IN ('accepted','partially_accepted','posted') AND r.id=? AND i.id=?`,[db,id,itemId]);
     }
@@ -3662,18 +3842,25 @@ function registerFinanceWorkflowRoutes(app){
       return rows.map(x=>({...x,remaining_amount:Number(x.amount)-Number(x.allocated_amount||0)})).filter(x=>Math.abs(x.remaining_amount)>0.000001);
     }
     const [receipts]=await conn.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_receipt' source_kind,r.document_type source_document_type,
-      r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,i.qty_accepted quantity,i.unit,i.unit_cost unit_price,
-      (i.qty_accepted*i.unit_cost+i.freight_amount+i.insurance_amount+i.other_expense_amount) amount,
+      r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,
+      COALESCE(i.qty_priced,0) quantity,i.unit,i.unit_cost unit_price,COALESCE(i.qty_accepted,0) qty_accepted,
+      COALESCE(i.qty_returned,0) qty_returned,COALESCE(i.qty_returned_priced,0) qty_returned_priced,
+      (i.freight_amount+i.insurance_amount+i.other_expense_amount) expense_amount,
+      (COALESCE(i.qty_priced,0)*i.unit_cost+(i.freight_amount+i.insurance_amount+i.other_expense_amount)*COALESCE(i.qty_priced,0)/NULLIF(i.qty_accepted,0)) amount,
       COALESCE((SELECT SUM(vs.allocated_amount) FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id WHERE v.status<>'voided' AND vs.source_kind='purchase_receipt' AND vs.source_document_id=r.id AND COALESCE(vs.source_document_item_id,0)=i.id),0) allocated_amount
       FROM procurement_receipts r JOIN procurement_receipt_items i ON i.receipt_id=r.id
-      WHERE r.source_database=? AND r.inventory_status='posted' AND r.status IN ('accepted','partially_accepted','posted') ${partyCode?'AND r.supplier_code=?':''}
+      WHERE r.source_database=? AND r.inventory_status='posted' AND r.status IN ('accepted','partially_accepted','posted') AND COALESCE(i.qty_priced,0)>0 ${partyCode?'AND r.supplier_code=?':''}
       ORDER BY r.receipt_date,r.id,i.id${hasLimit?' LIMIT ?':''}`,[...(partyCode?[db,partyCode]:[db]),...(hasLimit?[limit]:[])]);
     const [returns]=await conn.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_return' source_kind,r.document_type source_document_type,
-      r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,i.return_quantity quantity,i.unit,i.unit_cost unit_price,
-      -(i.return_quantity*i.unit_cost+COALESCE(i.allowance_amount,0)) amount,
+      r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,
+      CASE WHEN r.return_type='return' THEN COALESCE(i.priced_quantity,0) ELSE 0 END quantity,i.unit,i.unit_cost unit_price,
+      CASE WHEN r.return_type='allowance' THEN -COALESCE(i.allowance_amount,0)
+        ELSE -(COALESCE(i.priced_quantity,0)*i.unit_cost+(COALESCE(ri.freight_amount,0)+COALESCE(ri.insurance_amount,0)+COALESCE(ri.other_expense_amount,0))*COALESCE(i.priced_quantity,0)/NULLIF(ri.qty_accepted,0)) END amount,
+      i.return_quantity,COALESCE(i.priced_quantity,0) priced_quantity,i.allowance_amount,
       COALESCE((SELECT SUM(vs.allocated_amount) FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id WHERE v.status<>'voided' AND vs.source_kind='purchase_return' AND vs.source_document_id=r.id AND COALESCE(vs.source_document_item_id,0)=i.id),0) allocated_amount
       FROM procurement_returns r JOIN procurement_return_items i ON i.return_id=r.id
-      WHERE r.source_database=? AND ((r.return_type='return' AND r.status='posted' AND r.inventory_status='posted') OR (r.return_type='allowance' AND r.status='approved' AND r.inventory_status='not_applicable')) ${partyCode?'AND r.supplier_code=?':''}
+      LEFT JOIN procurement_receipt_items ri ON ri.id=i.receipt_item_id
+      WHERE r.source_database=? AND ((r.return_type='return' AND r.status='posted' AND r.inventory_status='posted' AND COALESCE(i.priced_quantity,0)>0) OR (r.return_type='allowance' AND r.status='approved' AND r.inventory_status='not_applicable' AND COALESCE(i.allowance_amount,0)>0)) ${partyCode?'AND r.supplier_code=?':''}
       ORDER BY r.return_date,r.id,i.id${hasLimit?' LIMIT ?':''}`,[...(partyCode?[db,partyCode]:[db]),...(hasLimit?[limit]:[])]);
     return [...receipts,...returns].map(x=>({...x,remaining_amount:Number(x.amount)-Number(x.allocated_amount||0)})).filter(x=>Math.abs(x.remaining_amount)>0.000001);
   }
@@ -3686,18 +3873,23 @@ function registerFinanceWorkflowRoutes(app){
         ORDER BY d.document_date DESC,d.id DESC,i.id DESC LIMIT ?`,[db,limit]);
       rows=sales.map(x=>({...x,remaining_amount:Number(x.amount)-Number(x.allocated_amount||0)})).filter(x=>Math.abs(x.remaining_amount)>0.000001);
     } else {
-      const [receipts]=await pool.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_receipt' source_kind,r.document_type source_document_type,r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,i.qty_accepted quantity,i.unit,i.unit_cost unit_price,
-        i.freight_amount,i.insurance_amount,i.other_expense_amount,
-        (i.qty_accepted*i.unit_cost+i.freight_amount+i.insurance_amount+i.other_expense_amount) amount,
+      const [receipts]=await pool.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_receipt' source_kind,r.document_type source_document_type,r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,
+        COALESCE(i.qty_priced,0) quantity,i.unit,i.unit_cost unit_price,COALESCE(i.qty_accepted,0) qty_accepted,COALESCE(i.qty_returned,0) qty_returned,
+        COALESCE(i.qty_returned_priced,0) qty_returned_priced,i.freight_amount,i.insurance_amount,i.other_expense_amount,
+        (COALESCE(i.qty_priced,0)*i.unit_cost+(i.freight_amount+i.insurance_amount+i.other_expense_amount)*COALESCE(i.qty_priced,0)/NULLIF(i.qty_accepted,0)) amount,
         COALESCE((SELECT SUM(vs.allocated_amount) FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id WHERE v.status<>'voided' AND vs.source_kind='purchase_receipt' AND vs.source_document_id=r.id AND COALESCE(vs.source_document_item_id,0)=i.id),0) allocated_amount
         FROM procurement_receipts r JOIN procurement_receipt_items i ON i.receipt_id=r.id
-        WHERE r.source_database=? AND r.inventory_status='posted' AND r.status IN ('accepted','partially_accepted','posted')
+        WHERE r.source_database=? AND r.inventory_status='posted' AND r.status IN ('accepted','partially_accepted','posted') AND COALESCE(i.qty_priced,0)>0
         ORDER BY r.receipt_date DESC,r.id DESC,i.id DESC LIMIT ?`,[db,limit]);
-      const [returns]=await pool.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_return' source_kind,r.document_type source_document_type,r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,i.return_quantity quantity,i.unit,i.unit_cost unit_price,
-        -(i.return_quantity*i.unit_cost+COALESCE(i.allowance_amount,0)) amount,
+      const [returns]=await pool.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_return' source_kind,r.document_type source_document_type,r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,
+        CASE WHEN r.return_type='return' THEN COALESCE(i.priced_quantity,0) ELSE 0 END quantity,i.unit,i.unit_cost unit_price,
+        CASE WHEN r.return_type='allowance' THEN -COALESCE(i.allowance_amount,0)
+          ELSE -(COALESCE(i.priced_quantity,0)*i.unit_cost+(COALESCE(ri.freight_amount,0)+COALESCE(ri.insurance_amount,0)+COALESCE(ri.other_expense_amount,0))*COALESCE(i.priced_quantity,0)/NULLIF(ri.qty_accepted,0)) END amount,
+        i.return_quantity,COALESCE(i.priced_quantity,0) priced_quantity,i.allowance_amount,
         COALESCE((SELECT SUM(vs.allocated_amount) FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id WHERE v.status<>'voided' AND vs.source_kind='purchase_return' AND vs.source_document_id=r.id AND COALESCE(vs.source_document_item_id,0)=i.id),0) allocated_amount
         FROM procurement_returns r JOIN procurement_return_items i ON i.return_id=r.id
-        WHERE r.source_database=? AND ((r.return_type='return' AND r.status='posted' AND r.inventory_status='posted') OR (r.return_type='allowance' AND r.status='approved' AND r.inventory_status='not_applicable'))
+        LEFT JOIN procurement_receipt_items ri ON ri.id=i.receipt_item_id
+        WHERE r.source_database=? AND ((r.return_type='return' AND r.status='posted' AND r.inventory_status='posted' AND COALESCE(i.priced_quantity,0)>0) OR (r.return_type='allowance' AND r.status='approved' AND r.inventory_status='not_applicable' AND COALESCE(i.allowance_amount,0)>0))
         ORDER BY r.return_date DESC,r.id DESC LIMIT ?`,[db,limit]);
       rows=[...receipts,...returns].map(x=>({...x,remaining_amount:Number(x.amount)-Number(x.allocated_amount||0)})).filter(x=>Math.abs(x.remaining_amount)>0.000001).sort((a,b)=>String(b.document_date).localeCompare(String(a.document_date))||Number(b.source_document_id)-Number(a.source_document_id)).slice(0,limit);
     }res.json({ok:true,data:rows});}catch(e){next(e);}});
@@ -3819,7 +4011,7 @@ function registerFinanceWorkflowRoutes(app){
   app.post('/api/finance-workflow/open-items/:id/approve',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id);await tx(async conn=>{const[[f]]=await conn.query("SELECT * FROM finance_open_items WHERE id=? AND status='draft' FOR UPDATE",[id]);if(!f)throw badRequest('只有草稿可以立帳');await assertOpenAccountingPeriod(conn,contextFor(String(f.source_database).toUpperCase()),f.document_date);await conn.query("UPDATE finance_open_items SET status='open',approved_by=?,approved_at=NOW(),posted_by=?,posted_at=NOW() WHERE id=?",[req.auth.id,req.auth.id,id]);});res.json({ok:true,data:{id}});}catch(e){next(e);}});
   app.get('/api/finance-workflow/open-items',async(req,res,next)=>{try{const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'AR').toUpperCase(),limit=Math.min(Math.max(Number(req.query.limit)||10,1),100);const[rows]=await pool.query('SELECT * FROM finance_open_items WHERE source_database=? AND account_type=? ORDER BY document_date DESC,id DESC LIMIT ?',[db,type,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
    app.post(['/api/finance-workflow/settlements-enhanced','/api/finance-workflow/settlements'],async(req,res,next)=>{try{await ensureFinance();const b=req.body||{},date=validDate(b.settlement_date),selectedType=trim(b.document_type),raw=Array.isArray(b.allocations)?b.allocations:[{open_item_id:b.open_item_id,allocated_amount:b.amount}];if(!selectedType)throw badRequest('請選擇收付款單別');const allocations=raw.map(x=>({open_item_id:Number(x.open_item_id),allocated_amount:positiveNumber(x.allocated_amount??x.amount,'沖銷金額')})).filter(x=>x.open_item_id);if(!allocations.length)throw badRequest('至少選擇一筆未沖帳款');const out=await tx(async conn=>{const items=[];for(const a of allocations){const[[o]]=await conn.query("SELECT * FROM finance_open_items WHERE id=? AND status IN ('open','partial') FOR UPDATE",[a.open_item_id]);if(!o||a.allocated_amount>Number(o.balance_amount))throw badRequest('收付金額超過未沖餘額');items.push(o);}const first=items[0];if(items.some(o=>o.account_type!==first.account_type||o.party_code!==first.party_code||o.currency_code!==first.currency_code||o.source_database!==first.source_database))throw badRequest('不可混合不同對象、幣別或公司來源');const amount=allocations.reduce((s,x)=>s+x.allocated_amount,0),rate=Number(b.exchange_rate)||1,baseAmount=amount*rate;const no=trim(b.settlement_no)||await nextWorkflowNumber(conn,'finance_settlements','settlement_no',selectedType,date);let expectedBase=0;for(let i=0;i<items.length;i++)expectedBase+=allocations[i].allocated_amount*Number(items[i].exchange_rate||1);const diff=(first.account_type==='AR'?1:-1)*(baseAmount-expectedBase);const[r]=await conn.query(`INSERT INTO finance_settlements(tenant_id,company_id,source_system,source_database,account_type,settlement_no,settlement_date,party_code,currency_code,exchange_rate,base_amount,exchange_difference,payment_method,bank_code,reference_no,amount,status,note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?,?)`,[first.tenant_id,first.company_id,first.source_system,first.source_database,first.account_type,no,date,first.party_code,first.currency_code,rate,baseAmount,diff,trim(b.payment_method),trim(b.bank_code),trim(b.reference_no),amount,trim(b.note),req.auth.id]);for(let i=0;i<allocations.length;i++){const a=allocations[i],base=a.allocated_amount*rate,lineDiff=(first.account_type==='AR'?1:-1)*(base-a.allocated_amount*Number(items[i].exchange_rate||1));await conn.query('INSERT INTO finance_allocations(settlement_id,open_item_id,allocated_amount,base_allocated_amount,exchange_difference) VALUES(?,?,?,?,?)',[r.insertId,a.open_item_id,a.allocated_amount,base,lineDiff]);}return{id:r.insertId,settlement_no:no,amount,base_amount:baseAmount,exchange_difference:diff};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
-   app.post(['/api/finance-workflow/settlements/:id/post-enhanced','/api/finance-workflow/settlements/:id/post'],async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id);await tx(async conn=>{const[[s]]=await conn.query("SELECT * FROM finance_settlements WHERE id=? AND status='draft' FOR UPDATE",[id]);if(!s)throw badRequest('找不到待過帳收付款單');await assertOpenAccountingPeriod(conn,contextFor(String(s.source_database).toUpperCase()),s.settlement_date);const[rows]=await conn.query('SELECT a.*,o.document_no,o.document_date,o.balance_amount,o.base_balance_amount FROM finance_allocations a JOIN finance_open_items o ON o.id=a.open_item_id WHERE a.settlement_id=? FOR UPDATE',[id]);for(const a of rows){assertChronologicalDate(s.settlement_date,a.document_date,'收付款日期');const balance=Number(a.balance_amount)-Number(a.allocated_amount),baseBalance=Number(a.base_balance_amount)-Number(a.allocated_amount)*(Number(a.base_balance_amount)/Math.max(Number(a.balance_amount),0.000001));await conn.query("UPDATE finance_open_items SET settled_amount=settled_amount+?,base_settled_amount=base_settled_amount+?,balance_amount=?,base_balance_amount=?,status=? WHERE id=?",[a.allocated_amount,a.base_allocated_amount,balance,Math.max(baseBalance,0),Math.abs(balance)<0.000001?'settled':'partial',a.open_item_id]);}await conn.query("UPDATE finance_settlements SET status='posted',approved_by=?,approved_at=NOW(),posted_by=?,posted_at=NOW() WHERE id=?",[req.auth.id,req.auth.id,id]);});res.json({ok:true,data:{id,status:'posted'}});}catch(e){next(e);}});
+   app.post(['/api/finance-workflow/settlements/:id/post-enhanced','/api/finance-workflow/settlements/:id/post'],async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id);await tx(async conn=>{const[[s]]=await conn.query("SELECT * FROM finance_settlements WHERE id=? AND status='draft' FOR UPDATE",[id]);if(!s)throw badRequest('找不到待過帳收付款單');await assertOpenAccountingPeriod(conn,contextFor(String(s.source_database).toUpperCase()),s.settlement_date);const[rows]=await conn.query('SELECT a.*,o.document_no,o.document_date,o.balance_amount,o.base_balance_amount FROM finance_allocations a JOIN finance_open_items o ON o.id=a.open_item_id WHERE a.settlement_id=? FOR UPDATE',[id]);for(const a of rows){assertChronologicalDate(s.settlement_date,a.document_date,'收付款日期');const balance=Number(a.balance_amount)-Number(a.allocated_amount),baseBalance=Number(a.base_balance_amount)-Number(a.allocated_amount)*(Number(a.base_balance_amount)/Math.max(Number(a.balance_amount),0.000001));await conn.query("UPDATE finance_open_items SET settled_amount=settled_amount+?,base_settled_amount=base_settled_amount+?,balance_amount=?,base_balance_amount=?,status=? WHERE id=?",[a.allocated_amount,a.base_allocated_amount,balance,Math.max(baseBalance,0),Math.abs(balance)<0.000001?'settled':'partial',a.open_item_id]);}await refreshProcurementPaidQuantities(conn,id);await conn.query("UPDATE finance_settlements SET status='posted',approved_by=?,approved_at=NOW(),posted_by=?,posted_at=NOW() WHERE id=?",[req.auth.id,req.auth.id,id]);});res.json({ok:true,data:{id,status:'posted'}});}catch(e){next(e);}});
   app.post('/api/finance-workflow/settlements',async(req,res,next)=>{try{const b=req.body||{},date=validDate(b.settlement_date),selectedType=trim(b.document_type),rawAllocations=Array.isArray(b.allocations)?b.allocations:[{open_item_id:b.open_item_id,allocated_amount:b.amount}];if(!selectedType)throw badRequest('請選擇收付款單別');const allocations=rawAllocations.map(x=>({open_item_id:Number(x.open_item_id),allocated_amount:positiveNumber(x.allocated_amount??x.amount,'沖銷金額')})).filter(x=>x.open_item_id);if(!allocations.length)throw badRequest('至少選擇一筆未沖帳款');const out=await tx(async conn=>{const items=[];for(const a of allocations){const[[o]]=await conn.query("SELECT * FROM finance_open_items WHERE id=? AND status IN ('open','partial') FOR UPDATE",[a.open_item_id]);if(!o||a.allocated_amount>Number(o.balance_amount))throw badRequest('收付金額超過未沖餘額');items.push(o);}const first=items[0];if(items.some(o=>o.account_type!==first.account_type||o.party_code!==first.party_code||o.currency_code!==first.currency_code||o.source_database!==first.source_database))throw badRequest('同一張收付款單不可混合不同對象、幣別或公司來源');const amount=allocations.reduce((sum,x)=>sum+x.allocated_amount,0);const no=trim(b.settlement_no)||await nextWorkflowNumber(conn,'finance_settlements','settlement_no',selectedType,date);const[r]=await conn.query(`INSERT INTO finance_settlements(tenant_id,company_id,source_system,source_database,account_type,settlement_no,settlement_date,party_code,payment_method,bank_code,reference_no,amount,status,note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'draft',?,?)`,[first.tenant_id,first.company_id,first.source_system,first.source_database,first.account_type,no,date,first.party_code,trim(b.payment_method),trim(b.bank_code),trim(b.reference_no),amount,trim(b.note),req.auth.id]);for(const a of allocations)await conn.query('INSERT INTO finance_allocations(settlement_id,open_item_id,allocated_amount) VALUES(?,?,?)',[r.insertId,a.open_item_id,a.allocated_amount]);return{id:r.insertId,settlement_no:no,allocation_count:allocations.length,amount};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
   app.post('/api/finance-workflow/settlements/:id/post',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id);await tx(async conn=>{const[[s]]=await conn.query("SELECT * FROM finance_settlements WHERE id=? AND status='draft' FOR UPDATE",[id]);if(!s)throw badRequest('找不到待過帳收付款單');await assertOpenAccountingPeriod(conn,contextFor(String(s.source_database).toUpperCase()),s.settlement_date);const[allocations]=await conn.query('SELECT a.*,o.* FROM finance_allocations a JOIN finance_open_items o ON o.id=a.open_item_id WHERE a.settlement_id=? FOR UPDATE',[id]);if(!allocations.length)throw badRequest('收付款單沒有沖銷明細');const total=allocations.reduce((sum,a)=>sum+Number(a.allocated_amount),0);if(Math.abs(total-Number(s.amount))>0.000001)throw badRequest('收付款單總額與沖銷明細不一致');for(const a of allocations){assertChronologicalDate(s.settlement_date,a.document_date,'收付款日期');if(Number(a.allocated_amount)>Number(a.balance_amount))throw badRequest(`帳款 ${a.document_no} 沖銷金額超過未沖餘額`);const balance=Number(a.balance_amount)-Number(a.allocated_amount);await conn.query("UPDATE finance_open_items SET settled_amount=settled_amount+?,balance_amount=?,status=? WHERE id=?",[a.allocated_amount,balance,balance===0?'settled':'partial',a.open_item_id]);}await conn.query("UPDATE finance_settlements SET status='posted',approved_by=?,approved_at=NOW(),posted_by=?,posted_at=NOW() WHERE id=?",[req.auth.id,req.auth.id,id]);});res.json({ok:true,data:{id}});}catch(e){next(e);}});
   app.get('/api/finance-workflow/settlements',async(req,res,next)=>{try{const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'AR').toUpperCase(),limit=Math.min(Math.max(Number(req.query.limit)||10,1),100);const[rows]=await pool.query(`SELECT s.*,GROUP_CONCAT(DISTINCT o.document_no ORDER BY o.document_no SEPARATOR '、') open_document_no,COUNT(a.id) allocation_count FROM finance_settlements s LEFT JOIN finance_allocations a ON a.settlement_id=s.id LEFT JOIN finance_open_items o ON o.id=a.open_item_id WHERE s.source_database=? AND s.account_type=? GROUP BY s.id ORDER BY s.settlement_date DESC,s.id DESC LIMIT ?`,[db,type,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
@@ -4760,7 +4952,7 @@ function registerInventoryWorkflowRoutes(app) {
   app.post('/api/inventory-workflow/documents/:id/approve',async(req,res,next)=>{try{const id=Number(req.params.id),db=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase();const [r]=await pool.query("UPDATE inventory_documents SET status='approved',approved_by=?,approved_at=NOW() WHERE id=? AND source_database=? AND status='draft'",[req.auth.id,id,db]);if(!r.affectedRows)throw badRequest('只有目前公司別的草稿可以核準');res.json({ok:true,data:{id,status:'approved'}});}catch(e){next(e);}});
   app.post('/api/inventory-workflow/documents/:id/post',async(req,res,next)=>{try{const id=Number(req.params.id),db=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase();await tx(async conn=>{const [[d]]=await conn.query(`SELECT d.*,i.*,d.id document_id,dt.allow_negative FROM inventory_documents d JOIN inventory_document_items i ON i.document_id=d.id JOIN inventory_document_types dt ON dt.tenant_id=d.tenant_id AND dt.company_id=d.company_id AND dt.source_system=d.source_system AND dt.type_code=d.document_type WHERE d.id=? AND d.source_database=? FOR UPDATE`,[id,db]);if(!d||d.status!=='approved')throw badRequest('只有目前公司別已核準單據可以過帳');const getBalance=async wh=>{const [[r]]=await conn.query(`SELECT * FROM erp_inventory_balances WHERE tenant_id=? AND company_id=? AND source_system=? AND item_code=? AND warehouse_code=? AND location_code=? FOR UPDATE`,[d.tenant_id,d.company_id,d.source_system,d.item_code,wh,d.location_code||'']);return r||{quantity_on_hand:0,inventory_amount:0,unit_cost:0};};const apply=async(wh,qtyDelta,amountDelta)=>{if(!wh)throw badRequest('庫別不可空白');const bal=await getBalance(wh),newQty=Number(bal.quantity_on_hand)+qtyDelta,newAmount=Number(bal.inventory_amount)+amountDelta;if(newQty<0&&!Number(d.allow_negative))throw badRequest(`庫存不足：${d.item_code} / ${wh}`);const newCost=newQty===0?0:newAmount/newQty;await conn.query(`INSERT INTO erp_inventory_balances(tenant_id,company_id,source_system,item_code,warehouse_code,location_code,quantity_on_hand,unit_cost,inventory_amount,last_movement_at) VALUES(?,?,?,?,?,?,?,?,?,NOW()) ON DUPLICATE KEY UPDATE quantity_on_hand=VALUES(quantity_on_hand),unit_cost=VALUES(unit_cost),inventory_amount=VALUES(inventory_amount),last_movement_at=NOW()`,[d.tenant_id,d.company_id,d.source_system,d.item_code,wh,d.location_code||'',newQty,newCost,newAmount]);await conn.query(`INSERT INTO inventory_movement_ledger(tenant_id,company_id,source_system,document_id,document_no,document_type,movement_kind,movement_date,item_code,warehouse_code,location_code,lot_no,quantity_delta,unit_cost,amount_delta) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[d.tenant_id,d.company_id,d.source_system,d.document_id,d.document_no,d.document_type,d.movement_kind,d.document_date,d.item_code,wh,d.location_code||'',d.lot_no||'',qtyDelta,d.unit_cost,amountDelta]);};const cost=Number(d.unit_cost||0);if(d.movement_kind==='transfer'){await apply(d.from_warehouse_code,-Number(d.quantity),-Number(d.quantity)*cost);await apply(d.to_warehouse_code,Number(d.quantity),Number(d.quantity)*cost);}else if(d.movement_kind==='stocktake'){const bal=await getBalance(d.to_warehouse_code||d.from_warehouse_code),delta=Number(d.counted_quantity)-Number(bal.quantity_on_hand);await apply(d.to_warehouse_code||d.from_warehouse_code,delta,delta*cost);}else if(d.movement_kind==='cost_adjust'){await apply(d.to_warehouse_code||d.from_warehouse_code,0,Number(d.amount_delta));}else{const positive=['return','adjust_in','temp_in','temp_out_return'].includes(d.movement_kind),qty=(positive?1:-1)*Number(d.quantity);await apply(d.to_warehouse_code||d.from_warehouse_code,qty,qty*cost);}await conn.query("UPDATE inventory_documents SET status='posted',posted_by=?,posted_at=NOW() WHERE id=?",[req.auth.id,id]);});res.json({ok:true,data:{id,status:'posted'}});}catch(e){next(e);}});
   app.get('/api/inventory-workflow/procurement-pending',async(req,res,next)=>{try{await ensureTargetReceiptWorkflowSchema();const db=String(req.query.source_database||'SH').toUpperCase();const [receipts]=await pool.query(`SELECT 'receipt' source_kind,r.id,r.receipt_no document_no,r.receipt_date document_date,r.supplier_code,i.item_code,i.item_name,i.warehouse_code,i.unit,i.qty_accepted quantity,i.unit_cost,r.inventory_status FROM procurement_receipts r JOIN procurement_receipt_items i ON i.receipt_id=r.id WHERE r.source_database=? AND r.status IN ('accepted','partially_accepted') AND r.inventory_status='pending'`,[db]);const [returns]=await pool.query(`SELECT 'return' source_kind,r.id,r.return_no document_no,r.return_date document_date,r.supplier_code,i.item_code,i.item_name,i.warehouse_code,i.unit,i.return_quantity quantity,i.unit_cost,r.inventory_status FROM procurement_returns r JOIN procurement_return_items i ON i.return_id=r.id WHERE r.source_database=? AND r.return_type='return' AND r.status='approved' AND r.inventory_status='pending'`,[db]);res.json({ok:true,data:[...receipts,...returns]});}catch(e){next(e);}});
-  app.post('/api/inventory-workflow/procurement/:kind/:id/post',async(req,res,next)=>{try{const kind=req.params.kind,id=Number(req.params.id),requestedDb=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase();if(!['receipt','return'].includes(kind))throw badRequest('不支援的採購庫存來源');await tx(async conn=>{let header,items;if(kind==='receipt')[[header]]=await conn.query(`SELECT * FROM procurement_receipts WHERE id=? AND source_database=? FOR UPDATE`,[id,requestedDb]);else [[header]]=await conn.query(`SELECT * FROM procurement_returns WHERE id=? AND source_database=? FOR UPDATE`,[id,requestedDb]);if(!header||header.inventory_status!=='pending')throw badRequest('此單據已過帳或不可過帳');if(kind==='receipt'&&!['accepted','partially_accepted'].includes(header.status))throw badRequest('進貨尚未驗收完成');if(kind==='return'&&(header.status!=='approved'||header.return_type!=='return'))throw badRequest('退貨尚未核準');if(kind==='receipt')[items]=await conn.query(`SELECT * FROM procurement_receipt_items WHERE receipt_id=? ORDER BY line_no FOR UPDATE`,[id]);else[items]=await conn.query(`SELECT i.*,ri.purchase_order_item_id FROM procurement_return_items i JOIN procurement_receipt_items ri ON ri.id=i.receipt_item_id WHERE i.return_id=? ORDER BY i.line_no FOR UPDATE`,[id]);if(!items.length)throw badRequest('單據沒有明細，無法過帳');const c=contextFor(requestedDb);for(const item of items){const quantity=(kind==='receipt'?1:-1)*Number(kind==='receipt'?item.qty_accepted:item.return_quantity);if(!quantity)continue;const warehouse=item.warehouse_code||header.warehouse_code||'';if(!warehouse)throw badRequest(`第 ${item.line_no} 筆明細缺少庫別`);const amount=quantity*Number(item.unit_cost||0);const [[bal]]=await conn.query(`SELECT * FROM erp_inventory_balances WHERE tenant_id=? AND company_id=? AND source_system=? AND item_code=? AND warehouse_code=? AND location_code='' FOR UPDATE`,[c.tenant_id,c.company_id,c.source_system,item.item_code,warehouse]);const newQty=Number(bal?.quantity_on_hand||0)+quantity,newAmount=Number(bal?.inventory_amount||0)+amount;if(newQty<0)throw badRequest(`庫存不足：${item.item_code} / ${warehouse}`);await conn.query(`INSERT INTO erp_inventory_balances(tenant_id,company_id,source_system,item_code,warehouse_code,location_code,quantity_on_hand,unit_cost,inventory_amount,last_movement_at) VALUES(?,?,?,?,?,'',?,?,?,NOW()) ON DUPLICATE KEY UPDATE quantity_on_hand=VALUES(quantity_on_hand),unit_cost=VALUES(unit_cost),inventory_amount=VALUES(inventory_amount),last_movement_at=NOW()`,[c.tenant_id,c.company_id,c.source_system,item.item_code,warehouse,newQty,newQty?newAmount/newQty:0,newAmount]);const no=kind==='receipt'?header.receipt_no:header.return_no,date=kind==='receipt'?header.receipt_date:header.return_date;await conn.query(`INSERT INTO inventory_movement_ledger(tenant_id,company_id,source_system,document_id,document_no,document_type,movement_kind,movement_date,item_code,warehouse_code,location_code,lot_no,quantity_delta,unit_cost,amount_delta) VALUES(?,?,?,NULL,?,?,?,?,?,?,'','',?,?,?)`,[c.tenant_id,c.company_id,c.source_system,no,kind==='receipt'?'GR':'PR',kind==='receipt'?'purchase_receipt':'purchase_return',date,item.item_code,warehouse,quantity,item.unit_cost,amount]);}if(kind==='receipt')await conn.query("UPDATE procurement_receipts SET inventory_status='posted',inventory_posted_by=?,inventory_posted_at=NOW() WHERE id=?",[req.auth.id,id]);else {for(const item of items){await conn.query('UPDATE procurement_receipt_items SET qty_returned=qty_returned+? WHERE id=?',[item.return_quantity,item.receipt_item_id]);if(item.purchase_order_item_id){await conn.query('UPDATE procurement_order_items SET qty_received=GREATEST(qty_received-?,0) WHERE id=?',[item.return_quantity,item.purchase_order_item_id]);const[[orderLine]]=await conn.query('SELECT purchase_order_id FROM procurement_order_items WHERE id=?',[item.purchase_order_item_id]);const[[remaining]]=await conn.query('SELECT COUNT(*) count FROM procurement_order_items WHERE purchase_order_id=? AND qty_ordered>qty_received+qty_cancelled',[orderLine.purchase_order_id]);await conn.query("UPDATE procurement_orders SET status=CASE WHEN status='closed' THEN 'partial_received' WHEN ?>0 THEN 'partial_received' ELSE 'received' END WHERE id=?",[Number(remaining.count),orderLine.purchase_order_id]);}}await conn.query("UPDATE procurement_returns SET status='posted',inventory_status='posted' WHERE id=?",[id]);}});res.json({ok:true,data:{id,kind,status:'posted'}});}catch(e){next(e);}});
+  app.post('/api/inventory-workflow/procurement/:kind/:id/post',async(req,res,next)=>{try{const kind=req.params.kind,id=Number(req.params.id),requestedDb=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase();if(!['receipt','return'].includes(kind))throw badRequest('不支援的採購庫存來源');await tx(async conn=>{let header,items;if(kind==='receipt')[[header]]=await conn.query(`SELECT * FROM procurement_receipts WHERE id=? AND source_database=? FOR UPDATE`,[id,requestedDb]);else [[header]]=await conn.query(`SELECT * FROM procurement_returns WHERE id=? AND source_database=? FOR UPDATE`,[id,requestedDb]);if(!header||header.inventory_status!=='pending')throw badRequest('此單據已過帳或不可過帳');if(kind==='receipt'&&!['accepted','partially_accepted'].includes(header.status))throw badRequest('進貨尚未驗收完成');if(kind==='return'&&(header.status!=='approved'||header.return_type!=='return'))throw badRequest('退貨尚未核準');if(kind==='receipt')[items]=await conn.query(`SELECT * FROM procurement_receipt_items WHERE receipt_id=? ORDER BY line_no FOR UPDATE`,[id]);else[items]=await conn.query(`SELECT i.*,ri.purchase_order_item_id FROM procurement_return_items i JOIN procurement_receipt_items ri ON ri.id=i.receipt_item_id WHERE i.return_id=? ORDER BY i.line_no FOR UPDATE`,[id]);if(!items.length)throw badRequest('單據沒有明細，無法過帳');const c=contextFor(requestedDb);for(const item of items){const quantity=(kind==='receipt'?1:-1)*Number(kind==='receipt'?item.qty_accepted:item.return_quantity);if(!quantity)continue;const warehouse=item.warehouse_code||header.warehouse_code||'';if(!warehouse)throw badRequest(`第 ${item.line_no} 筆明細缺少庫別`);const amount=quantity*Number(item.unit_cost||0);const [[bal]]=await conn.query(`SELECT * FROM erp_inventory_balances WHERE tenant_id=? AND company_id=? AND source_system=? AND item_code=? AND warehouse_code=? AND location_code='' FOR UPDATE`,[c.tenant_id,c.company_id,c.source_system,item.item_code,warehouse]);const newQty=Number(bal?.quantity_on_hand||0)+quantity,newAmount=Number(bal?.inventory_amount||0)+amount;if(newQty<0)throw badRequest(`庫存不足：${item.item_code} / ${warehouse}`);await conn.query(`INSERT INTO erp_inventory_balances(tenant_id,company_id,source_system,item_code,warehouse_code,location_code,quantity_on_hand,unit_cost,inventory_amount,last_movement_at) VALUES(?,?,?,?,?,'',?,?,?,NOW()) ON DUPLICATE KEY UPDATE quantity_on_hand=VALUES(quantity_on_hand),unit_cost=VALUES(unit_cost),inventory_amount=VALUES(inventory_amount),last_movement_at=NOW()`,[c.tenant_id,c.company_id,c.source_system,item.item_code,warehouse,newQty,newQty?newAmount/newQty:0,newAmount]);const no=kind==='receipt'?header.receipt_no:header.return_no,date=kind==='receipt'?header.receipt_date:header.return_date;await conn.query(`INSERT INTO inventory_movement_ledger(tenant_id,company_id,source_system,document_id,document_no,document_type,movement_kind,movement_date,item_code,warehouse_code,location_code,lot_no,quantity_delta,unit_cost,amount_delta) VALUES(?,?,?,NULL,?,?,?,?,?,?,'','',?,?,?)`,[c.tenant_id,c.company_id,c.source_system,no,kind==='receipt'?'GR':'PR',kind==='receipt'?'purchase_receipt':'purchase_return',date,item.item_code,warehouse,quantity,item.unit_cost,amount]);}if(kind==='receipt')await conn.query("UPDATE procurement_receipts SET inventory_status='posted',inventory_posted_by=?,inventory_posted_at=NOW() WHERE id=?",[req.auth.id,id]);else {for(const item of items){await conn.query('UPDATE procurement_receipt_items SET qty_returned=qty_returned+?,qty_returned_priced=qty_returned_priced+? WHERE id=?',[item.return_quantity,Number(item.priced_quantity||0),item.receipt_item_id]);if(item.purchase_order_item_id){await conn.query('UPDATE procurement_order_items SET qty_received=GREATEST(qty_received-?,0) WHERE id=?',[item.return_quantity,item.purchase_order_item_id]);const[[orderLine]]=await conn.query('SELECT purchase_order_id FROM procurement_order_items WHERE id=?',[item.purchase_order_item_id]);const[[remaining]]=await conn.query('SELECT COUNT(*) count FROM procurement_order_items WHERE purchase_order_id=? AND qty_ordered>qty_received+qty_cancelled',[orderLine.purchase_order_id]);await conn.query("UPDATE procurement_orders SET status=CASE WHEN status='closed' THEN 'partial_received' WHEN ?>0 THEN 'partial_received' ELSE 'received' END WHERE id=?",[Number(remaining.count),orderLine.purchase_order_id]);}}await conn.query("UPDATE procurement_returns SET status='posted',inventory_status='posted' WHERE id=?",[id]);}});res.json({ok:true,data:{id,kind,status:'posted'}});}catch(e){next(e);}});
   app.get('/api/inventory-workflow/balances',async(req,res,next)=>{try{const db=String(req.query.source_database||'SH').toUpperCase(),c=contextFor(db);const [rows]=await pool.query('SELECT * FROM erp_inventory_balances WHERE tenant_id=? AND company_id=? AND source_system=? ORDER BY warehouse_code,item_code',[c.tenant_id,c.company_id,c.source_system]);res.json({ok:true,data:rows});}catch(e){next(e);}});
   app.get('/api/inventory-workflow/ledger',async(req,res,next)=>{try{const db=String(req.query.source_database||'SH').toUpperCase(),c=contextFor(db);const [rows]=await pool.query('SELECT * FROM inventory_movement_ledger WHERE tenant_id=? AND company_id=? AND source_system=? ORDER BY movement_date DESC,id DESC LIMIT 200',[c.tenant_id,c.company_id,c.source_system]);res.json({ok:true,data:rows});}catch(e){next(e);}});
 }

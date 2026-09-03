@@ -135,12 +135,14 @@ async function addColumnIfMissing(table, column, definition) {
   if (!Number(row.count)) {
     try {
       await pool.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      return true;
     } catch (error) {
       // Two first requests can initialise the same target schema concurrently.
       // If one request already added the column, the other request can continue safely.
       if (error.code !== 'ER_DUP_FIELDNAME') throw error;
     }
   }
+  return false;
 }
 
 export function ensureProcurementSchema() {
@@ -817,6 +819,11 @@ export function ensureProcurementSchema() {
         unit VARCHAR(20) NOT NULL DEFAULT 'PCS',
         qty_received DECIMAL(18,4) NOT NULL,
         qty_accepted DECIMAL(18,4) NOT NULL,
+        qty_priced DECIMAL(24,6) NOT NULL DEFAULT 0,
+        qty_paid DECIMAL(24,6) NOT NULL DEFAULT 0,
+        qty_returned_priced DECIMAL(24,6) NOT NULL DEFAULT 0,
+        priced_at DATETIME NULL,
+        priced_by BIGINT UNSIGNED NULL,
         unit_cost DECIMAL(18,4) NOT NULL DEFAULT 0,
         lot_no VARCHAR(80) NOT NULL DEFAULT '',
         note VARCHAR(255) NULL,
@@ -913,6 +920,7 @@ export function ensureProcurementSchema() {
         receipt_item_id BIGINT UNSIGNED NULL, line_no INT NOT NULL, item_code VARCHAR(50) NOT NULL,
         item_name VARCHAR(160) NULL, warehouse_code VARCHAR(20) NULL, unit VARCHAR(20) NOT NULL DEFAULT 'PCS',
         return_quantity DECIMAL(18,4) NOT NULL DEFAULT 0, allowance_amount DECIMAL(18,4) NOT NULL DEFAULT 0,
+        priced_quantity DECIMAL(24,6) NOT NULL DEFAULT 0,
         unit_cost DECIMAL(18,4) NOT NULL DEFAULT 0, reason VARCHAR(255) NULL,
         UNIQUE KEY uq_procurement_return_line (return_id, line_no),
         CONSTRAINT fk_procurement_return_item_header FOREIGN KEY (return_id) REFERENCES procurement_returns(id) ON DELETE CASCADE,
@@ -1299,6 +1307,9 @@ export async function ensureTargetReceiptWorkflowSchema() {
   ];
   const itemColumns = [
     ['qty_rejected','DECIMAL(18,4) NOT NULL DEFAULT 0'],['qty_returned','DECIMAL(18,4) NOT NULL DEFAULT 0'],
+    ['qty_priced','DECIMAL(24,6) NOT NULL DEFAULT 0'],['qty_paid','DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['qty_returned_priced','DECIMAL(24,6) NOT NULL DEFAULT 0'],['priced_at','DATETIME NULL'],
+    ['priced_by','BIGINT UNSIGNED NULL'],
     ['freight_amount','DECIMAL(24,6) NOT NULL DEFAULT 0'],['insurance_amount','DECIMAL(24,6) NOT NULL DEFAULT 0'],
     ['other_expense_amount','DECIMAL(24,6) NOT NULL DEFAULT 0'],
     ['inspection_status',"VARCHAR(30) NOT NULL DEFAULT 'pending'"],['inspection_note','VARCHAR(255) NULL'],
@@ -1307,7 +1318,30 @@ export async function ensureTargetReceiptWorkflowSchema() {
   ];
   for (const [column, definition] of orderColumns) await addColumnIfMissing('procurement_orders', column, definition);
   for (const [column, definition] of receiptColumns) await addColumnIfMissing('procurement_receipts', column, definition);
-  for (const [column, definition] of itemColumns) await addColumnIfMissing('procurement_receipt_items', column, definition);
+  let pricedColumnAdded = false;
+  for (const [column, definition] of itemColumns) {
+    const added = await addColumnIfMissing('procurement_receipt_items', column, definition);
+    if (column === 'qty_priced') pricedColumnAdded = added;
+  }
+  const returnedPricedAdded = await addColumnIfMissing('procurement_return_items', 'priced_quantity', 'DECIMAL(24,6) NOT NULL DEFAULT 0');
+  // 舊匯入資料原本以驗收合格量直接作為應付來源。新增獨立計價量後，
+  // 既有已驗收資料先保留原 ERP 的可追溯結果；新建立的進貨則從 0 開始，
+  // 必須經「計價」作業後才可轉入應付。這裡只在欄位第一次加入時回填，
+  // 不會覆蓋日後人工維護的計價／付款數量。
+  if (pricedColumnAdded) {
+    await pool.query(`UPDATE procurement_receipt_items
+      SET qty_returned_priced=LEAST(GREATEST(COALESCE(qty_returned,0),0),GREATEST(COALESCE(qty_accepted,0),0)),
+          qty_priced=GREATEST(COALESCE(qty_accepted,0),0),
+          priced_at=COALESCE(inspected_at,NOW())
+      WHERE qty_priced=0 AND COALESCE(qty_accepted,0)>0 AND inspection_status IN ('accepted','partially_accepted')`);
+  }
+  if (returnedPricedAdded) {
+    await pool.query(`UPDATE procurement_return_items ri
+      JOIN procurement_returns r ON r.id=ri.return_id
+      JOIN procurement_receipt_items i ON i.id=ri.receipt_item_id
+      SET ri.priced_quantity=CASE WHEN r.return_type='return' THEN LEAST(COALESCE(ri.return_quantity,0),GREATEST(COALESCE(i.qty_priced,0)-COALESCE(i.qty_returned_priced,0),0)) ELSE 0 END
+      WHERE ri.priced_quantity=0 AND r.status IN ('approved','posted')`);
+  }
   // 暫入／暫出歸還必須指回原暫入／暫出單，才能核對尚未歸還量；不與客戶原始資料庫共用。
   await addColumnIfMissing('inventory_documents', 'related_document_id', 'BIGINT UNSIGNED NULL');
   await addColumnIfMissing('inventory_documents', 'related_document_no', 'VARCHAR(60) NULL');
@@ -1321,6 +1355,20 @@ export async function ensureTargetReceiptWorkflowSchema() {
     KEY ix_rejected_return_item(source_database,receipt_item_id,returned_date),
     CONSTRAINT fk_rejected_return_receipt FOREIGN KEY (receipt_id) REFERENCES procurement_receipts(id) ON DELETE CASCADE,
     CONSTRAINT fk_rejected_return_item FOREIGN KEY (receipt_item_id) REFERENCES procurement_receipt_items(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS procurement_receipt_pricing_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL DEFAULT 'SH', company_id VARCHAR(60) NOT NULL DEFAULT 'SH',
+    source_system VARCHAR(60) NOT NULL DEFAULT 'iSM', source_database VARCHAR(30) NOT NULL DEFAULT 'SH',
+    receipt_id BIGINT UNSIGNED NOT NULL, receipt_item_id BIGINT UNSIGNED NOT NULL,
+    event_kind VARCHAR(30) NOT NULL, before_qty_priced DECIMAL(24,6) NOT NULL DEFAULT 0,
+    after_qty_priced DECIMAL(24,6) NOT NULL DEFAULT 0, before_unit_cost DECIMAL(24,6) NOT NULL DEFAULT 0,
+    after_unit_cost DECIMAL(24,6) NOT NULL DEFAULT 0, before_freight_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    after_freight_amount DECIMAL(24,6) NOT NULL DEFAULT 0, before_insurance_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    after_insurance_amount DECIMAL(24,6) NOT NULL DEFAULT 0, before_other_expense_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    after_other_expense_amount DECIMAL(24,6) NOT NULL DEFAULT 0, reason VARCHAR(500) NOT NULL,
+    created_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_receipt_pricing_event_scope(source_database,receipt_id,receipt_item_id,created_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
   await pool.query("ALTER TABLE procurement_receipts MODIFY COLUMN status ENUM('draft','pending_inspection','accepted','partially_accepted','rejected','posted','voided') NOT NULL DEFAULT 'draft'");
 }
