@@ -34,6 +34,17 @@ function periodRange(value) {
   return { period, from: `${year}-${String(month).padStart(2, '0')}-01`, to: `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}` };
 }
 
+function statementMonthRange(fromDate, toDate) {
+  const from = new Date(`${fromDate}T00:00:00Z`);
+  const to = new Date(`${toDate}T00:00:00Z`);
+  const lastDay = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth() + 1, 0)).getUTCDate();
+  if (from.getUTCFullYear() !== to.getUTCFullYear() || from.getUTCDate() !== 1 || to.getUTCDate() !== lastDay) return null;
+  const fromMonth = String(from.getUTCMonth() + 1).padStart(2, '0');
+  const toMonth = String(to.getUTCMonth() + 1).padStart(2, '0');
+  const previousMonth = String(Math.max(from.getUTCMonth(), 0)).padStart(2, '0');
+  return { year: String(from.getUTCFullYear()), fromMonth, toMonth, previousMonth };
+}
+
 function sourceCompany(sourceName) {
   return text(sourceDatabases[sourceName]?.company_id || sourceName).toUpperCase();
 }
@@ -249,12 +260,25 @@ export function registerSourceFinancialPreviewRoutes(app) {
       const validHeader = `t.COMPANY=? AND t.TA003 REGEXP '^[0-9]{8}$' AND t.TA003 BETWEEN ? AND ? AND TRIM(COALESCE(t.TA010,''))='Y' AND TRIM(COALESCE(t.TA011,''))='Y' AND COALESCE(NULLIF(TRIM(t.TA016),''),'N')<>'Y'`;
       const currencyFilter = currencyCode ? ' AND TRIM(COALESCE(b.TB013,\'\'))=?' : '';
       const currencyParams = currencyCode ? [currencyCode] : [];
-      const [headerResult, lineResult, lineResultAll, profitResult, balanceResult, sourceLinesResult, cashBalanceResult, periodResult, currencyResult] = await Promise.all([
-        connection.query(`SELECT COUNT(*) valid_voucher_count,COALESCE(SUM(t.TA007),0) header_debit,COALESCE(SUM(t.TA008),0) header_credit FROM actta t WHERE ${validHeader}`, [sourceCompanyCode, fromKey, toKey]),
-        connection.query(`SELECT COUNT(*) line_count,COUNT(DISTINCT CONCAT(TRIM(b.TB001),'/',TRIM(b.TB002))) voucher_count,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='1' THEN ${amountExpression} ELSE 0 END),0) debit_amount,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='-1' THEN ${amountExpression} ELSE 0 END),0) credit_amount FROM actta t JOIN acttb b ON b.COMPANY=t.COMPANY AND b.TB001=t.TA001 AND b.TB002=t.TA002 WHERE ${validHeader}${currencyFilter}`, [sourceCompanyCode, fromKey, toKey, ...currencyParams]),
-        connection.query(`SELECT COUNT(*) line_count,COUNT(DISTINCT CONCAT(TRIM(b.TB001),'/',TRIM(b.TB002))) voucher_count,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='1' THEN ${amountExpression} ELSE 0 END),0) debit_amount,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='-1' THEN ${amountExpression} ELSE 0 END),0) credit_amount FROM actta t JOIN acttb b ON b.COMPANY=t.COMPANY AND b.TB001=t.TA001 AND b.TB002=t.TA002 WHERE ${validHeader}`, [sourceCompanyCode, fromKey, toKey]),
-        connection.query(`SELECT a.COMPANY company, a.MA001 account_code,MAX(a.MA002) parent_code,MAX(a.MA003) account_name,MAX(a.MA005) account_nature,MAX(a.MA006) statement_class,MAX(a.MA007) report_direction,COUNT(DISTINCT CONCAT(TRIM(t.TA001),'/',TRIM(t.TA002))) voucher_count,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='1' THEN ${amountExpression} ELSE 0 END),0) debit_amount,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='-1' THEN ${amountExpression} ELSE 0 END),0) credit_amount FROM actma a JOIN acttb b ON b.COMPANY=a.COMPANY AND b.TB005=a.MA001 JOIN actta t ON t.COMPANY=b.COMPANY AND t.TA001=b.TB001 AND t.TA002=b.TB002 WHERE ${validHeader}${currencyFilter} AND TRIM(a.MA006)='2' GROUP BY a.COMPANY,a.MA001 ORDER BY a.MA001`, [sourceCompanyCode, fromKey, toKey, ...currencyParams]),
-        connection.query(`SELECT a.COMPANY company,a.MA001 account_code,MAX(a.MA002) parent_code,MAX(a.MA003) account_name,MAX(a.MA005) account_nature,MAX(a.MA006) statement_class,MAX(a.MA007) report_direction,COUNT(DISTINCT CONCAT(TRIM(t.TA001),'/',TRIM(t.TA002))) voucher_count,
+      const monthlyScope = sourceTables.has('actmb') ? statementMonthRange(fromDate, toDate) : null;
+      const monthlyCurrencyFilter = currencyCode ? ' AND TRIM(COALESCE(m.MB008,\'\'))=?' : '';
+      const monthlyCurrencyParams = currencyCode ? [currencyCode] : [];
+      const profitQuery = monthlyScope
+        ? [
+          `SELECT m.COMPANY company,m.MB002 fiscal_year,a.MA001 account_code,MAX(a.MA002) parent_code,MAX(a.MA003) account_name,MAX(a.MA005) account_nature,MAX(a.MA006) statement_class,MAX(a.MA007) report_direction,COALESCE(SUM(COALESCE(m.MB006,0)+COALESCE(m.MB007,0)),0) voucher_count,COALESCE(SUM(m.MB004),0) debit_amount,COALESCE(SUM(m.MB005),0) credit_amount,'ACTMA／ACTMB' source_table,CONCAT('ACTMB:',TRIM(m.COMPANY),':',TRIM(m.MB002),':',TRIM(a.MA001)) source_key FROM actmb m JOIN actma a ON a.COMPANY=m.COMPANY AND a.MA001=m.MB001 WHERE m.COMPANY=? AND m.MB002=? AND m.MB003 BETWEEN '${monthlyScope.fromMonth}' AND '${monthlyScope.toMonth}'${monthlyCurrencyFilter} AND TRIM(a.MA006)='2' AND TRIM(a.MA008) IN ('2','3') GROUP BY m.COMPANY,m.MB002,a.MA001 ORDER BY a.MA001`,
+          [sourceCompanyCode, monthlyScope.year, ...monthlyCurrencyParams],
+        ]
+        : [
+          `SELECT a.COMPANY company, a.MA001 account_code,MAX(a.MA002) parent_code,MAX(a.MA003) account_name,MAX(a.MA005) account_nature,MAX(a.MA006) statement_class,MAX(a.MA007) report_direction,COUNT(DISTINCT CONCAT(TRIM(t.TA001),'/',TRIM(t.TA002))) voucher_count,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='1' THEN ${amountExpression} ELSE 0 END),0) debit_amount,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='-1' THEN ${amountExpression} ELSE 0 END),0) credit_amount FROM actma a JOIN acttb b ON b.COMPANY=a.COMPANY AND b.TB005=a.MA001 JOIN actta t ON t.COMPANY=b.COMPANY AND t.TA001=b.TB001 AND t.TA002=b.TB002 WHERE ${validHeader}${currencyFilter} AND TRIM(a.MA006)='2' GROUP BY a.COMPANY,a.MA001 ORDER BY a.MA001`,
+          [sourceCompanyCode, fromKey, toKey, ...currencyParams],
+        ];
+      const balanceQuery = monthlyScope
+        ? [
+          `SELECT m.COMPANY company,m.MB002 fiscal_year,a.MA001 account_code,MAX(a.MA002) parent_code,MAX(a.MA003) account_name,MAX(a.MA005) account_nature,MAX(a.MA006) statement_class,MAX(a.MA007) report_direction,COALESCE(SUM(CASE WHEN m.MB003 BETWEEN '${monthlyScope.fromMonth}' AND '${monthlyScope.toMonth}' THEN COALESCE(m.MB006,0)+COALESCE(m.MB007,0) ELSE 0 END),0) voucher_count,COALESCE(SUM(CASE WHEN m.MB003='00' OR m.MB003 BETWEEN '01' AND '${monthlyScope.previousMonth}' THEN m.MB004 ELSE 0 END),0) opening_debit,COALESCE(SUM(CASE WHEN m.MB003='00' OR m.MB003 BETWEEN '01' AND '${monthlyScope.previousMonth}' THEN m.MB005 ELSE 0 END),0) opening_credit,COALESCE(SUM(CASE WHEN m.MB003 BETWEEN '${monthlyScope.fromMonth}' AND '${monthlyScope.toMonth}' THEN m.MB004 ELSE 0 END),0) period_debit,COALESCE(SUM(CASE WHEN m.MB003 BETWEEN '${monthlyScope.fromMonth}' AND '${monthlyScope.toMonth}' THEN m.MB005 ELSE 0 END),0) period_credit,COALESCE(SUM(CASE WHEN m.MB003='00' OR m.MB003 BETWEEN '01' AND '${monthlyScope.toMonth}' THEN m.MB004 ELSE 0 END),0) ending_debit,COALESCE(SUM(CASE WHEN m.MB003='00' OR m.MB003 BETWEEN '01' AND '${monthlyScope.toMonth}' THEN m.MB005 ELSE 0 END),0) ending_credit,'ACTMA／ACTMB' source_table,CONCAT('ACTMB:',TRIM(m.COMPANY),':',TRIM(m.MB002),':',TRIM(a.MA001)) source_key FROM actmb m JOIN actma a ON a.COMPANY=m.COMPANY AND a.MA001=m.MB001 WHERE m.COMPANY=? AND m.MB002=? AND (m.MB003='00' OR m.MB003 BETWEEN '01' AND '${monthlyScope.toMonth}')${monthlyCurrencyFilter} AND TRIM(a.MA006)='1' AND TRIM(a.MA008) IN ('2','3') GROUP BY m.COMPANY,m.MB002,a.MA001 ORDER BY a.MA001`,
+          [sourceCompanyCode, monthlyScope.year, ...monthlyCurrencyParams],
+        ]
+        : [
+          `SELECT a.COMPANY company,a.MA001 account_code,MAX(a.MA002) parent_code,MAX(a.MA003) account_name,MAX(a.MA005) account_nature,MAX(a.MA006) statement_class,MAX(a.MA007) report_direction,COUNT(DISTINCT CONCAT(TRIM(t.TA001),'/',TRIM(t.TA002))) voucher_count,
             COALESCE(SUM(CASE WHEN t.TA003<? AND TRIM(b.TB004)='1' THEN ${amountExpression} ELSE 0 END),0) opening_debit,
             COALESCE(SUM(CASE WHEN t.TA003<? AND TRIM(b.TB004)='-1' THEN ${amountExpression} ELSE 0 END),0) opening_credit,
             COALESCE(SUM(CASE WHEN t.TA003 BETWEEN ? AND ? AND TRIM(b.TB004)='1' THEN ${amountExpression} ELSE 0 END),0) period_debit,
@@ -263,7 +287,15 @@ export function registerSourceFinancialPreviewRoutes(app) {
             COALESCE(SUM(CASE WHEN t.TA003<=? AND TRIM(b.TB004)='-1' THEN ${amountExpression} ELSE 0 END),0) ending_credit
           FROM actma a JOIN acttb b ON b.COMPANY=a.COMPANY AND b.TB005=a.MA001 JOIN actta t ON t.COMPANY=b.COMPANY AND t.TA001=b.TB001 AND t.TA002=b.TB002
           WHERE t.COMPANY=? AND t.TA003 REGEXP '^[0-9]{8}$' AND t.TA003<=? AND TRIM(COALESCE(t.TA010,''))='Y' AND TRIM(COALESCE(t.TA011,''))='Y' AND COALESCE(NULLIF(TRIM(t.TA016),''),'N')<>'Y'${currencyCode ? ' AND TRIM(COALESCE(b.TB013,\'\'))=?' : ''} AND TRIM(a.MA006)='1'
-          GROUP BY a.COMPANY,a.MA001 ORDER BY a.MA001`, [fromKey, fromKey, fromKey, toKey, fromKey, toKey, toKey, toKey, sourceCompanyCode, toKey, ...currencyParams]),
+          GROUP BY a.COMPANY,a.MA001 ORDER BY a.MA001`,
+          [fromKey, fromKey, fromKey, toKey, fromKey, toKey, toKey, toKey, sourceCompanyCode, toKey, ...currencyParams],
+        ];
+      const [headerResult, lineResult, lineResultAll, profitResult, balanceResult, sourceLinesResult, cashBalanceResult, periodResult, currencyResult] = await Promise.all([
+        connection.query(`SELECT COUNT(*) valid_voucher_count,COALESCE(SUM(t.TA007),0) header_debit,COALESCE(SUM(t.TA008),0) header_credit FROM actta t WHERE ${validHeader}`, [sourceCompanyCode, fromKey, toKey]),
+        connection.query(`SELECT COUNT(*) line_count,COUNT(DISTINCT CONCAT(TRIM(b.TB001),'/',TRIM(b.TB002))) voucher_count,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='1' THEN ${amountExpression} ELSE 0 END),0) debit_amount,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='-1' THEN ${amountExpression} ELSE 0 END),0) credit_amount FROM actta t JOIN acttb b ON b.COMPANY=t.COMPANY AND b.TB001=t.TA001 AND b.TB002=t.TA002 WHERE ${validHeader}${currencyFilter}`, [sourceCompanyCode, fromKey, toKey, ...currencyParams]),
+        connection.query(`SELECT COUNT(*) line_count,COUNT(DISTINCT CONCAT(TRIM(b.TB001),'/',TRIM(b.TB002))) voucher_count,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='1' THEN ${amountExpression} ELSE 0 END),0) debit_amount,COALESCE(SUM(CASE WHEN TRIM(b.TB004)='-1' THEN ${amountExpression} ELSE 0 END),0) credit_amount FROM actta t JOIN acttb b ON b.COMPANY=t.COMPANY AND b.TB001=t.TA001 AND b.TB002=t.TA002 WHERE ${validHeader}`, [sourceCompanyCode, fromKey, toKey]),
+        connection.query(profitQuery[0], profitQuery[1]),
+        connection.query(balanceQuery[0], balanceQuery[1]),
         connection.query(`SELECT TRIM(t.TA001) doc_type,TRIM(t.TA002) doc_no,TRIM(t.TA003) doc_date,TRIM(b.TB003) line_no,TRIM(b.TB005) account_code,TRIM(a.MA003) account_name,TRIM(a.MA006) statement_class,TRIM(a.MA007) report_direction,TRIM(b.TB004) dc,${amountExpression} amount,TRIM(b.TB013) currency_code,TRIM(b.TB014) exchange_rate FROM actta t JOIN acttb b ON b.COMPANY=t.COMPANY AND b.TB001=t.TA001 AND b.TB002=t.TA002 LEFT JOIN actma a ON a.COMPANY=b.COMPANY AND a.MA001=b.TB005 WHERE ${validHeader}${currencyFilter} ORDER BY t.TA003,t.TA001,t.TA002,b.TB003`, [sourceCompanyCode, fromKey, toKey, ...currencyParams]),
         connection.query(`SELECT TRIM(b.TB005) account_code,MAX(TRIM(a.MA003)) account_name,COALESCE(SUM(CASE WHEN t.TA003<? AND TRIM(b.TB004)='1' THEN ${amountExpression} WHEN t.TA003<? AND TRIM(b.TB004)='-1' THEN -${amountExpression} ELSE 0 END),0) opening_balance,COALESCE(SUM(CASE WHEN t.TA003<=? AND TRIM(b.TB004)='1' THEN ${amountExpression} WHEN t.TA003<=? AND TRIM(b.TB004)='-1' THEN -${amountExpression} ELSE 0 END),0) ending_balance FROM actta t JOIN acttb b ON b.COMPANY=t.COMPANY AND b.TB001=t.TA001 AND b.TB002=t.TA002 LEFT JOIN actma a ON a.COMPANY=b.COMPANY AND a.MA001=b.TB005 WHERE ${validHeader.replace('t.TA003 BETWEEN ? AND ?', 't.TA003<=?')} ${currencyCode ? ' AND TRIM(COALESCE(b.TB013,\'\'))=?' : ''} GROUP BY b.TB005`, [fromKey, fromKey, toKey, toKey, sourceCompanyCode, toKey, ...currencyParams]),
         connection.query(`SELECT DISTINCT CONCAT(LEFT(TRIM(TA003),4),'-',SUBSTRING(TRIM(TA003),5,2)) period_code FROM actta WHERE COMPANY=? AND TA003 REGEXP '^[0-9]{8}$' ORDER BY period_code`, [sourceCompanyCode]),
