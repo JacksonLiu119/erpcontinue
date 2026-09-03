@@ -1085,7 +1085,7 @@ export function ensureProcurementSchema() {
       for (const role of defaultRoles) {
         await pool.query('INSERT IGNORE INTO access_roles (role_code, role_name, description, is_system) VALUES (?, ?, ?, ?)', role);
       }
-      const accessFeatures = ['sales-document-types','sales-quotations','sales-orders','sales-order-changes','sales-shipments','sales-returns','sales-progress','sales-open-orders','accounting-general-ledger','accounting-financial-preview','accounting-drafts','accounting-periods','accounting-auto-rules','accounting-clearing','accounting-opening-balances','accounting-year-close','bank-ledger','finance-bookkeeping','finance-cash','finance-reconcile','operations-health','operations-reports','sales-flow-audit','purchase-flow-audit','architecture-flow','access-control','import-monitor','data-quality', 'basicdata', 'warehouses', 'departments', 'employees', 'source-customers', 'source-suppliers', 'inventory-opening', 'inventory-document-types', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-reversals', 'inventory-new-ledger', 'inventory-new-balance', 'procurement-document-types', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'receipt-arrival', 'receipt-entry', 'receipt-inspection', 'receipt-rejected-return', 'receipt-posting', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts'];
+      const accessFeatures = ['sales-document-types','sales-quotations','sales-orders','sales-order-changes','sales-shipments','sales-returns','sales-progress','sales-open-orders','accounting-general-ledger','accounting-financial-preview','accounting-drafts','accounting-periods','accounting-auto-rules','accounting-clearing','accounting-opening-balances','accounting-year-close','bank-ledger','finance-bookkeeping','finance-cash','finance-reconcile','operations-health','operations-reports','sales-flow-audit','purchase-flow-audit','flow-audit-recommendations','architecture-flow','access-control','import-monitor','data-quality', 'basicdata', 'warehouses', 'departments', 'employees', 'source-customers', 'source-suppliers', 'inventory-opening', 'inventory-document-types', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-reversals', 'inventory-new-ledger', 'inventory-new-balance', 'procurement-document-types', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'receipt-arrival', 'receipt-entry', 'receipt-inspection', 'receipt-rejected-return', 'receipt-posting', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts'];
       await pool.query("DELETE FROM access_role_permissions WHERE feature_code IN ('inventory-detail','inventory-ledger','inventory-balance','inventory-movement-stats','department-movement-stats')");
       const [[admin]] = await pool.query("SELECT id FROM access_roles WHERE role_code='ADMIN'");
       for (const feature of accessFeatures) {
@@ -1095,10 +1095,10 @@ export function ensureProcurementSchema() {
       }
       const initialRoleFeatures = {
         REQUESTER: ['basicdata', 'requisition-entry', 'architecture-flow'],
-        PURCHASER: ['basicdata', 'procurement-document-types', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'receipt-arrival', 'receipt-posting', 'purchase-returns', 'receipt-rejected-return', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts', 'purchase-flow-audit', 'operations-reports', 'architecture-flow'],
+        PURCHASER: ['basicdata', 'procurement-document-types', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'receipt-arrival', 'receipt-posting', 'purchase-returns', 'receipt-rejected-return', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts', 'purchase-flow-audit', 'flow-audit-recommendations', 'operations-reports', 'architecture-flow'],
         WAREHOUSE: ['inventory-opening', 'inventory-document-types', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-reversals', 'inventory-new-ledger', 'inventory-new-balance', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'receipt-arrival', 'receipt-entry', 'receipt-inspection', 'receipt-rejected-return', 'receipt-posting', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts', 'operations-reports'],
-        FINANCE: ['basicdata', 'purchase-receipts', 'accounting-drafts', 'accounting-periods', 'accounting-auto-rules', 'accounting-general-ledger', 'accounting-financial-preview', 'accounting-clearing', 'accounting-opening-balances', 'accounting-year-close', 'bank-ledger', 'finance-bookkeeping', 'finance-cash', 'finance-reconcile', 'operations-health', 'operations-reports', 'sales-flow-audit', 'purchase-flow-audit', 'architecture-flow'],
-        VIEWER: ['basicdata', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'purchase-receipts', 'operations-health', 'operations-reports', 'architecture-flow']
+        FINANCE: ['basicdata', 'purchase-receipts', 'accounting-drafts', 'accounting-periods', 'accounting-auto-rules', 'accounting-general-ledger', 'accounting-financial-preview', 'accounting-clearing', 'accounting-opening-balances', 'accounting-year-close', 'bank-ledger', 'finance-bookkeeping', 'finance-cash', 'finance-reconcile', 'operations-health', 'operations-reports', 'sales-flow-audit', 'purchase-flow-audit', 'flow-audit-recommendations', 'architecture-flow'],
+        VIEWER: ['basicdata', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'purchase-receipts', 'operations-health', 'operations-reports', 'sales-flow-audit', 'purchase-flow-audit', 'flow-audit-recommendations', 'architecture-flow']
       };
       for (const [roleCode, features] of Object.entries(initialRoleFeatures)) {
         const [[role]] = await pool.query('SELECT id FROM access_roles WHERE role_code=?', [roleCode]);
@@ -1107,6 +1107,15 @@ export function ensureProcurementSchema() {
             (role_id, feature_code, can_view, can_create, can_update, can_delete, can_approve)
             VALUES (?, ?, 1, ?, ?, 0, ?)`, [role.id, feature, Number(feature.includes('entry')), Number(feature.includes('entry')), Number(feature === 'purchase-order-entry')]);
         }
+      }
+      // 新增的稽核建議權限要同步補到既有角色；不改變既有角色的其他權限。
+      for (const roleCode of ['PURCHASER', 'FINANCE', 'VIEWER']) {
+        const [[role]] = await pool.query('SELECT id FROM access_roles WHERE role_code=?', [roleCode]);
+        if (role) await pool.query(`INSERT INTO access_role_permissions
+          (role_id,feature_code,can_view,can_create,can_update,can_delete,can_approve)
+          VALUES(?,'flow-audit-recommendations',1,1,1,0,?)
+          ON DUPLICATE KEY UPDATE can_view=1,can_create=1,can_update=1,can_approve=VALUES(can_approve)`,
+          [role.id, roleCode === 'FINANCE' ? 1 : 0]);
       }
       const elevatedRoleFeatures = {
         PURCHASER: ['procurement-document-types', 'requisition-maintenance', 'purchase-order-changes', 'purchase-returns', 'receipt-rejected-return'],
@@ -1902,6 +1911,49 @@ export async function ensureTargetFinanceWorkflowSchema() {
     UNIQUE KEY uq_finance_cross_offset(tenant_id,company_id,source_system,source_database,offset_no),
     KEY ix_finance_cross_offset_date(source_database,offset_date,status),
     KEY ix_finance_cross_offset_party(source_database,customer_code,supplier_code)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  // R14：流程稽核要能把跨模組異常轉成「待核准更正建議」，但建議本身
+  // 只寫入目標 ERP，不直接修改 SH／SC 原始唯讀資料。source_key 以流程、
+  // 單據與明細組成，讓同一異常可重跑而不重複建立；核准後仍須由受控更正
+  // 作業執行，這張表不代表已經套用更正。
+  await pool.query(`CREATE TABLE IF NOT EXISTS flow_audit_recommendations (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    generation_key VARCHAR(80) NULL, flow_kind VARCHAR(30) NOT NULL,
+    issue_code VARCHAR(80) NOT NULL, source_kind VARCHAR(60) NOT NULL,
+    source_key VARCHAR(255) NOT NULL, source_id BIGINT UNSIGNED NULL,
+    source_item_id BIGINT UNSIGNED NULL, source_document_no VARCHAR(120) NULL,
+    source_date DATE NULL, expected_date DATE NULL, due_date DATE NULL,
+    party_code VARCHAR(60) NULL, item_code VARCHAR(60) NULL, warehouse_code VARCHAR(60) NULL,
+    currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD', overdue_days INT NOT NULL DEFAULT 0,
+    expected_overdue_days INT NOT NULL DEFAULT 0, aging_bucket VARCHAR(60) NULL,
+    remaining_quantity DECIMAL(24,6) NOT NULL DEFAULT 0,
+    remaining_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    financial_impact DECIMAL(24,6) NOT NULL DEFAULT 0,
+    reason VARCHAR(1000) NOT NULL, proposed_action VARCHAR(1000) NOT NULL,
+    status ENUM('pending','approved','rejected','applied','voided') NOT NULL DEFAULT 'pending',
+    decision_note VARCHAR(1000) NULL, payload_json JSON NULL,
+    created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL,
+    approved_at DATETIME NULL, applied_by BIGINT UNSIGNED NULL, applied_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_flow_audit_recommendation(tenant_id,company_id,source_system,source_database,source_key,issue_code),
+    KEY ix_flow_audit_recommendation_filter(tenant_id,company_id,source_system,source_database,status,source_date),
+    KEY ix_flow_audit_recommendation_flow(source_database,flow_kind,issue_code)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS flow_audit_recommendation_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    recommendation_id BIGINT UNSIGNED NOT NULL,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    event_kind VARCHAR(30) NOT NULL, from_status VARCHAR(20) NULL,
+    to_status VARCHAR(20) NOT NULL, note VARCHAR(1000) NULL,
+    actor_id BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_flow_audit_recommendation_event(recommendation_id,created_at,id),
+    KEY ix_flow_audit_recommendation_event_source(source_database,created_at),
+    CONSTRAINT fk_flow_audit_recommendation_event FOREIGN KEY(recommendation_id)
+      REFERENCES flow_audit_recommendations(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
   await pool.query(`CREATE TABLE IF NOT EXISTS accounting_drafts (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,

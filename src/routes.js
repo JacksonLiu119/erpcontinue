@@ -3264,12 +3264,54 @@ function flowDateRange(query) {
   const from = validDate(query.from_date || query.date_from || '2000-01-01');
   const to = validDate(query.to_date || query.date_to || today);
   if (from > to) throw badRequest('日期起日不可晚於迄日');
-  return { from, to };
+  const asOf = validDate(query.as_of_date || query.as_of || to);
+  return { from, to, asOf };
 }
 
 function flowAmount(value) {
   const number = Number(value || 0);
   return Number.isFinite(number) ? number : 0;
+}
+
+const FLOW_AUDIT_EPSILON = 0.000001;
+
+function flowDateValue(value) {
+  if (!value) return null;
+  const text = value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+}
+
+function flowEarliestDate(...values) {
+  return values.map(flowDateValue).filter(Boolean).sort()[0] || null;
+}
+
+function flowDaysLate(date, asOf) {
+  const due = flowDateValue(date);
+  const end = flowDateValue(asOf);
+  if (!due || !end || due >= end) return 0;
+  return Math.floor((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${due}T00:00:00Z`)) / 86400000);
+}
+
+function flowAgingBucket(days) {
+  const value = Math.max(Number(days) || 0, 0);
+  if (!value) return '未逾期';
+  if (value <= 30) return '逾期 1–30 天';
+  if (value <= 60) return '逾期 31–60 天';
+  if (value <= 90) return '逾期 61–90 天';
+  return '逾期 90 天以上';
+}
+
+function flowMergeText(...values) {
+  return [...new Set(values.flatMap(value => String(value || '').split('、')).map(value => value.trim()).filter(Boolean))].join('、');
+}
+
+function flowAuditContext(sourceDatabase) {
+  const source = sourceDatabases[String(sourceDatabase || '').toUpperCase()];
+  if (!source) throw badRequest(`找不到資料來源：${sourceDatabase}`);
+  return {
+    tenant_id: source.tenant_id || 'default', company_id: source.company_id || source.key,
+    source_system: source.source_system || source.adapter_code || 'iSM', source_database: String(source.key).toUpperCase()
+  };
 }
 
 function salesReturnAmount(row) {
@@ -3287,7 +3329,8 @@ async function loadFinanceTraceMap(sourceDatabase, accountType, sourceKinds, sou
         THEN oi.settled_amount * vs.allocated_amount / v.total_amount ELSE 0 END) collected_amount,
       GROUP_CONCAT(DISTINCT CASE WHEN v.status<>'voided' THEN v.voucher_no END ORDER BY v.voucher_date,v.id SEPARATOR '、') voucher_nos,
       GROUP_CONCAT(DISTINCT CASE WHEN v.status<>'voided' THEN v.status END ORDER BY v.status SEPARATOR '、') voucher_statuses,
-      GROUP_CONCAT(DISTINCT CASE WHEN v.status<>'voided' THEN COALESCE(oi.status,'未立帳') END ORDER BY oi.status SEPARATOR '、') open_item_statuses
+      GROUP_CONCAT(DISTINCT CASE WHEN v.status<>'voided' THEN COALESCE(oi.status,'未立帳') END ORDER BY oi.status SEPARATOR '、') open_item_statuses,
+      MIN(CASE WHEN v.status<>'voided' THEN oi.due_date END) due_date
     FROM finance_voucher_sources vs
     JOIN finance_vouchers v ON v.id=vs.voucher_id AND v.source_database=? AND v.account_type=?
     LEFT JOIN finance_open_items oi ON oi.source_kind='finance_voucher' AND oi.source_document_id=v.id
@@ -3308,7 +3351,7 @@ async function loadFinanceTraceMap(sourceDatabase, accountType, sourceKinds, sou
     [sourceDatabase, accountType, sourceKinds, sourceItemIds]);
   const settlementMap=new Map(settlements.map(row=>[row.source_kind+':'+row.source_document_item_id,row]));
   const emptyTrace=()=>({
-    billed:0,collected:0,voucher_nos:'',voucher_statuses:'',open_item_statuses:'',settlement_nos:'',settlement_statuses:'',
+    billed:0,collected:0,due_date:null,voucher_nos:'',voucher_statuses:'',open_item_statuses:'',settlement_nos:'',settlement_statuses:'',
     return_amount:0,return_offset_amount:0,return_credit_amount:0,return_refund_amount:0,return_pending_amount:0,
     customer_credit_balance:0,customer_credit_original:0,customer_credit_applied:0,return_adjustment_statuses:''
   });
@@ -3323,14 +3366,14 @@ async function loadFinanceTraceMap(sourceDatabase, accountType, sourceKinds, sou
       ...emptyTrace(),
       billed:flowAmount(row.billed_amount),collected:flowAmount(row.collected_amount),
       voucher_nos:row.voucher_nos||'',voucher_statuses:row.voucher_statuses||'',
-      open_item_statuses:row.open_item_statuses||'',settlement_nos:settlement.settlement_nos||'',
+      open_item_statuses:row.open_item_statuses||'',due_date:flowDateValue(row.due_date),settlement_nos:settlement.settlement_nos||'',
       settlement_statuses:settlement.settlement_statuses||''
     });
   }
   if(sourceKinds.includes('shipment')){
     const context=salesReturnFinanceContext(sourceDatabase);
     const[directRows]=await pool.query(`SELECT si.id shipment_item_id,oi.id open_item_id,
-        oi.original_amount,oi.settled_amount,oi.status,
+        oi.original_amount,oi.settled_amount,oi.status,oi.due_date,
         CASE WHEN COALESCE(totals.total_amount,0)>0
           THEN GREATEST(si.quantity*si.unit_price-COALESCE(si.allowance_amount,0),0)/totals.total_amount ELSE 1 END line_ratio,
         GROUP_CONCAT(DISTINCT oi.document_no ORDER BY oi.document_date,oi.id SEPARATOR '、') direct_open_item_nos,
@@ -3345,7 +3388,7 @@ async function loadFinanceTraceMap(sourceDatabase, accountType, sourceKinds, sou
       WHERE oi.tenant_id=? AND oi.company_id=? AND oi.source_system=? AND oi.source_database=?
         AND oi.account_type=? AND oi.source_kind='shipment'
         AND oi.status IN ('approved','open','partial','settled')
-      GROUP BY si.id,oi.id,oi.original_amount,oi.settled_amount,oi.status,totals.total_amount`,
+      GROUP BY si.id,oi.id,oi.original_amount,oi.settled_amount,oi.status,oi.due_date,totals.total_amount`,
       [sourceDatabase,sourceItemIds,context.tenant_id,context.company_id,context.source_system,sourceDatabase,accountType]);
     for(const row of directRows){
       const key='shipment:'+row.shipment_item_id,current=traceMap.get(key)||emptyTrace(),ratio=Number(row.line_ratio||1)||1;
@@ -3353,6 +3396,7 @@ async function loadFinanceTraceMap(sourceDatabase, accountType, sourceKinds, sou
       current.collected+=flowAmount(row.settled_amount)*ratio;
       current.voucher_nos=mergeList(current.voucher_nos,row.direct_open_item_nos);
       current.open_item_statuses=mergeList(current.open_item_statuses,row.direct_open_item_statuses);
+      current.due_date=flowEarliestDate(current.due_date,row.due_date);
       traceMap.set(key,current);
     }
     const[directSettlements]=await pool.query(`SELECT si.id shipment_item_id,
@@ -3437,15 +3481,103 @@ async function loadSupplementalInventoryAudit(sourceDatabase, from, to, limit) {
     return {
       root_kind: 'inventory_supplement', root_type: '合法補充／暫出入／轉撥起點', is_legal_root: 1, is_orphan: 0,
       source: `${name} ${row.document_no}`, document_no: row.document_no, document_type: row.document_type,
+      source_kind: 'inventory_supplement', source_document_id: Number(row.document_id), source_document_item_id: Number(row.item_id),
+      source_document_no: row.document_no, source_date: row.document_date, expected_date: null, due_date: null,
       document_date: row.document_date, item_code: row.item_code, item_name: row.item_name, unit: row.unit,
+      warehouse_code: row.from_warehouse_code || row.to_warehouse_code || '', currency_code: 'TWD',
       movement_kind: row.movement_kind, movement_status: status, from_warehouse_code: row.from_warehouse_code || '',
       to_warehouse_code: row.to_warehouse_code || '', counterparty: row.counterparty || '', quantity,
       quantity_delta: row.movement_kind === 'transfer' ? 0 : ['return', 'adjust_in', 'temp_in', 'temp_out_return'].includes(row.movement_kind) ? quantity : -quantity,
       amount: row.movement_kind === 'cost_adjust' ? flowAmount(row.amount_delta) : quantity * flowAmount(row.unit_cost),
+      remaining_quantity: 0, remaining_amount: 0, financial_impact: 0,
       next_stage: nextStage, exception_reason: exception,
       audit_status: exception ? `需處理：${exception}` : '流程完成', note: row.reason || row.note || ''
     };
   });
+}
+
+function flowRowSourceKey(row, flowKind) {
+  const sourceKind = row.source_kind || row.root_kind || `${flowKind}_flow`;
+  const sourceId = row.source_document_id || row.order_id || row.purchase_order_id || row.shipment_id || row.receipt_id || row.return_id || row.quote_id || row.requisition_id || row.document_id || '';
+  const itemId = row.source_document_item_id || row.order_item_id || row.purchase_order_item_id || row.shipment_item_id || row.receipt_item_id || row.return_item_id || row.quote_item_id || row.requisition_item_id || row.item_id || '';
+  return `${flowKind}:${sourceKind}:${sourceId || row.source_document_no || row.source || 'unknown'}:${itemId || row.item_code || ''}`;
+}
+
+function flowExpectedOverdue(row, asOf) {
+  const pendingQuantity = flowAmount(row.remaining_quantity) > FLOW_AUDIT_EPSILON
+    || flowAmount(row.pending_inspection_quantity) > FLOW_AUDIT_EPSILON
+    || flowAmount(row.pending_inventory_quantity) > FLOW_AUDIT_EPSILON
+    || flowAmount(row.quote_remaining_quantity) > FLOW_AUDIT_EPSILON
+    || flowAmount(row.requisition_remaining_quantity) > FLOW_AUDIT_EPSILON
+    || ['待轉訂單', '待轉採購', '待進貨', '待銷貨'].includes(row.next_stage);
+  return pendingQuantity ? flowDaysLate(row.expected_date, asOf) : 0;
+}
+
+function flowFinancialImpact(row, flowKind) {
+  if (flowKind === 'sales') {
+    return Math.max(flowAmount(row.unbilled_amount), 0)
+      + Math.max(flowAmount(row.uncollected_amount), 0)
+      + Math.max(flowAmount(row.return_pending_amount), 0)
+      + Math.max(flowAmount(row.customer_credit_balance), 0);
+  }
+  if (flowKind === 'procurement') {
+    return Math.max(flowAmount(row.unbilled_amount), 0) + Math.max(flowAmount(row.unpaid_amount), 0);
+  }
+  return Math.abs(flowAmount(row.amount_delta ?? row.amount));
+}
+
+function enrichFlowAuditResult(result, flowKind, asOf) {
+  const rows = [...(result.rows || []), ...(result.supplemental_rows || [])];
+  for (const row of rows) {
+    row.source_kind = row.source_kind || row.root_kind || `${flowKind}_flow`;
+    row.source_document_id = row.source_document_id || row.order_id || row.purchase_order_id || row.shipment_id || row.receipt_id || row.return_id || row.quote_id || row.requisition_id || row.document_id || null;
+    row.source_document_item_id = row.source_document_item_id || row.order_item_id || row.purchase_order_item_id || row.shipment_item_id || row.receipt_item_id || row.return_item_id || row.quote_item_id || row.requisition_item_id || row.item_id || null;
+    row.source_document_no = row.source_document_no || row.order_no || row.purchase_order_no || row.shipment_no || row.receipt_no || row.return_no || row.quote_no || row.requisition_no || row.document_no || row.source || null;
+    row.source_date = flowDateValue(row.source_date || row.order_date || row.document_date);
+    row.expected_date = flowDateValue(row.expected_date || row.item_expected_date || row.order_expected_date || row.quote_expected_date);
+    row.due_date = flowEarliestDate(row.due_date);
+    row.currency_code = row.currency_code || row.order_currency_code || row.quote_currency_code || 'TWD';
+    row.warehouse_code = row.warehouse_code || row.from_warehouse_code || row.to_warehouse_code || '';
+    row.remaining_amount = flowAmount(row.remaining_amount);
+    if (row.remaining_amount <= FLOW_AUDIT_EPSILON) {
+      if (flowKind === 'sales' && flowAmount(row.order_amount) > FLOW_AUDIT_EPSILON) row.remaining_amount = Math.max(flowAmount(row.order_amount) - flowAmount(row.delivered_amount), 0);
+      if (flowKind === 'procurement' && flowAmount(row.order_amount) > FLOW_AUDIT_EPSILON) row.remaining_amount = Math.max(flowAmount(row.order_amount) - flowAmount(row.received_amount), 0);
+      if (flowKind === 'sales' && flowAmount(row.quote_amount) > FLOW_AUDIT_EPSILON) row.remaining_amount = flowAmount(row.quote_amount);
+    }
+    row.expected_overdue_days = flowExpectedOverdue(row, asOf);
+    row.accounting_overdue_days = flowDaysLate(row.due_date, asOf);
+    row.overdue_days = Math.max(row.expected_overdue_days, row.accounting_overdue_days);
+    row.overdue = row.overdue_days > 0 ? 1 : 0;
+    row.overdue_basis = row.expected_overdue_days && row.accounting_overdue_days ? '交期／帳款'
+      : row.expected_overdue_days ? '交期／預計日' : row.accounting_overdue_days ? '帳款到期日' : '';
+    const pendingFinancial = flowFinancialImpact(row, flowKind);
+    row.financial_impact = flowAmount(row.financial_impact);
+    if (row.financial_impact <= FLOW_AUDIT_EPSILON) row.financial_impact = pendingFinancial;
+    row.aging_bucket = row.accounting_overdue_days || pendingFinancial > FLOW_AUDIT_EPSILON
+      ? flowAgingBucket(row.accounting_overdue_days)
+      : row.expected_overdue_days ? `交期逾期 ${row.expected_overdue_days} 天` : '無未結帳款';
+    const reasons = [row.exception_reason].filter(Boolean);
+    if (row.overdue_days > 0 && !reasons.some(value => String(value).includes('逾期'))) reasons.push(`${row.overdue_basis}逾期 ${row.overdue_days} 天`);
+    if (pendingFinancial > FLOW_AUDIT_EPSILON && !row.due_date && !String(row.exception_reason || '').includes('到期日')) reasons.push('未設定帳款到期日');
+    row.exception_reason = reasons.join('；');
+    if (row.exception_reason) row.audit_status = `需處理：${row.exception_reason}`;
+    row.source_key = flowRowSourceKey(row, flowKind);
+  }
+  const allRows = rows;
+  const summary = result.summary || {};
+  summary.overdue_count = allRows.filter(row => row.overdue).length;
+  summary.overdue_quantity = allRows.filter(row => row.overdue).reduce((sum, row) => sum + flowRecommendationRemainingQuantity(row), 0);
+  summary.overdue_amount = allRows.reduce((sum, row) => sum + (row.overdue ? flowAmount(row.financial_impact) : 0), 0);
+  summary.financial_impact = sumFlow(allRows, 'financial_impact');
+  summary.remaining_amount = sumFlow(allRows, 'remaining_amount');
+  summary.aging = allRows.reduce((out, row) => {
+    if (row.financial_impact > FLOW_AUDIT_EPSILON || row.overdue) out[row.aging_bucket] = (out[row.aging_bucket] || 0) + 1;
+    return out;
+  }, {});
+  summary.next_stage = allRows.reduce((out, row) => { out[row.next_stage] = (out[row.next_stage] || 0) + 1; return out; }, {});
+  summary.completed_count = allRows.filter(row => row.audit_status === '流程完成').length;
+  summary.exception_count = allRows.filter(row => row.audit_status !== '流程完成').length;
+  return { ...result, summary };
 }
 
 function flowNextStageSales(row) {
@@ -3499,11 +3631,11 @@ function flowExceptionPurchase(row) {
   return '';
 }
 
-async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
+async function buildSalesFlowAudit(sourceDatabase, from, to, limit, asOf = to) {
   const [orders] = await pool.query(`
-    SELECT d.id order_id,d.document_no order_no,d.document_type order_document_type,d.document_date order_date,d.customer_code,
+    SELECT d.id order_id,d.document_no order_no,d.document_type order_document_type,d.document_date order_date,d.customer_code,d.currency_code order_currency_code,
       d.status order_status,i.id order_item_id,i.line_no,i.item_code,i.item_name,i.unit,
-      i.quantity order_quantity,i.related_quantity,i.unit_price,i.expected_date,
+      i.quantity order_quantity,i.related_quantity,i.unit_price,i.expected_date,i.warehouse_code,
       q.document_no quote_no,q.document_date quote_date,q.status quote_status
     FROM sales_documents d
     JOIN sales_document_items i ON i.document_id=d.id
@@ -3513,8 +3645,8 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
     ORDER BY d.document_date DESC,d.id DESC,i.line_no
     LIMIT ?`, [sourceDatabase, from, to, limit]);
   const [unconvertedQuotes] = await pool.query(`
-    SELECT q.document_no quote_no,q.document_date quote_date,q.status quote_status,q.customer_code,
-      qi.id quote_item_id,qi.item_code,qi.item_name,qi.unit,qi.quantity quote_quantity,qi.unit_price,
+    SELECT q.id quote_id,q.document_no quote_no,q.document_date quote_date,q.status quote_status,q.customer_code,q.currency_code quote_currency_code,
+      qi.id quote_item_id,qi.item_code,qi.item_name,qi.unit,qi.quantity quote_quantity,qi.unit_price,qi.warehouse_code,qi.expected_date quote_expected_date,
       COALESCE((SELECT SUM(oi.quantity)
         FROM sales_document_items oi JOIN sales_documents od ON od.id=oi.document_id
         WHERE oi.source_item_id=qi.id AND od.source_database=? AND od.document_kind='sales_order'),0) linked_order_quantity
@@ -3526,12 +3658,12 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
     ORDER BY q.document_date DESC,q.id DESC,qi.line_no
     LIMIT ?`, [sourceDatabase, sourceDatabase, from, to, sourceDatabase, limit]);
   const [standaloneShipments] = await pool.query(`
-    SELECT i.id shipment_item_id,i.source_item_id order_item_id,oi.id source_item_exists,od.id source_order_id,
+    SELECT d.id shipment_id,i.id shipment_item_id,i.source_item_id order_item_id,oi.id source_item_exists,od.id source_order_id,
       d.document_no shipment_no,
       d.document_type shipment_document_type,d.document_date shipment_date,d.status shipment_status,
       d.inventory_status shipment_inventory_status,d.customer_code,d.currency_code,
       i.item_code,i.item_name,i.unit,i.quantity shipment_quantity,i.unit_price shipment_unit_price,
-      i.unit_cost shipment_unit_cost
+      i.unit_cost shipment_unit_cost,i.warehouse_code,i.expected_date
     FROM sales_documents d
     JOIN sales_document_items i ON i.document_id=d.id
     LEFT JOIN sales_document_items oi ON oi.id=i.source_item_id
@@ -3542,25 +3674,25 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
     LIMIT ?`, [sourceDatabase, from, to, limit]);
   const orderItemIds = orders.map(row => Number(row.order_item_id));
   const [shipments] = orderItemIds.length ? await pool.query(`
-    SELECT i.id shipment_item_id,i.source_item_id order_item_id,d.document_no shipment_no,
+    SELECT d.id shipment_id,i.id shipment_item_id,i.source_item_id order_item_id,d.document_no shipment_no,
       d.document_date shipment_date,d.status shipment_status,i.quantity shipment_quantity,
-      i.unit_price shipment_unit_price
+      i.unit_price shipment_unit_price,i.warehouse_code,i.expected_date
     FROM sales_documents d JOIN sales_document_items i ON i.document_id=d.id
     WHERE d.source_database=? AND d.document_kind='shipment' AND i.source_item_id IN (?)
     ORDER BY d.document_date,d.id,i.line_no`, [sourceDatabase, orderItemIds]) : [[]];
   const shipmentItemIds = shipments.map(row => Number(row.shipment_item_id));
   const [returns] = shipmentItemIds.length ? await pool.query(`
-    SELECT i.id return_item_id,i.source_item_id shipment_item_id,d.document_no return_no,
+    SELECT d.id return_id,i.id return_item_id,i.source_item_id shipment_item_id,d.document_no return_no,
       d.document_date return_date,d.status return_status,d.inventory_status return_inventory_status,d.return_type,i.quantity return_quantity,
-      i.unit_price return_unit_price,i.allowance_amount return_allowance_amount
+      i.unit_price return_unit_price,i.allowance_amount return_allowance_amount,i.warehouse_code
     FROM sales_documents d JOIN sales_document_items i ON i.document_id=d.id
     WHERE d.source_database=? AND d.document_kind='sales_return' AND d.status='posted'
       AND i.source_item_id IN (?)
     ORDER BY d.document_date,d.id,i.line_no`, [sourceDatabase, shipmentItemIds]) : [[]];
   const [allReturnsInRange] = await pool.query(`
-    SELECT i.id return_item_id,i.source_item_id return_source_item_id,d.document_no return_no,d.document_date return_date,
+    SELECT d.id return_id,i.id return_item_id,i.source_item_id return_source_item_id,d.document_no return_no,d.document_date return_date,
       d.customer_code,d.return_type,d.status return_status,d.inventory_status return_inventory_status,i.item_code,i.item_name,i.quantity return_quantity,
-      i.unit_price return_unit_price,i.allowance_amount return_allowance_amount
+      i.unit_price return_unit_price,i.allowance_amount return_allowance_amount,i.warehouse_code
     FROM sales_documents d JOIN sales_document_items i ON i.document_id=d.id
     WHERE d.source_database=? AND d.document_kind='sales_return'
       AND d.document_date BETWEEN ? AND ?
@@ -3614,6 +3746,10 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
       source: order.quote_no ? `報價 ${order.quote_no} → 訂單 ${order.order_no}` : ['2120'].includes(String(order.order_document_type)) ? `合約／專案訂單 ${order.order_no}` : `獨立訂單 ${order.order_no}`,
       root_kind: 'sales_order', root_type: order.quote_no ? '報價轉訂單' : ['2120'].includes(String(order.order_document_type)) ? '合約／專案訂單' : '獨立訂單',
       is_legal_root: 1, is_orphan: 0, trace_kind: order.quote_no ? '報價已轉訂單' : '合法獨立起點',
+      source_kind: 'sales_order', source_document_id: Number(order.order_id), source_document_item_id: Number(order.order_item_id),
+      source_document_no: order.order_no, source_date: order.order_date, expected_date: order.expected_date || null,
+      due_date: flowEarliestDate(...trace.map(item => item.due_date)), party_code: order.customer_code || '',
+      warehouse_code: order.warehouse_code || '', currency_code: order.order_currency_code || 'TWD',
       quote_no: order.quote_no || '', order_no: order.order_no, shipment_nos: children.map(x => x.shipment_no).join('、'),
       shipment_statuses: [...new Set(children.map(x => x.shipment_status).filter(Boolean))].join('、'),
       ar_voucher_nos: [...new Set(trace.flatMap(x => String(x.voucher_nos||'').split('、').filter(Boolean)))].join('、'),
@@ -3623,7 +3759,7 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
       ar_settlement_statuses: [...new Set(trace.flatMap(x => String(x.settlement_statuses||'').split('、').filter(Boolean)))].join('、'),
       customer_code: order.customer_code, order_date: order.order_date, item_code: order.item_code, item_name: order.item_name,
       order_quantity: orderQuantity, delivered_quantity: delivered, returned_quantity: returnChildren.reduce((sum, row) => sum + (row.return_type === 'allowance' ? 0 : flowAmount(row.return_quantity)), 0), remaining_quantity: Math.max(orderQuantity - delivered, 0),
-      order_amount: orderAmount, delivered_amount: deliveredAmount, returned_amount: returnedAmount, billed_amount: billed, collected_amount: collected,
+      order_amount: orderAmount, remaining_amount: Math.max(orderAmount - deliveredAmount, 0), delivered_amount: deliveredAmount, returned_amount: returnedAmount, billed_amount: billed, collected_amount: collected,
       unbilled_amount: Math.max(deliveredAmount - shipmentBilled, 0) + returnUnbilled, return_unbilled_amount: returnUnbilled,
       return_offset_amount: returnOffset, return_credit_amount: returnCredit, return_refund_amount: returnRefund,
       return_pending_amount: returnUnbilled, customer_credit_balance: returnCreditBalance,
@@ -3646,11 +3782,14 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
     const row = {
       source: `${invalidSource ? '孤兒銷貨' : '獨立銷貨'} ${shipment.shipment_no}`, root_kind: invalidSource ? 'orphan_shipment' : 'standalone_shipment', root_type: invalidSource ? '銷貨來源無效／孤兒單據' : '合法獨立銷貨起點',
       is_legal_root: invalidSource ? 0 : 1, is_orphan: invalidSource ? 1 : 0, trace_kind: invalidSource ? '有來源項目但找不到有效訂單' : '合法獨立起點', quote_no: '', order_no: '', shipment_nos: shipment.shipment_no,
+      source_kind: invalidSource ? 'orphan_shipment' : 'standalone_shipment', source_document_id: Number(shipment.shipment_id), source_document_item_id: Number(shipment.shipment_item_id),
+      source_document_no: shipment.shipment_no, source_date: shipment.shipment_date, expected_date: shipment.expected_date || null,
+      due_date: flowDateValue(trace.due_date), party_code: shipment.customer_code || '', warehouse_code: shipment.warehouse_code || '', currency_code: shipment.currency_code || 'TWD',
       shipment_statuses: shipment.shipment_status || '', ar_voucher_nos: trace.voucher_nos || '', ar_voucher_statuses: trace.voucher_statuses || '',
       ar_open_item_statuses: trace.open_item_statuses || '', ar_settlement_nos: trace.settlement_nos || '', ar_settlement_statuses: trace.settlement_statuses || '',
       customer_code: shipment.customer_code || '', order_date: shipment.shipment_date, item_code: shipment.item_code, item_name: shipment.item_name,
       order_quantity: 0, quote_quantity: 0, delivered_quantity: delivered, returned_quantity: Math.max(returnedAmount, 0), remaining_quantity: 0,
-      order_amount: 0, delivered_amount: deliveredAmount, returned_amount: returnedAmount, billed_amount: billed, collected_amount: collected,
+      order_amount: 0, remaining_amount: 0, delivered_amount: deliveredAmount, returned_amount: returnedAmount, billed_amount: billed, collected_amount: collected,
       unbilled_amount: Math.max(deliveredAmount - flowAmount(trace.billed), 0) + returnPending, return_unbilled_amount: returnPending,
       return_offset_amount: returnOffset, return_credit_amount: returnCredit, return_refund_amount: flowAmount(trace.return_refund_amount),
       return_pending_amount: returnPending, customer_credit_balance: flowAmount(trace.customer_credit_balance),
@@ -3685,10 +3824,13 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
     rows.push({
       source: `銷退／折讓 ${ret.return_no}`, root_kind: 'sales_return', root_type: isLinkedOutsideRange ? '退回待追蹤' : '退回／折讓起點',
       is_legal_root: isLinkedOutsideRange ? 1 : 0, is_orphan: isLinkedOutsideRange ? 0 : 1, trace_kind: isLinkedOutsideRange ? '來源超出日期範圍' : '未關聯來源單據',
+      source_kind: 'sales_return', source_document_id: Number(ret.return_id), source_document_item_id: Number(ret.return_item_id),
+      source_document_no: ret.return_no, source_date: ret.return_date, expected_date: null, due_date: flowDateValue(trace.due_date),
+      party_code: ret.customer_code || '', warehouse_code: ret.warehouse_code || '', currency_code: 'TWD',
       quote_no: '', order_no: '', shipment_nos: '', customer_code: ret.customer_code || '', order_date: ret.return_date,
       item_code: ret.item_code, item_name: ret.item_name, order_quantity: 0, delivered_quantity: 0,
       returned_quantity: ret.return_type === 'allowance' ? 0 : flowAmount(ret.return_quantity), remaining_quantity: 0,
-      order_amount: 0, delivered_amount: 0, returned_amount: returnedAmount, billed_amount: returnBilled - returnOffset - returnCredit, collected_amount: returnCollected,
+      order_amount: 0, remaining_amount: 0, delivered_amount: 0, returned_amount: returnedAmount, billed_amount: returnBilled - returnOffset - returnCredit, collected_amount: returnCollected,
       unbilled_amount: effectiveReturnPending, return_unbilled_amount: effectiveReturnPending,
       return_offset_amount: returnOffset, return_credit_amount: returnCredit, return_refund_amount: returnRefund,
       return_pending_amount: effectiveReturnPending, customer_credit_balance: customerCreditBalance,
@@ -3702,9 +3844,12 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
     const quoted = flowAmount(quote.quote_quantity), linked = flowAmount(quote.linked_order_quantity), remaining = Math.max(quoted - linked, 0);
     rows.push({
     source: `報價 ${quote.quote_no}${linked > 0 ? '（部分轉訂單）' : ''}`, root_kind: 'unconverted_quotation', root_type: linked > 0 ? '部分轉訂單報價起點' : '未轉訂單報價起點', is_legal_root: 1, is_orphan: 0, trace_kind: '合法起點尚未轉單',
+    source_kind: 'unconverted_quotation', source_document_id: Number(quote.quote_id), source_document_item_id: Number(quote.quote_item_id),
+    source_document_no: quote.quote_no, source_date: quote.quote_date, expected_date: quote.quote_expected_date || null, due_date: null,
+    party_code: quote.customer_code || '', warehouse_code: quote.warehouse_code || '', currency_code: quote.quote_currency_code || 'TWD',
     quote_no: quote.quote_no, order_no: '', shipment_nos: '', customer_code: quote.customer_code || '', order_date: quote.quote_date,
     item_code: quote.item_code, item_name: quote.item_name, order_quantity: 0, delivered_quantity: 0, remaining_quantity: 0, quote_ordered_quantity: linked, quote_remaining_quantity: remaining,
-      order_amount: 0, delivered_amount: 0, billed_amount: 0, collected_amount: 0, unbilled_amount: 0, uncollected_amount: 0, over_collected_amount: 0,
+      order_amount: 0, remaining_amount: remaining * flowAmount(quote.unit_price), delivered_amount: 0, billed_amount: 0, collected_amount: 0, unbilled_amount: 0, uncollected_amount: 0, over_collected_amount: 0,
     quote_quantity: remaining, quote_amount: remaining * flowAmount(quote.unit_price),
     quote_status: quote.quote_status || '', order_status: '', shipment_statuses: '', ar_voucher_nos: '', ar_voucher_statuses: '', ar_open_item_statuses: '', ar_settlement_nos: '', ar_settlement_statuses: '', next_stage: '待轉訂單', exception_reason: `報價尚有 ${remaining} 未轉成訂單`, audit_status: `需處理：報價尚有 ${remaining} 未轉成訂單`, returned_amount: 0, return_unbilled_amount: 0, over_collected_amount: 0
     });
@@ -3732,14 +3877,14 @@ async function buildSalesFlowAudit(sourceDatabase, from, to, limit) {
   summary.next_stage = [...rows, ...supplemental_rows].reduce((out, row) => { out[row.next_stage] = (out[row.next_stage] || 0) + 1; return out; }, {});
   summary.completed_count = [...rows, ...supplemental_rows].filter(row => row.audit_status === '流程完成').length;
   summary.exception_count = [...rows, ...supplemental_rows].filter(row => row.audit_status !== '流程完成').length;
-  return { rows, supplemental_rows, summary, quote_summary: Object.values(quoteSummary) };
+  return enrichFlowAuditResult({ rows, supplemental_rows, summary, quote_summary: Object.values(quoteSummary) }, 'sales', asOf);
 }
 
-async function buildPurchaseFlowAudit(sourceDatabase, from, to, limit) {
+async function buildPurchaseFlowAudit(sourceDatabase, from, to, limit, asOf = to) {
   const [orders] = await pool.query(`
-    SELECT o.id purchase_order_id,o.purchase_order_no,o.document_type purchase_document_type,o.order_date,o.supplier_code,o.status purchase_status,
+    SELECT o.id purchase_order_id,o.purchase_order_no,o.document_type purchase_document_type,o.order_date,o.expected_date order_expected_date,o.supplier_code,o.status purchase_status,o.currency_code order_currency_code,
       i.id purchase_order_item_id,i.requisition_item_id,i.item_code,i.item_name,i.unit,
-      i.qty_ordered,i.qty_received,i.qty_cancelled,i.unit_price,r.requisition_no,r.requisition_date,r.status requisition_status,
+      i.qty_ordered,i.qty_received,i.qty_cancelled,i.unit_price,i.expected_date item_expected_date,i.warehouse_code,r.requisition_no,r.requisition_date,r.status requisition_status,
       ri.qty_requested,ri.qty_ordered req_qty_ordered
     FROM procurement_orders o JOIN procurement_order_items i ON i.purchase_order_id=o.id
     LEFT JOIN procurement_requisition_items ri ON ri.id=i.requisition_item_id
@@ -3749,7 +3894,7 @@ async function buildPurchaseFlowAudit(sourceDatabase, from, to, limit) {
     LIMIT ?`, [sourceDatabase, from, to, limit]);
   const [unconvertedRequisitions] = await pool.query(`
     SELECT r.id requisition_id,r.requisition_no,r.requisition_date,r.requester_code,r.department_code,r.warehouse_code,r.status requisition_status,
-      ri.id requisition_item_id,ri.item_code,ri.item_name,ri.unit,ri.qty_requested,ri.suggested_unit_price,
+      ri.id requisition_item_id,ri.item_code,ri.item_name,ri.unit,ri.qty_requested,ri.suggested_unit_price,ri.required_date,
       COALESCE(ordered.linked_order_quantity,0) linked_order_quantity
     FROM procurement_requisitions r
     JOIN procurement_requisition_items ri ON ri.requisition_id=r.id
@@ -3766,14 +3911,14 @@ async function buildPurchaseFlowAudit(sourceDatabase, from, to, limit) {
     LIMIT ?`, [sourceDatabase, sourceDatabase, from, to, limit]);
   const orderItemIds = orders.map(row => Number(row.purchase_order_item_id));
   const [receipts] = orderItemIds.length ? await pool.query(`
-    SELECT i.id receipt_item_id,i.purchase_order_item_id,r.receipt_no,r.receipt_date,r.status receipt_status,
+    SELECT r.id receipt_id,i.id receipt_item_id,i.purchase_order_item_id,r.receipt_no,r.receipt_date,r.status receipt_status,
       r.document_type receipt_document_type,r.inventory_status,i.qty_received,i.qty_accepted,i.qty_rejected,
-      i.qty_returned,i.unit_cost
+      i.qty_returned,i.unit_cost,i.warehouse_code
     FROM procurement_receipts r JOIN procurement_receipt_items i ON i.receipt_id=r.id
     WHERE r.source_database=? AND i.purchase_order_item_id IN (?)
     ORDER BY r.receipt_date,r.id,i.line_no`, [sourceDatabase, orderItemIds]) : [[]];
   const [standaloneReceipts] = await pool.query(`
-    SELECT i.id receipt_item_id,i.purchase_order_item_id,poi.id source_order_item_exists,po.id source_order_id,
+    SELECT r.id receipt_id,i.id receipt_item_id,i.purchase_order_item_id,poi.id source_order_item_exists,po.id source_order_id,
       r.receipt_no,r.receipt_date,r.status receipt_status,
       r.document_type receipt_document_type,r.inventory_status,r.supplier_code,r.warehouse_code,
       i.item_code,i.item_name,i.unit,i.qty_received,i.qty_accepted,i.qty_rejected,i.qty_returned,i.unit_cost
@@ -3786,16 +3931,16 @@ async function buildPurchaseFlowAudit(sourceDatabase, from, to, limit) {
     LIMIT ?`, [sourceDatabase, sourceDatabase, from, to, limit]);
   const receiptItemIds = [...new Set([...receipts, ...standaloneReceipts].map(row => Number(row.receipt_item_id)))];
   const [returns] = receiptItemIds.length ? await pool.query(`
-    SELECT i.id return_item_id,i.receipt_item_id,r.return_no,r.return_date,r.status return_status,
+    SELECT r.id return_id,i.id return_item_id,i.receipt_item_id,r.return_no,r.return_date,r.status return_status,
       r.document_type return_document_type,r.return_type,r.inventory_status,i.item_code,i.item_name,
-      i.return_quantity,i.allowance_amount,i.unit_cost
+      i.return_quantity,i.allowance_amount,i.unit_cost,i.warehouse_code
     FROM procurement_returns r JOIN procurement_return_items i ON i.return_id=r.id
     WHERE r.source_database=? AND i.receipt_item_id IN (?)
     ORDER BY r.return_date,r.id,i.line_no`, [sourceDatabase, receiptItemIds]) : [[]];
   const [allReturnsInRange] = await pool.query(`
-    SELECT i.id return_item_id,i.receipt_item_id,r.return_no,r.return_date,r.status return_status,
+    SELECT r.id return_id,i.id return_item_id,i.receipt_item_id,r.return_no,r.return_date,r.status return_status,
       r.document_type return_document_type,r.return_type,r.inventory_status,r.supplier_code,
-      i.item_code,i.item_name,i.return_quantity,i.allowance_amount,i.unit_cost
+      i.item_code,i.item_name,i.return_quantity,i.allowance_amount,i.unit_cost,i.warehouse_code
     FROM procurement_returns r JOIN procurement_return_items i ON i.return_id=r.id
     WHERE r.source_database=? AND r.return_date BETWEEN ? AND ?
     ORDER BY r.return_date DESC,r.id DESC,i.line_no LIMIT ?`, [sourceDatabase, from, to, limit]);
@@ -3828,6 +3973,11 @@ async function buildPurchaseFlowAudit(sourceDatabase, from, to, limit) {
       source: order.requisition_no ? `請購 ${order.requisition_no} → 採購 ${order.purchase_order_no}` : `獨立採購 ${order.purchase_order_no}`,
       root_kind: 'purchase_order', root_type: order.requisition_no ? '請購轉採購' : '獨立採購', is_legal_root: 1, is_orphan: 0,
       trace_kind: order.requisition_no ? '請購已轉採購' : '合法獨立起點',
+      source_kind: 'purchase_order', source_document_id: Number(order.purchase_order_id), source_document_item_id: Number(order.purchase_order_item_id),
+      source_document_no: order.purchase_order_no, source_date: order.order_date,
+      expected_date: order.item_expected_date || order.order_expected_date || null,
+      due_date: flowEarliestDate(...trace.map(item => item.due_date)), party_code: order.supplier_code || '',
+      warehouse_code: order.warehouse_code || '', currency_code: order.order_currency_code || 'TWD',
       requisition_no: order.requisition_no || '', purchase_order_no: order.purchase_order_no, receipt_nos: children.map(x => x.receipt_no).join('、'),
       receipt_statuses: [...new Set(children.map(x => x.receipt_status).filter(Boolean))].join('、'),
       purchase_return_nos: [...new Set(returnChildren.map(x => x.return_no).filter(Boolean))].join('、'),
@@ -3839,7 +3989,7 @@ async function buildPurchaseFlowAudit(sourceDatabase, from, to, limit) {
       ap_settlement_statuses: [...new Set(trace.flatMap(x => String(x.settlement_statuses||'').split('、').filter(Boolean)))].join('、'),
       supplier_code: order.supplier_code, order_date: order.order_date, item_code: order.item_code, item_name: order.item_name,
       order_quantity: ordered, accepted_quantity: accepted, remaining_quantity: remaining, pending_inspection_quantity: pendingInspection, pending_inventory_quantity: pendingInventory,
-      order_amount: orderAmount, received_amount: receivedAmount, returned_quantity: returnedQuantity, returned_amount: returnedAmount, billed_amount: billed, paid_amount: paid, unbilled_amount: unbilled, unpaid_amount: Math.max(billed - paid, 0),
+      order_amount: orderAmount, remaining_amount: Math.max(orderAmount - receivedAmount, 0), received_amount: receivedAmount, returned_quantity: returnedQuantity, returned_amount: returnedAmount, billed_amount: billed, paid_amount: paid, unbilled_amount: unbilled, unpaid_amount: Math.max(billed - paid, 0),
       requisition_status: order.requisition_status || '', purchase_status: order.purchase_status, next_stage: '', exception_reason: ''
     };
     row.next_stage = flowNextStagePurchase(row);
@@ -3853,10 +4003,13 @@ async function buildPurchaseFlowAudit(sourceDatabase, from, to, limit) {
     rows.push({
       source: `請購 ${req.requisition_no}${linked > 0 ? '（部分未轉採購）' : ''}`, root_kind: 'unconverted_requisition', root_type: linked > 0 ? '部分轉採購請購' : '未轉採購請購起點',
       is_legal_root: 1, is_orphan: 0, trace_kind: '合法起點尚未轉單', requisition_no: req.requisition_no, purchase_order_no: '', receipt_nos: '', receipt_statuses: '',
+      source_kind: 'unconverted_requisition', source_document_id: Number(req.requisition_id), source_document_item_id: Number(req.requisition_item_id),
+      source_document_no: req.requisition_no, source_date: req.requisition_date, expected_date: req.required_date || null, due_date: null,
+      party_code: '', warehouse_code: req.warehouse_code || '', currency_code: 'TWD',
       purchase_return_nos: '', purchase_return_statuses: '', ap_voucher_nos: '', ap_voucher_statuses: '', ap_open_item_statuses: '', ap_settlement_nos: '', ap_settlement_statuses: '',
       supplier_code: '', order_date: req.requisition_date, item_code: req.item_code, item_name: req.item_name, order_quantity: 0, requisition_requested_quantity: requested,
       requisition_ordered_quantity: linked, requisition_remaining_quantity: remaining, accepted_quantity: 0, remaining_quantity: 0, pending_inspection_quantity: 0, pending_inventory_quantity: 0,
-      order_amount: 0, received_amount: 0, returned_amount: 0, billed_amount: 0, paid_amount: 0, unbilled_amount: 0, unpaid_amount: 0,
+      order_amount: 0, remaining_amount: remaining * flowAmount(req.suggested_unit_price), received_amount: 0, returned_amount: 0, billed_amount: 0, paid_amount: 0, unbilled_amount: 0, unpaid_amount: 0,
       requisition_status: req.requisition_status || '', purchase_status: '', next_stage: req.requisition_status === 'draft' ? '待核准請購' : '待轉採購', exception_reason: exception,
       audit_status: `需處理：${exception}`
     });
@@ -3873,10 +4026,13 @@ async function buildPurchaseFlowAudit(sourceDatabase, from, to, limit) {
     const invalidSource = Number(receipt.purchase_order_item_id || 0) > 0 && !Number(receipt.source_order_id || 0);
     const row = {
       source: `${invalidSource ? '孤兒進貨' : '獨立進貨'} ${receipt.receipt_no}`, root_kind: invalidSource ? 'orphan_receipt' : 'standalone_receipt', root_type: invalidSource ? '進貨來源無效／孤兒單據' : '合法獨立進貨起點', is_legal_root: invalidSource ? 0 : 1, is_orphan: invalidSource ? 1 : 0, trace_kind: invalidSource ? '有來源項目但找不到有效採購單' : '合法獨立起點',
+      source_kind: invalidSource ? 'orphan_receipt' : 'standalone_receipt', source_document_id: Number(receipt.receipt_id), source_document_item_id: Number(receipt.receipt_item_id),
+      source_document_no: receipt.receipt_no, source_date: receipt.receipt_date, expected_date: receipt.expected_date || null, due_date: flowDateValue(trace.due_date),
+      party_code: receipt.supplier_code || '', warehouse_code: receipt.warehouse_code || '', currency_code: 'TWD',
       requisition_no: '', purchase_order_no: '', receipt_nos: receipt.receipt_no, receipt_statuses: receipt.receipt_status || '', purchase_return_nos: [...new Set(returnChildren.map(x => x.return_no).filter(Boolean))].join('、'), purchase_return_statuses: [...new Set(returnChildren.map(x => x.return_status).filter(Boolean))].join('、'),
       ap_voucher_nos: trace.voucher_nos || '', ap_voucher_statuses: trace.voucher_statuses || '', ap_open_item_statuses: trace.open_item_statuses || '', ap_settlement_nos: trace.settlement_nos || '', ap_settlement_statuses: trace.settlement_statuses || '',
       supplier_code: receipt.supplier_code || '', order_date: receipt.receipt_date, item_code: receipt.item_code, item_name: receipt.item_name, order_quantity: 0, accepted_quantity: accepted,
-      remaining_quantity: 0, pending_inspection_quantity: pendingInspection, pending_inventory_quantity: pendingInventory, order_amount: 0, received_amount: receivedAmount, returned_quantity: returnedQuantity, returned_amount: returnedAmount,
+      remaining_quantity: 0, pending_inspection_quantity: pendingInspection, pending_inventory_quantity: pendingInventory, order_amount: 0, remaining_amount: 0, received_amount: receivedAmount, returned_quantity: returnedQuantity, returned_amount: returnedAmount,
       billed_amount: billed, paid_amount: paid, unbilled_amount: Math.max(receivedAmount - billed, 0), unpaid_amount: Math.max(billed - paid, 0), requisition_status: '', purchase_status: '', next_stage: '', exception_reason: ''
     };
     if (invalidSource) { row.next_stage = '待補有效採購來源'; row.exception_reason = '進貨明細有來源項目，但來源不是有效採購單或已不存在'; }
@@ -3898,11 +4054,14 @@ async function buildPurchaseFlowAudit(sourceDatabase, from, to, limit) {
     rows.push({
       source: `採購退貨／折讓 ${ret.return_no}`, root_kind: 'purchase_return', root_type: linkedOutsideRange ? '退回待追蹤' : '退回／折讓起點',
       is_legal_root: linkedOutsideRange ? 1 : 0, is_orphan: linkedOutsideRange ? 0 : 1, trace_kind: linkedOutsideRange ? '來源超出日期範圍' : '未關聯來源單據',
+      source_kind: 'purchase_return', source_document_id: Number(ret.return_id), source_document_item_id: Number(ret.return_item_id),
+      source_document_no: ret.return_no, source_date: ret.return_date, expected_date: null, due_date: flowDateValue(trace.due_date),
+      party_code: ret.supplier_code || '', warehouse_code: ret.warehouse_code || '', currency_code: 'TWD',
       requisition_no: '', purchase_order_no: '', receipt_nos: '', receipt_statuses: '', purchase_return_nos: ret.return_no, purchase_return_statuses: ret.return_status || '',
       ap_voucher_nos: trace.voucher_nos || '', ap_voucher_statuses: trace.voucher_statuses || '', ap_open_item_statuses: trace.open_item_statuses || '', ap_settlement_nos: trace.settlement_nos || '', ap_settlement_statuses: trace.settlement_statuses || '',
       supplier_code: ret.supplier_code || '', order_date: ret.return_date, item_code: ret.item_code, item_name: ret.item_name, order_quantity: 0, accepted_quantity: 0,
       remaining_quantity: 0, pending_inspection_quantity: 0, pending_inventory_quantity: 0, order_amount: 0, received_amount: 0, returned_quantity: ret.return_type === 'return' ? flowAmount(ret.return_quantity) : 0,
-      returned_amount: amount, billed_amount: flowAmount(trace.billed), paid_amount: flowAmount(trace.collected), unbilled_amount: 0, unpaid_amount: 0,
+      returned_amount: amount, billed_amount: flowAmount(trace.billed), paid_amount: flowAmount(trace.collected), unbilled_amount: 0, unpaid_amount: 0, remaining_amount: 0,
       requisition_status: '', purchase_status: '', next_stage: pendingStatus ? '待退貨／折讓核准過帳' : linkedOutsideRange ? '待追蹤原進貨／應付' : '待關聯原進貨／應付', exception_reason: exception,
       audit_status: `需處理：${exception}`
     });
@@ -3925,25 +4084,253 @@ async function buildPurchaseFlowAudit(sourceDatabase, from, to, limit) {
   summary.next_stage = [...rows, ...supplemental_rows].reduce((out, row) => { out[row.next_stage] = (out[row.next_stage] || 0) + 1; return out; }, {});
   summary.completed_count = [...rows, ...supplemental_rows].filter(row => row.audit_status === '流程完成').length;
   summary.exception_count = [...rows, ...supplemental_rows].filter(row => row.audit_status !== '流程完成').length;
-  return { rows, supplemental_rows, summary };
+  return enrichFlowAuditResult({ rows, supplemental_rows, summary }, 'procurement', asOf);
+}
+
+function flowAuditHealthResult(sourceDatabase, range, sales, procurement) {
+  const supplemental = (sales.supplemental_rows || []).map(row => ({ ...row, flow: '庫存補充' }));
+  const alerts = [
+    ...(sales.rows || []).map(row => ({ ...row, flow: '銷售' })),
+    ...(procurement.rows || []).map(row => ({ ...row, flow: '採購' })),
+    ...supplemental
+  ].filter(row => row.audit_status !== '流程完成')
+    .sort((a, b) => (Number(b.overdue_days || 0) - Number(a.overdue_days || 0)) || String(a.next_stage).localeCompare(String(b.next_stage)));
+  const inventory = {
+    document_count: supplemental.length,
+    legal_root_count: supplemental.filter(row => row.is_legal_root).length,
+    orphan_count: supplemental.filter(row => row.is_orphan).length,
+    exception_count: supplemental.filter(row => row.audit_status !== '流程完成').length,
+    quantity_delta: sumFlow(supplemental, 'quantity_delta'),
+    amount_delta: sumFlow(supplemental, 'amount'),
+    financial_impact: 0
+  };
+  const financial = {
+    sales_pending: flowAmount(sales.summary?.financial_impact),
+    procurement_pending: flowAmount(procurement.summary?.financial_impact),
+    total_pending: flowAmount(sales.summary?.financial_impact) + flowAmount(procurement.summary?.financial_impact)
+  };
+  const context = flowAuditContext(sourceDatabase);
+  return {
+    source_database: context.source_database, company_id: context.company_id, tenant_id: context.tenant_id,
+    source_system: context.source_system, ...range,
+    sales: sales.summary, procurement: procurement.summary, inventory, financial,
+    alerts: alerts.slice(0, 200)
+  };
+}
+
+async function buildFlowAuditBundle(kind, sourceDatabase, range, limit) {
+  const db = String(sourceDatabase || '').toUpperCase();
+  flowAuditContext(db);
+  if (kind === 'sales') return await buildSalesFlowAudit(db, range.from, range.to, limit, range.asOf);
+  if (kind === 'procurement') return await buildPurchaseFlowAudit(db, range.from, range.to, limit, range.asOf);
+  const [sales, procurement] = await Promise.all([
+    buildSalesFlowAudit(db, range.from, range.to, limit, range.asOf),
+    buildPurchaseFlowAudit(db, range.from, range.to, limit, range.asOf)
+  ]);
+  return { health: flowAuditHealthResult(db, range, sales, procurement), sales, procurement };
+}
+
+function flowRecommendationRemainingQuantity(row) {
+  return Math.max(
+    flowAmount(row.remaining_quantity), flowAmount(row.quote_remaining_quantity),
+    flowAmount(row.requisition_remaining_quantity)
+  );
+}
+
+function flowRecommendationParty(row) {
+  return row.party_code || row.customer_code || row.supplier_code || null;
+}
+
+function makeFlowRecommendation(flowKind, row, issueCode, reason, proposedAction, amount) {
+  const remainingQuantity = flowRecommendationRemainingQuantity(row);
+  const sourceKey = flowRowSourceKey(row, flowKind).slice(0, 255);
+  const financialImpact = flowAmount(amount) || flowAmount(row.financial_impact);
+  return {
+    flow_kind: flowKind, issue_code: issueCode,
+    source_kind: row.source_kind || row.root_kind || `${flowKind}_flow`, source_key: sourceKey,
+    source_id: row.source_document_id || row.order_id || row.purchase_order_id || row.shipment_id || row.receipt_id || row.return_id || row.quote_id || row.requisition_id || row.document_id || null,
+    source_item_id: row.source_document_item_id || row.order_item_id || row.purchase_order_item_id || row.shipment_item_id || row.receipt_item_id || row.return_item_id || row.quote_item_id || row.requisition_item_id || row.item_id || null,
+    source_document_no: row.source_document_no || row.order_no || row.purchase_order_no || row.shipment_no || row.receipt_no || row.return_no || row.quote_no || row.requisition_no || row.document_no || row.source || null,
+    source_date: flowDateValue(row.source_date || row.order_date || row.document_date),
+    expected_date: flowDateValue(row.expected_date), due_date: flowDateValue(row.due_date),
+    party_code: flowRecommendationParty(row), item_code: row.item_code || null, warehouse_code: row.warehouse_code || null,
+    currency_code: row.currency_code || 'TWD', overdue_days: Number(row.overdue_days || 0),
+    expected_overdue_days: Number(row.expected_overdue_days || 0), aging_bucket: row.aging_bucket || null,
+    remaining_quantity: remainingQuantity, remaining_amount: flowAmount(row.remaining_amount),
+    financial_impact: financialImpact, reason: String(reason || '流程稽核發現異常').slice(0, 1000),
+    proposed_action: String(proposedAction || '請核對來源與下一階段，建立受控更正作業。').slice(0, 1000),
+    payload_json: JSON.stringify({ ...row, flow_kind: flowKind, as_of_date: row.as_of_date || null })
+  };
+}
+
+function flowRecommendationCandidates(flowKind, row, asOf) {
+  const candidates = [];
+  const source = row.source || row.source_document_no || '未命名來源';
+  const exception = row.exception_reason || (row.audit_status !== '流程完成' ? '跨模組資料尚未完成' : '');
+  const add = (code, reason, action, amount) => candidates.push(makeFlowRecommendation(flowKind, row, code, `${source}：${reason}`, action, amount));
+  if (row.is_orphan) add('ORPHAN_SOURCE', `來源關聯不存在或不合法（${exception}）`, '補正目標 ERP 的來源關聯或建立合法補充單據；不得直接修改 SH／SC 原始資料。', row.financial_impact);
+  if (['unconverted_quotation', 'unconverted_requisition'].includes(String(row.root_kind))) {
+    const quantity = flowRecommendationRemainingQuantity(row);
+    add('UNCONVERTED_SOURCE', `尚有 ${quantity} 未轉下一階段（${exception}）`, '確認業務需求後補轉下一階段，或建立受控取消／結案紀錄並保留原單版本。', row.remaining_amount || row.financial_impact);
+  }
+  if (Number(row.overdue_days || 0) > 0) {
+    add('OVERDUE', `截至 ${asOf} ${row.overdue_basis || '預計日／帳款'} 已逾期 ${row.overdue_days} 天（${exception}）`, '核對實際交付、驗收、開立帳款與收付款；確認後才建立受控更正建議。', row.financial_impact);
+  }
+  if (flowAmount(row.pending_inspection_quantity) > FLOW_AUDIT_EPSILON) add('PENDING_INSPECTION', `尚有 ${row.pending_inspection_quantity} 待驗收`, '完成驗收或驗退，合格量才可進入庫存過帳；保留驗收人員與日期。', row.financial_impact);
+  if (flowAmount(row.pending_inventory_quantity) > FLOW_AUDIT_EPSILON) add('PENDING_INVENTORY_POSTING', `尚有 ${row.pending_inventory_quantity} 合格量未入庫過帳`, '核對驗收合格量、庫別與期間後完成受控入庫過帳。', row.financial_impact);
+  if (flowRecommendationRemainingQuantity(row) > FLOW_AUDIT_EPSILON && !['unconverted_quotation', 'unconverted_requisition'].includes(String(row.root_kind))) {
+    add('UNFULFILLED', `尚有 ${flowRecommendationRemainingQuantity(row)} 未完成交付／進貨`, '核對分批子單、取消量與結案狀態；需要更正時建立沖回／重作或受控解結，不直接改原單。', row.remaining_amount || row.financial_impact);
+  }
+  if (flowAmount(row.unbilled_amount) > FLOW_AUDIT_EPSILON) add(flowKind === 'sales' ? 'DELIVERED_UNBILLED' : 'RECEIVED_UNBILLED', `${flowKind === 'sales' ? '已銷貨' : '已進貨'}但尚有 ${row.unbilled_amount} 未立帳`, '依公司別單據性質與會計期間補建立或核對應收／應付，保留原始來源與核准紀錄。', row.unbilled_amount);
+  if (flowKind === 'sales' && flowAmount(row.uncollected_amount) > FLOW_AUDIT_EPSILON) add('AR_UNCOLLECTED', `已立應收但尚有 ${row.uncollected_amount} 未收款`, '核對到期日、收款沖銷與票據狀態，必要時列入帳齡與資金預估後再受控處理。', row.uncollected_amount);
+  if (flowKind === 'procurement' && flowAmount(row.unpaid_amount) > FLOW_AUDIT_EPSILON) add('AP_UNPAID', `已立應付但尚有 ${row.unpaid_amount} 未付款`, '核對到期日、付款沖銷、票據與銀行資金；需更正時建立受控更正紀錄。', row.unpaid_amount);
+  if (flowAmount(row.return_pending_amount) > FLOW_AUDIT_EPSILON || flowAmount(row.return_unbilled_amount) > FLOW_AUDIT_EPSILON) add('RETURN_FINANCE_PENDING', `退回／折讓尚有 ${flowAmount(row.return_pending_amount) || flowAmount(row.return_unbilled_amount)} 未同步財務`, '核對銷退／退貨驗收、回庫、負向應收／應付、待抵或退款，完成沖帳鏈後再核准。', row.return_pending_amount || row.return_unbilled_amount);
+  if (flowKind === 'sales' && flowAmount(row.customer_credit_balance) > FLOW_AUDIT_EPSILON) add('CUSTOMER_CREDIT_PENDING', `客戶待抵尚有 ${row.customer_credit_balance} 未轉抵／退款`, '依同公司、同客戶、同幣別分批轉抵或登錄退款，保留對應分錄與核准紀錄。', row.customer_credit_balance);
+  if (!candidates.length && exception) add('FLOW_EXCEPTION', exception, '由權責人員核對異常原因，建立受控更正建議；核准前不修改來源單據。', row.financial_impact);
+  return candidates;
+}
+
+function flowRecommendationRows(kind, bundle) {
+  if (kind === 'sales') return (bundle.rows || []).map(row => ({ flow_kind: 'sales', row }));
+  if (kind === 'procurement') return (bundle.rows || []).map(row => ({ flow_kind: 'procurement', row }));
+  return [
+    ...(bundle.sales?.rows || []).map(row => ({ flow_kind: 'sales', row })),
+    ...(bundle.procurement?.rows || []).map(row => ({ flow_kind: 'procurement', row })),
+    ...(bundle.sales?.supplemental_rows || []).map(row => ({ flow_kind: 'inventory', row }))
+  ];
+}
+
+async function generateFlowAuditRecommendations(sourceDatabase, range, kind, limit, userId, generationKey) {
+  const context = flowAuditContext(sourceDatabase);
+  const bundle = await buildFlowAuditBundle(kind === 'all' ? 'health' : kind, sourceDatabase, range, limit);
+  const candidates = flowRecommendationRows(kind, bundle)
+    .flatMap(({ flow_kind, row }) => flowRecommendationCandidates(flow_kind, row, range.asOf))
+    .slice(0, 5000);
+  let created = 0, refreshed = 0;
+  for (const candidate of candidates) {
+    const [result] = await pool.query(`INSERT INTO flow_audit_recommendations(
+      tenant_id,company_id,source_system,source_database,generation_key,flow_kind,issue_code,source_kind,source_key,
+      source_id,source_item_id,source_document_no,source_date,expected_date,due_date,party_code,item_code,warehouse_code,
+      currency_code,overdue_days,expected_overdue_days,aging_bucket,remaining_quantity,remaining_amount,financial_impact,
+      reason,proposed_action,status,payload_json,created_by
+    ) VALUES(${Array(30).fill('?').join(',')})
+    ON DUPLICATE KEY UPDATE
+      generation_key=VALUES(generation_key), source_id=VALUES(source_id), source_item_id=VALUES(source_item_id),
+      source_document_no=VALUES(source_document_no), source_date=VALUES(source_date), expected_date=VALUES(expected_date),
+      due_date=VALUES(due_date), party_code=VALUES(party_code), item_code=VALUES(item_code), warehouse_code=VALUES(warehouse_code),
+      currency_code=VALUES(currency_code), overdue_days=VALUES(overdue_days), expected_overdue_days=VALUES(expected_overdue_days),
+      aging_bucket=VALUES(aging_bucket), remaining_quantity=VALUES(remaining_quantity), remaining_amount=VALUES(remaining_amount),
+      financial_impact=VALUES(financial_impact), reason=IF(status='pending',VALUES(reason),reason),
+      proposed_action=IF(status='pending',VALUES(proposed_action),proposed_action), payload_json=IF(status='pending',VALUES(payload_json),payload_json),
+      updated_at=CURRENT_TIMESTAMP`, [
+      context.tenant_id, context.company_id, context.source_system, context.source_database, generationKey || null,
+      candidate.flow_kind, candidate.issue_code, candidate.source_kind, candidate.source_key,
+      candidate.source_id, candidate.source_item_id, candidate.source_document_no, candidate.source_date,
+      candidate.expected_date, candidate.due_date, candidate.party_code, candidate.item_code, candidate.warehouse_code,
+      candidate.currency_code, candidate.overdue_days, candidate.expected_overdue_days, candidate.aging_bucket,
+      candidate.remaining_quantity, candidate.remaining_amount, candidate.financial_impact, candidate.reason, candidate.proposed_action,
+      'pending', candidate.payload_json, userId || null
+    ]);
+    let id = Number(result.insertId || 0);
+    if (id) {
+      created += 1;
+      await pool.query(`INSERT INTO flow_audit_recommendation_events
+        (recommendation_id,tenant_id,company_id,source_system,source_database,event_kind,from_status,to_status,note,actor_id)
+        VALUES(?,?,?,?,?,'generated',NULL,'pending',?,?)`, [id, context.tenant_id, context.company_id, context.source_system, context.source_database, '由流程稽核產生待核准更正建議', userId || null]);
+    } else {
+      const [[existing]] = await pool.query(`SELECT id FROM flow_audit_recommendations
+        WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND source_key=? AND issue_code=?`,
+        [context.tenant_id, context.company_id, context.source_system, context.source_database, candidate.source_key, candidate.issue_code]);
+      if (existing) { id = Number(existing.id); refreshed += 1; }
+    }
+  }
+  return { source_database: context.source_database, company_id: context.company_id, generation_key: generationKey || null, flow_kind: kind, candidate_count: candidates.length, created_count: created, refreshed_count: refreshed };
 }
 
 function registerFlowAuditRoutes(app) {
   app.get('/api/flow-audit/sales', async (req, res, next) => {
-    try { const db=String(req.query.source_database||'SH').toUpperCase(),range=flowDateRange(req.query),limit=Math.min(Math.max(Number(req.query.limit)||200,1),1000);res.json({ok:true,data:await buildSalesFlowAudit(db,range.from,range.to,limit),source_database:db,...range}); } catch(e) { next(e); }
+    try {
+      const db = String(req.query.source_database || 'SH').toUpperCase(), range = flowDateRange(req.query), limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
+      flowAuditContext(db);
+      res.json({ ok: true, data: await buildFlowAuditBundle('sales', db, range, limit), source_database: db, ...range });
+    } catch (error) { next(error); }
   });
   app.get('/api/flow-audit/procurement', async (req, res, next) => {
-    try { const db=String(req.query.source_database||'SH').toUpperCase(),range=flowDateRange(req.query),limit=Math.min(Math.max(Number(req.query.limit)||200,1),1000);res.json({ok:true,data:await buildPurchaseFlowAudit(db,range.from,range.to,limit),source_database:db,...range}); } catch(e) { next(e); }
+    try {
+      const db = String(req.query.source_database || 'SH').toUpperCase(), range = flowDateRange(req.query), limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
+      flowAuditContext(db);
+      res.json({ ok: true, data: await buildFlowAuditBundle('procurement', db, range, limit), source_database: db, ...range });
+    } catch (error) { next(error); }
   });
   app.get('/api/flow-audit/health', async (req, res, next) => {
     try {
-      const db=String(req.query.source_database||'SH').toUpperCase(),range=flowDateRange(req.query),limit=Math.min(Math.max(Number(req.query.limit)||200,1),1000);
-      const [sales,procurement]=await Promise.all([buildSalesFlowAudit(db,range.from,range.to,limit),buildPurchaseFlowAudit(db,range.from,range.to,limit)]);
-      const supplemental=(sales.supplemental_rows||procurement.supplemental_rows||[]).map(row=>({...row,flow:'庫存補充'}));
-      const alerts=[...sales.rows.map(row=>({...row,flow:'銷售'})),...procurement.rows.map(row=>({...row,flow:'採購'})),...supplemental].filter(row=>row.audit_status!=='流程完成').sort((a,b)=>String(a.next_stage).localeCompare(String(b.next_stage)));
-      res.json({ok:true,data:{source_database:db,...range,sales: sales.summary, procurement: procurement.summary, alerts: alerts.slice(0,200)}});
-    } catch(e) { next(e); }
+      const db = String(req.query.source_database || 'SH').toUpperCase(), range = flowDateRange(req.query), limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
+      const bundle = await buildFlowAuditBundle('health', db, range, limit);
+      res.json({ ok: true, data: bundle.health });
+    } catch (error) { next(error); }
   });
+  app.get('/api/flow-audit/recommendations', async (req, res, next) => {
+    try {
+      await ensureTargetFinanceWorkflowSchema();
+      const db = String(req.query.source_database || 'SH').toUpperCase(), range = flowDateRange(req.query), context = flowAuditContext(db);
+      const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000), conditions = [
+        'tenant_id=?', 'company_id=?', 'source_system=?', 'source_database=?', 'source_date BETWEEN ? AND ?'
+      ], params = [context.tenant_id, context.company_id, context.source_system, context.source_database, range.from, range.to];
+      const flowKind = String(req.query.flow_kind || '').trim().toLowerCase();
+      const status = String(req.query.status || '').trim().toLowerCase();
+      const generationKey = trim(req.query.generation_key);
+      if (flowKind && !['all', 'health'].includes(flowKind)) { conditions.push('flow_kind=?'); params.push(flowKind); }
+      if (status && ['pending', 'approved', 'rejected', 'applied', 'voided'].includes(status)) { conditions.push('status=?'); params.push(status); }
+      if (generationKey) { conditions.push('generation_key=?'); params.push(generationKey); }
+      const [rows] = await pool.query(`SELECT * FROM flow_audit_recommendations WHERE ${conditions.join(' AND ')}
+        ORDER BY FIELD(status,'pending','approved','rejected','applied','voided'),overdue_days DESC,source_date DESC,id DESC LIMIT ?`, [...params, limit]);
+      res.json({ ok: true, data: rows, source_database: context.source_database, company_id: context.company_id, ...range, flow_kind: flowKind || 'all', status: status || 'all' });
+    } catch (error) { next(error); }
+  });
+  app.post('/api/flow-audit/recommendations/generate', async (req, res, next) => {
+    try {
+      await ensureTargetFinanceWorkflowSchema();
+      const body = req.body || {}, db = String(body.source_database || 'SH').toUpperCase(), range = flowDateRange(body);
+      const kind = String(body.flow_kind || 'all').toLowerCase();
+      if (!['sales', 'procurement', 'all'].includes(kind)) throw badRequest('稽核建議流程類別錯誤');
+      const limit = Math.min(Math.max(Number(body.limit) || 500, 1), 1000);
+      const rawGenerationKey = trim(body.generation_key);
+      if (rawGenerationKey && !/^[A-Za-z0-9_-]{1,80}$/.test(rawGenerationKey)) throw badRequest('稽核批次代號格式錯誤');
+      const generationKey = rawGenerationKey || `${kind}-${db}-${range.from}-${range.to}-${range.asOf}`.slice(0, 80);
+      res.status(201).json({ ok: true, data: await generateFlowAuditRecommendations(db, range, kind, limit, req.auth.id, generationKey) });
+    } catch (error) { next(error); }
+  });
+  app.get('/api/flow-audit/recommendations/:id', async (req, res, next) => {
+    try {
+      await ensureTargetFinanceWorkflowSchema();
+      const db = String(req.query.source_database || 'SH').toUpperCase(), context = flowAuditContext(db), id = Number(req.params.id);
+      const [[recommendation]] = await pool.query(`SELECT * FROM flow_audit_recommendations
+        WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`, [id, context.tenant_id, context.company_id, context.source_system, context.source_database]);
+      if (!recommendation) throw badRequest('找不到流程稽核更正建議');
+      const [events] = await pool.query('SELECT * FROM flow_audit_recommendation_events WHERE recommendation_id=? ORDER BY created_at,id', [id]);
+      res.json({ ok: true, data: { recommendation, events } });
+    } catch (error) { next(error); }
+  });
+  const decideRecommendation = (nextStatus, eventKind, defaultNote) => async (req, res, next) => {
+    try {
+      if (!['ADMIN', 'FINANCE'].includes(req.auth?.role_code)) throw Object.assign(new Error('只有系統管理員或財務人員可以核准／駁回更正建議'), { status: 403 });
+      await ensureTargetFinanceWorkflowSchema();
+      const db = String(req.body?.source_database || req.query.source_database || 'SH').toUpperCase(), context = flowAuditContext(db), id = Number(req.params.id), note = trim(req.body?.note) || defaultNote;
+      await tx(async conn => {
+        const [[recommendation]] = await conn.query(`SELECT * FROM flow_audit_recommendations
+          WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? FOR UPDATE`, [id, context.tenant_id, context.company_id, context.source_system, context.source_database]);
+        if (!recommendation) throw badRequest('找不到流程稽核更正建議');
+        if (recommendation.status !== 'pending') throw badRequest(`只有待核准建議可以${nextStatus === 'approved' ? '核准' : '駁回'}`);
+        await conn.query(`UPDATE flow_audit_recommendations SET status=?,decision_note=?,approved_by=IF(?='approved',?,approved_by),approved_at=IF(?='approved',NOW(),approved_at) WHERE id=?`, [nextStatus, note, nextStatus, req.auth.id, nextStatus, id]);
+        await conn.query(`INSERT INTO flow_audit_recommendation_events
+          (recommendation_id,tenant_id,company_id,source_system,source_database,event_kind,from_status,to_status,note,actor_id)
+          VALUES(?,?,?,?,?,?,?,?,?,?)`, [id, context.tenant_id, context.company_id, context.source_system, context.source_database, eventKind, recommendation.status, nextStatus, note, req.auth.id]);
+      });
+      res.json({ ok: true, data: { id, status: nextStatus, message: nextStatus === 'approved' ? '更正建議已核准，請由受控更正作業執行；未直接修改來源資料' : '更正建議已駁回，保留異常警示與歷程' } });
+    } catch (error) { next(error); }
+  };
+  app.post('/api/flow-audit/recommendations/:id/approve', decideRecommendation('approved', 'approved', '已核對異常，准予建立受控更正案件'));
+  app.post('/api/flow-audit/recommendations/:id/reject', decideRecommendation('rejected', 'rejected', '現階段保留警示，不建立更正案件'));
 }
 
 function registerFinanceWorkflowRoutes(app){
