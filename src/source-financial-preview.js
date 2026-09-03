@@ -74,6 +74,7 @@ async function assertSourceTables(connection) {
   const found = new Set(rows.map(row => String(row.table_name).toLowerCase()));
   const missing = ['actma', 'actta', 'acttb'].filter(table => !found.has(table));
   if (missing.length) throw badRequest(`來源資料庫缺少會計總帳必要資料表：${missing.join('、')}`);
+  return found;
 }
 
 function accountStatementRow(row) {
@@ -93,8 +94,8 @@ function accountStatementRow(row) {
     report_amount: reportAmount,
     line_kind: direction === -1 ? 'revenue' : 'expense',
     voucher_count: Number(row.voucher_count || 0),
-    source_table: 'ACTMA／ACTTA／ACTTB',
-    source_key: `ACTMA:${text(row.company)}:${text(row.account_code)}`,
+    source_table: text(row.source_table) || 'ACTMA／ACTTA／ACTTB',
+    source_key: text(row.source_key) || `ACTMA:${text(row.company)}:${text(row.account_code)}`,
   };
 }
 
@@ -123,8 +124,8 @@ function balanceSheetRow(row) {
     section,
     ...values,
     voucher_count: Number(row.voucher_count || 0),
-    source_table: 'ACTMA／ACTTA／ACTTB',
-    source_key: `ACTMA:${text(row.company)}:${accountCode}`,
+    source_table: text(row.source_table) || 'ACTMA／ACTTA／ACTTB',
+    source_key: text(row.source_key) || `ACTMA:${text(row.company)}:${accountCode}`,
   };
 }
 
