@@ -47,26 +47,80 @@ function getBasicDataSources(sourceName) {
   return sourceBasicDataSources[adapterCode] || basicDataSources;
 }
 
+function normalizeContextKey(value) {
+  const key = String(value ?? '').trim().toUpperCase();
+  return key || null;
+}
+
+function uniqueContextValues(values) {
+  return [...new Set(values.map(normalizeContextKey).filter(Boolean))];
+}
+
+function isControlApiPath(path) {
+  return [
+    '/api/company-contexts', '/api/source-databases', '/api/master-source-mappings',
+    '/api/import/', '/api/access-users', '/api/access-roles', '/api/access-role-permissions',
+    '/api/reports/definitions'
+  ].some(prefix => path === prefix || path.startsWith(prefix));
+}
+
 export function registerApi(app) {
   // 公司別與來源資料庫必須成對驗證。來源資料庫本身仍維持唯讀，
-  // 所有新 ERP 查詢／寫入都只能使用目前來源所對應的 company_id。
+  // 所有新 ERP 查詢／寫入都只能使用登入工作階段目前固定的公司上下文。
+  // 這個中介層套用到所有互動式 API，避免只修正某一支畫面而留下跨公司例外。
   app.use(async (req, res, next) => {
-    const sourceName = String(
-      req.query.source_database || req.query.db || req.body?.source_database || req.headers['x-source-database'] || ''
-    ).trim().toUpperCase();
-    const requestedCompanyId = String(
-      req.query.company_id || req.body?.company_id || req.headers['x-company-id'] || ''
-    ).trim();
-    const source = sourceName ? sourceDatabases[sourceName] : null;
-    if (source && req.auth?.role_code !== 'ADMIN') {
+    // 這兩支是用來取得可切換清單的控制 API，必須先允許它們回應，
+    // 才能把瀏覽器舊的 localStorage 公司別校正成登入工作階段的公司別。
+    if (req.path === '/api/company-contexts' || req.path === '/api/source-databases') return next();
+
+    const sourceCandidates = uniqueContextValues([
+      req.query.source_database, req.query.db, req.body?.source_database,
+      req.headers['x-source-database'], req.headers['x-erp-context-key']
+    ]);
+    if (sourceCandidates.length > 1) {
+      return res.status(409).json({ ok:false, error:'公司上下文來源不一致，已拒絕此請求。請重新整理後再操作。' });
+    }
+    const requestedSource = sourceCandidates[0] || null;
+    if (requestedSource && !sourceDatabases[requestedSource]) {
+      return res.status(400).json({ ok:false, error:`不允許的資料庫來源：${requestedSource}` });
+    }
+
+    const sessionSource = normalizeContextKey(req.auth?.current_source_key);
+    if (sessionSource && requestedSource && sessionSource !== requestedSource) {
+      return res.status(409).json({ ok:false, error:`目前登入公司為 ${sessionSource}，不可從此作業指定 ${requestedSource}。` });
+    }
+    const sourceName = sessionSource || requestedSource;
+    if (!sourceName) {
+      if (isControlApiPath(req.path)) return next();
+      return res.status(403).json({ ok:false, error:'目前登入帳號尚未設定可用的公司別，無法執行此作業。' });
+    }
+    const source = sourceDatabases[sourceName];
+    if (!source) return res.status(400).json({ ok:false, error:`不允許的資料庫來源：${sourceName}` });
+
+    if (req.auth?.role_code !== 'ADMIN') {
       const [[access]] = await pool.query('SELECT 1 allowed FROM access_user_companies WHERE user_id=? AND source_key=?', [req.auth.id, sourceName]);
       if (!access) return res.status(403).json({ ok:false, error:'您沒有此公司別的存取權限。' });
     }
-    if (source && requestedCompanyId && requestedCompanyId !== String(source.company_id || sourceName)) {
+    const companyCandidates = uniqueContextValues([
+      req.query.company_id, req.body?.company_id, req.headers['x-company-id']
+    ]);
+    const expectedCompany = normalizeContextKey(source.company_id || sourceName);
+    if (companyCandidates.some(companyId => companyId !== expectedCompany)) {
       return res.status(409).json({ ok:false, error:'公司別與資料庫來源不一致，為避免資料混用已拒絕此請求。' });
     }
-    const controlPaths = ['/api/company-contexts', '/api/source-databases', '/api/master-source-mappings', '/api/import/'];
-    if (!sourceName || controlPaths.some(path => req.path.startsWith(path))) return next();
+
+    req.erpContext = {
+      context_key: sourceName, source_database: sourceName, tenant_id: source.tenant_id,
+      company_id: source.company_id, source_system: source.source_system,
+      target_database: source.target_database, read_only: source.read_only
+    };
+    // 讓既有各路由即使沒有顯式帶 source_database，也只能使用目前工作階段的公司。
+    req.query.source_database = sourceName;
+    req.query.db = sourceName;
+    if (req.body && typeof req.body === 'object' && !Array.isArray(req.body) && !req.body.source_database) {
+      req.body.source_database = sourceName;
+    }
+    if (isControlApiPath(req.path)) return next();
     return runWithTargetDatabase(sourceName, next);
   });
   app.use('/api/sh', (req, res, next) => {
@@ -1129,7 +1183,10 @@ function notFound(message) {
 }
 
 function sourceDbFromRequest(req) {
-  const requested = String(req.query.db || req.headers['x-source-database'] || 'SH').toUpperCase();
+  const requested = String(
+    req.erpContext?.source_database || req.query.source_database || req.query.db ||
+    req.body?.source_database || req.headers['x-source-database'] || 'SH'
+  ).toUpperCase();
   if (!sourceDatabases[requested]) throw badRequest(`不允許的資料庫來源：${requested}`);
   return requested;
 }

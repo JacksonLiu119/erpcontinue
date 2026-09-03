@@ -67,6 +67,14 @@ async function login() {
   return result.token;
 }
 
+async function switchContext(token, sourceKey) {
+  return apiRequest('/api/auth/context', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source_key: sourceKey })
+  });
+}
+
 function assertEqual(actual, expected, label) {
   if (String(actual ?? '') !== String(expected ?? '')) throw new Error(`${label}不一致：${actual}（預期 ${expected}）`);
 }
@@ -176,7 +184,12 @@ try {
   if (!sources.length) throw new Error(requestedSource ? `找不到啟用中的公司來源：${requestedSource}` : '目前沒有啟用中的公司來源');
   token = await login();
   const checked = [];
-  for (const source of sources) checked.push(await verifySource(source, token));
+  for (const source of sources) {
+    // 公司上下文是登入工作階段狀態；每家公司檢核前都經過正式切換 API，
+    // 不用把另一家公司的 source_database 直接塞進查詢參數繞過隔離。
+    await switchContext(token, source.key);
+    checked.push(await verifySource(source, token));
+  }
   console.log(JSON.stringify({
     ok: true,
     base_url: baseUrl,

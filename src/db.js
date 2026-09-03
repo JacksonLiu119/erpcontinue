@@ -1183,6 +1183,10 @@ export function ensureProcurementSchema() {
         CONSTRAINT fk_access_session_user FOREIGN KEY (user_id) REFERENCES access_users(id) ON DELETE CASCADE,
         KEY ix_access_session_expiry (expires_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      // 每個登入工作階段固定一個目前公司上下文；不要讓畫面傳入的來源欄位
+      // 在沒有重新授權的情況下切換到另一家公司。
+      await addColumnIfMissing('access_sessions', 'current_source_key', 'VARCHAR(60) NULL');
+      await addColumnIfMissing('access_sessions', 'context_changed_at', 'DATETIME NULL');
       await pool.query(`CREATE TABLE IF NOT EXISTS access_password_reset_requests (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         user_id BIGINT UNSIGNED NOT NULL,

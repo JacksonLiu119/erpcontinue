@@ -6,7 +6,7 @@ const db=await mysql.createConnection({host:process.env.DB_HOST||'127.0.0.1',por
 const marker='VERIFY_PARTIAL_RECEIPT';
 const [[admin]]=await db.query("SELECT id FROM access_users WHERE username='admin'");
 const token=crypto.randomBytes(48).toString('base64url');
-await db.query('INSERT INTO access_sessions(user_id,token_hash,expires_at) VALUES(?,?,DATE_ADD(NOW(),INTERVAL 1 HOUR))',[admin.id,crypto.createHash('sha256').update(token).digest('hex')]);
+await db.query('INSERT INTO access_sessions(user_id,token_hash,expires_at,current_source_key,context_changed_at) VALUES(?,?,DATE_ADD(NOW(),INTERVAL 1 HOUR),?,NOW())',[admin.id,crypto.createHash('sha256').update(token).digest('hex'),'SC']);
 const api=async(path,method='GET',body)=>{const r=await fetch(`http://127.0.0.1:3000/api${path}`,{method,headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});const j=await r.json();if(!r.ok)throw new Error(j.error);return j.data??j;};
 let orderId;
 let targetDb;

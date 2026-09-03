@@ -16,6 +16,16 @@ async function login() {
   if (!response.ok || payload.ok === false) throw new Error(payload.error || '登入失敗');
   return payload.data.token;
 }
+async function switchContext(token, sourceKey) {
+  const response = await fetch(`${API}/auth/context`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source_key: sourceKey }),
+  });
+  const payload = await response.json();
+  if (!response.ok || payload.ok === false) throw new Error(payload.error || '公司上下文切換失敗');
+  return payload.data ?? payload;
+}
 function request(token, path, method = 'GET', body) {
   return fetch(`${API}${path}`, { method, headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined })
     .then(async response => { const payload = await response.json(); if (!response.ok || payload.ok === false) { const error = new Error(payload.error || response.statusText); error.status = response.status; throw error; } return payload.data ?? payload; });
@@ -45,6 +55,7 @@ async function cleanup(db) {
 }
 
 async function verifyCompany(token, db, source, otherSource) {
+  await switchContext(token, source);
   const suffix = source === 'SH' ? 'H' : 'C';
   const types = { rq: `R02${suffix}RQ`, po: `R02${suffix}PO`, qt: `R02${suffix}QT`, so: `R02${suffix}SO`, sa: `R02${suffix}SA` };
   for (const payload of [

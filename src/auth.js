@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { pool, ensureProcurementSchema } from './db.js';
+import { pool, ensureProcurementSchema, sourceDatabases } from './db.js';
 
 const SESSION_HOURS = 12;
 
@@ -24,6 +24,51 @@ function tokenFrom(req) {
   return header.startsWith('Bearer ') ? header.slice(7).trim() : '';
 }
 
+function normalizeSourceKey(value) {
+  const key = String(value ?? '').trim().toUpperCase();
+  return key || null;
+}
+
+async function hasSourceAccess(userId, roleCode, sourceKey) {
+  const key = normalizeSourceKey(sourceKey);
+  if (!key) return false;
+  const [[row]] = await pool.query(`
+    SELECT 1 AS allowed
+    FROM erp_data_sources s
+    WHERE s.source_key=? AND s.enabled=1
+      AND (?='ADMIN' OR EXISTS(
+        SELECT 1 FROM access_user_companies auc
+        WHERE auc.user_id=? AND auc.source_key=s.source_key
+      ))
+    LIMIT 1`, [key, roleCode, userId]);
+  return Boolean(row);
+}
+
+async function defaultSourceForUser(user) {
+  const [[row]] = await pool.query(`
+    SELECT s.source_key
+    FROM erp_data_sources s
+    WHERE s.enabled=1
+      AND (?='ADMIN' OR EXISTS(
+        SELECT 1 FROM access_user_companies auc
+        WHERE auc.user_id=? AND auc.source_key=s.source_key
+      ))
+    ORDER BY CASE WHEN s.source_key='SH' THEN 0 ELSE 1 END, s.sort_order, s.source_key
+    LIMIT 1`, [user.role_code, user.id]);
+  return normalizeSourceKey(row?.source_key);
+}
+
+async function synchronizeSessionContext(user) {
+  const requested = normalizeSourceKey(user.current_source_key);
+  const current = requested && await hasSourceAccess(user.id, user.role_code, requested)
+    ? requested
+    : await defaultSourceForUser(user);
+  if (current !== requested) {
+    await pool.query('UPDATE access_sessions SET current_source_key=?, context_changed_at=NOW() WHERE id=? AND user_id=?', [current, user.session_id, user.id]);
+  }
+  return current;
+}
+
 export async function authMiddleware(req, _res, next) {
   try {
     if (req.path === '/auth/login') return next();
@@ -31,10 +76,12 @@ export async function authMiddleware(req, _res, next) {
     if (!token) throw unauthorized();
     const hash = crypto.createHash('sha256').update(token).digest('hex');
     const [[user]] = await pool.query(`SELECT u.id, u.username, u.employee_code, u.display_name, u.role_id, u.is_active,
-      r.role_code, r.role_name, s.id AS session_id
+      r.role_code, r.role_name, s.id AS session_id, s.current_source_key
       FROM access_sessions s JOIN access_users u ON u.id=s.user_id JOIN access_roles r ON r.id=u.role_id
       WHERE s.token_hash=? AND s.expires_at>NOW()`, [hash]);
     if (!user || !user.is_active) throw unauthorized('登入已失效，請重新登入');
+    user.current_source_key = await synchronizeSessionContext(user);
+    user.current_company_id = sourceDatabases[user.current_source_key]?.company_id || null;
     req.auth = user;
     next();
   } catch (error) { next(error); }
@@ -154,17 +201,36 @@ export function registerAuthRoutes(app) {
       if (!username || !password) throw badRequest('請輸入帳號與密碼');
       const [[user]] = await pool.query(`SELECT u.*, r.role_code, r.role_name FROM access_users u JOIN access_roles r ON r.id=u.role_id WHERE u.username=?`, [username]);
       if (!user || !user.is_active || !verifyPassword(password, user.password_hash)) throw unauthorized('帳號或密碼錯誤');
+      const currentSource = await defaultSourceForUser(user);
       const token = crypto.randomBytes(48).toString('base64url');
       const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
       // 僅清除過期連線；允許同一使用者同時開啟多個 ERP 分頁，
       // 避免重新登入或另一分頁登入時，讓既有分頁突然失效並顯示空資料。
       await pool.query('DELETE FROM access_sessions WHERE expires_at <= NOW()');
-      await pool.query('INSERT INTO access_sessions (user_id, token_hash, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? HOUR))', [user.id, tokenHash, SESSION_HOURS]);
-      res.json({ ok: true, data: { token, user: { id:user.id, username:user.username, display_name:user.display_name, employee_code:user.employee_code, role_id:user.role_id, role_code:user.role_code, role_name:user.role_name, force_password_change:Boolean(user.force_password_change) } } });
+      await pool.query('INSERT INTO access_sessions (user_id, token_hash, expires_at, current_source_key) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? HOUR), ?)', [user.id, tokenHash, SESSION_HOURS, currentSource]);
+      res.json({ ok: true, data: { token, user: { id:user.id, username:user.username, display_name:user.display_name, employee_code:user.employee_code, role_id:user.role_id, role_code:user.role_code, role_name:user.role_name, current_source_key:currentSource, force_password_change:Boolean(user.force_password_change) } } });
     } catch (error) { next(error); }
   });
 
   app.get('/api/auth/me', (req, res) => res.json({ ok:true, data:req.auth }));
+  app.post('/api/auth/context', async (req, res, next) => {
+    try {
+      const sourceKey = normalizeSourceKey(req.body?.source_key || req.body?.source_database);
+      const source = sourceKey ? sourceDatabases[sourceKey] : null;
+      if (!source || !source.enabled) throw badRequest('指定的公司別／資料來源不存在或尚未啟用');
+      if (!(await hasSourceAccess(req.auth.id, req.auth.role_code, sourceKey))) {
+        throw forbidden('您沒有此公司別的存取權限');
+      }
+      await pool.query('UPDATE access_sessions SET current_source_key=?, context_changed_at=NOW() WHERE id=? AND user_id=?', [sourceKey, req.auth.session_id, req.auth.id]);
+      req.auth.current_source_key = sourceKey;
+      req.auth.current_company_id = source.company_id || null;
+      res.json({ ok:true, data:{
+        context_key:sourceKey, source_database:sourceKey, tenant_id:source.tenant_id,
+        company_id:source.company_id, source_system:source.source_system,
+        target_database:source.target_database, label:source.label, read_only:source.read_only
+      } });
+    } catch (error) { next(error); }
+  });
   app.get('/api/auth/access', async (req, res, next) => {
     try {
       if (req.auth.role_code === 'ADMIN') return res.json({ ok:true, data:{ is_admin:true, permissions:[] } });

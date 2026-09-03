@@ -14,6 +14,16 @@ async function login() {
   if (!response.ok || result.ok === false) throw new Error(result.error || '登入失敗');
   return result.data.token;
 }
+async function switchContext(token, sourceKey) {
+  const response = await fetch(`${API}/auth/context`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source_key: sourceKey }),
+  });
+  const result = await response.json();
+  if (!response.ok || result.ok === false) throw new Error(result.error || '公司上下文切換失敗');
+  return result.data ?? result;
+}
 async function request(token,path,method='GET',body) {
   const response = await fetch(`${API}${path}`, { method, headers:{Authorization:`Bearer ${token}`,...(body?{'Content-Type':'application/json'}:{})}, body:body?JSON.stringify(body):undefined });
   const result = await response.json();
@@ -52,6 +62,7 @@ try {
   target = await mysql.createConnection({...config,database:source.target_database});
   await cleanup(target);
   const token = await login();
+  await switchContext(token, SOURCE);
   const types = await request(token,`/procurement/document-types?source_database=${SOURCE}`);
   const type = kind => types.find(row=>row.document_kind===kind && Number(row.is_active));
   const poType=type('purchase_order'), receiptType=type('receipt'), returnType=type('purchase_return');

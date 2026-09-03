@@ -10,7 +10,7 @@
 - 庫存：即時庫存、庫存異動、安全庫存預警
 - 報表：Dashboard、低庫存清單，以及公司別／日期區間的廠商預計進料、品號／庫別預計進料、製令預計進料、未交／未結案、應收／應付帳齡、資金預估與票據票況；流程稽核另提供逾期、未轉、未交、已交未立帳、已立帳未收／未付、孤兒單據、異常原因與待核准更正建議
 - 財務：應收／應付、收付款、票據、銀行存提款、逐筆對帳、未對帳／未兌現查詢、會計期間、會計分錄底稿（多筆來源彙總、立沖、來源鎖定、核准、拋轉與還原）
-- 公司切換：以 `erp_data_sources` 維護來源資料庫，以 `erp_companies` 顯示公司主檔；公司別與來源資料庫綁定，避免不同公司的資料混用。
+- 公司切換：以 `erp_data_sources` 維護來源資料庫，以 `erp_companies` 顯示公司主檔；公司別與來源資料庫綁定，避免不同公司的資料混用。登入後的工作階段會固定目前公司上下文，作業畫面下方的公司／來源欄位只顯示鎖定值；跨公司參數、標頭或 API 呼叫會被拒絕，只有上方公司切換入口能重新授權切換。
 
 ## iSM 文件參照方向
 
@@ -93,7 +93,11 @@ npm run verify:flow-audit-recommendations
 
 `verify:import-quality` 會以目標 ERP 的暫時資料驗證指定單號品質掃描、完成單據剩餘量警示、目標端更正案件與事件歷程；最後清理測試資料，並確認 SH 原始資料未被修改。歷史匯入資料預設採「保留警示」策略，不會自動改寫 SH／SC；要修正只能在目標 ERP 走更正案件與沖回／重開／重作流程。匯入銷售訂單時，來源 `TA019` 會標準化為作廢／完成／核准狀態，並保留原始狀態碼。
 
-`verify:company-regression` 會對每一個啟用中的公司來源，使用相同的日期條件重新執行七類配銷／財務報表、銷售／採購／健康度流程稽核、資料品質查詢，並檢查目標資料表的租戶、公司、來源系統與來源資料庫範圍。預設只讀取與查詢，不新增測試單據；可用 `npm run verify:company-regression -- --source=SC` 只檢查指定公司，或用 `--from-date=YYYY-MM-DD --to-date=YYYY-MM-DD` 指定期間。製令報表在尚未完成標準欄位對照時會回傳「待對照」，不會猜測原始 MO 欄位。
+`verify:company-regression` 會對每一個啟用中的公司來源，先經過登入工作階段的公司上下文切換，再使用相同的日期條件重新執行七類配銷／財務報表、銷售／採購／健康度流程稽核、資料品質查詢，並檢查目標資料表的租戶、公司、來源系統與來源資料庫範圍。預設只讀取與查詢，不新增測試單據；可用 `npm run verify:company-regression -- --source=SC` 只檢查指定公司，或用 `--from-date=YYYY-MM-DD --to-date=YYYY-MM-DD` 指定期間。製令報表在尚未完成標準欄位對照時會回傳「待對照」，不會猜測原始 MO 欄位。
+
+`verify:company-context` 會驗證目前登入公司的 API 查詢、跨公司來源、衝突參數與錯誤公司代號攔截，並驗證正式切換公司後只能查到新公司的資料；測試最後會切回原公司並登出。
+
+互動式 API 會驗證 `X-ERP-Context-Key`、`X-Source-Database`、`X-Company-Id` 與登入 session 的公司是否一致；`POST /api/auth/context` 是唯一的公司切換入口。`access_user_companies` 控制一般帳號可進入的公司，管理員則在獨立 `/admin` 後台設定帳號、角色與公司範圍；部門範圍與權限異動稽核列在「下一階段開發順序（已確認項目）」。
 
 `verify:flow-audit-recommendations` 會驗證公司別／日期起訖／截至日條件、銷售／採購／庫存／應收應付摘要、逾期與資金影響、候選建議產生、待核准→核准及事件歷程；建議核准只建立目標 ERP 的決策紀錄，不會修改 SH／SC，測試結束會還原資料。流程稽核 API 為 `GET /api/flow-audit/health|sales|procurement`，更正建議 API 為 `GET /api/flow-audit/recommendations`、`POST /api/flow-audit/recommendations/generate` 及 `POST /api/flow-audit/recommendations/:id/approve|reject`。
 

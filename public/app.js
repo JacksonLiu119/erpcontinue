@@ -52,7 +52,7 @@ modules.find(module => module.id === 'INV').screens = [
 ];
 modules.push({id:'SAL',name:'銷售管理',screens:[['sales-document-types','銷售單據性質'],['sales-quotations','報價建立作業'],['sales-orders','訂單建立作業'],['sales-order-changes','訂單變更'],['sales-shipments','銷貨建立／出庫'],['sales-returns','銷退／折讓'],['sales-progress','訂單銷貨進度'],['sales-open-orders','未交訂單查詢']]});
 
-modules.push({id:'FIN',name:'應收／應付管理',screens:[['finance-flow','財務流程圖'],['ar-source','銷貨轉應收'],['ar-open','應收帳款'],['ar-credits','銷退待抵／退款'],['ar-receipt','收款沖銷'],['ar-notes','應收票據'],['ar-aging','未收帳款查詢'],['ap-source','進貨轉應付'],['ap-open','應付帳款'],['ap-payment','付款沖銷'],['ap-notes','應付票據'],['ap-aging','未付帳款查詢'],['bank-ledger','銀行資金／對帳'],['accounting-clearing','立沖帳查詢'],['accounting-opening-balances','期初未結帳款'],['accounting-periods','會計期間管理'],['accounting-year-close','年度結轉'],['accounting-auto-rules','自動分錄規則'],['accounting-drafts','會計分錄底稿'],['general-ledger','會計傳票／總帳'],['accounting-financial-preview','SC 2025 只讀財報預覽'] ]});
+modules.push({id:'FIN',name:'應收／應付管理',screens:[['finance-flow','財務流程圖'],['ar-source','銷貨轉應收'],['ar-open','應收帳款'],['ar-credits','銷退待抵／退款'],['ar-receipt','收款沖銷'],['ar-notes','應收票據'],['ar-aging','未收帳款查詢'],['ap-source','進貨轉應付'],['ap-open','應付帳款'],['ap-payment','付款沖銷'],['ap-notes','應付票據'],['ap-aging','未付帳款查詢'],['bank-ledger','銀行資金／對帳'],['accounting-clearing','立沖帳查詢'],['accounting-opening-balances','期初未結帳款'],['accounting-periods','會計期間管理'],['accounting-year-close','年度結轉'],['accounting-auto-rules','自動分錄規則'],['accounting-drafts','會計分錄底稿'],['general-ledger','會計傳票／總帳'],['accounting-financial-preview','公司別只讀財報預覽'] ]});
 modules.find(module => module.id === 'FIN').screens.splice(4,0,['advances-offset','預收／預付與對沖']);
 modules.push({id:'RPT',name:'流程稽核',screens:[['operations-health','營運健康度'],['sales-flow-audit','銷售流程稽核'],['purchase-flow-audit','採購流程稽核'],['operations-reports','配銷／財務報表']]});
 modules.push({id:'ARCH',name:'架構與流程',screens:[['architecture-flow','系統架構與流程圖']]});
@@ -74,6 +74,7 @@ async function api(path, options = {}) {
   const requestedSource = (() => { try { return new URL(path, location.origin).searchParams.get('source_database') || currentDatabase; } catch (_) { return currentDatabase; } })().toUpperCase();
   const requestedContext = (companyContexts || []).find(row => String(row.source_database).toUpperCase() === requestedSource);
   headers.set('X-Source-Database', requestedSource);
+  headers.set('X-ERP-Context-Key', String(currentCompanyContext?.source_database || requestedSource).toUpperCase());
   headers.set('X-Company-Id', requestedContext?.company_id || requestedSource);
   const response = await fetch(path, { ...options, headers });
   const body = await response.json().catch(() => ({}));
@@ -118,7 +119,7 @@ function renderAll() {
     state.module = visible[0].id; state.screen = visible[0].screens[0][0];
   }
   document.body.classList.toggle('architecture-mode', state.module === 'ARCH');
-  renderSidebar(); renderTabs(); renderScreen();
+  renderSidebar(); renderTabs(); renderScreen(); enforceCompanyContextFields();
   $('#breadcrumb').textContent = `${visible.find(x => x.id === state.module)?.name || ''} / ${getTitle(state.screen)}`;
 }
 
@@ -399,7 +400,9 @@ async function loadCompanyOptions() {
   try {
     const rows = await api('/api/company-contexts');
     companyContexts = Array.isArray(rows) ? rows : [];
-    const selected = companyContexts.find(row => row.context_key === currentCompanyContextKey)
+    const serverSource = String((typeof currentUser !== 'undefined' && currentUser?.current_source_key) || '').toUpperCase();
+    const selected = companyContexts.find(row => String(row.source_database).toUpperCase() === serverSource)
+      || companyContexts.find(row => row.context_key === currentCompanyContextKey)
       || companyContexts.find(row => row.source_database === currentDatabase)
       || companyContexts[0];
     if (selected) {
@@ -418,12 +421,22 @@ async function loadCompanyOptions() {
   }
 }
 
-function selectCompanyContext(contextKey) {
+async function selectCompanyContext(contextKey) {
   const selected = companyContexts.find(row => row.context_key === contextKey);
   if (!selected) return;
+  try {
+    await api('/api/auth/context', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ source_key:selected.source_database })
+    });
+  } catch (error) {
+    toast(error.message, true);
+    return;
+  }
   currentCompanyContext = selected;
   currentCompanyContextKey = selected.context_key;
   currentDatabase = selected.source_database;
+  if (typeof currentUser !== 'undefined' && currentUser) currentUser.current_source_key = selected.source_database;
   localStorage.setItem('erp-company-context', selected.context_key);
   localStorage.setItem('erp-source-database', currentDatabase);
   updateContextButtons();
@@ -434,16 +447,10 @@ function selectCompanyContext(contextKey) {
   renderAll();
 }
 
-function selectSourceDatabase(sourceKey) {
+async function selectSourceDatabase(sourceKey) {
   const selected = companyContexts.find(row => row.source_database === String(sourceKey).toUpperCase());
   if (selected) return selectCompanyContext(selected.context_key);
-  currentDatabase = String(sourceKey).toUpperCase();
-  localStorage.setItem('erp-source-database', currentDatabase);
-  currentCompanyContext = null;
-  updateContextButtons();
-  $('#databasePopover').hidden = true;
-  toast(`已切換資料來源：${currentDatabase}`);
-  renderAll();
+  toast('資料來源必須先建立對應的公司上下文，無法單獨切換。', true);
 }
 
 function renderMasterScreen(type, config) {
@@ -541,15 +548,19 @@ function financialPreviewStatus(passed,label='通過'){return passed?`<span clas
 function financialPreviewSourceOptions(){
   const rows=(companyContexts||[]).filter(row=>row.source_database);
   const list=rows.length?rows:[{source_database:currentDatabase,company_name:currentDatabase,company_code:currentDatabase}];
-  const hasSc=list.some(row=>String(row.source_database).toUpperCase()==='SC');
-  const preferred=hasSc?'SC':String(currentDatabase||list[0]?.source_database||'').toUpperCase();
+  const requested=String(currentCompanyContext?.source_database||(typeof currentUser!=='undefined'?currentUser?.current_source_key:'')||currentDatabase||'').toUpperCase();
+  const preferred=list.some(row=>String(row.source_database).toUpperCase()===requested)
+    ? requested
+    : String(list[0]?.source_database||'').toUpperCase();
   return {preferred,html:[...new Map(list.map(row=>[String(row.source_database).toUpperCase(),row])).values()].map(row=>{const key=String(row.source_database).toUpperCase();return `<option value="${esc(key)}" ${key===preferred?'selected':''}>${esc(row.company_name||row.short_name||key)}｜${esc(key)}</option>`;}).join('')};
 }
 function financialPreviewPeriodOptions(){return '<option value="">自訂日期</option><option value="2025-01">2025-01</option><option value="2025-02">2025-02</option><option value="2025-03">2025-03</option><option value="2025-04">2025-04</option><option value="2025-05">2025-05</option><option value="2025-06">2025-06</option><option value="2025-07">2025-07</option><option value="2025-08">2025-08</option><option value="2025-09">2025-09</option><option value="2025-10">2025-10</option><option value="2025-11">2025-11</option><option value="2025-12">2025-12</option>';}
 function financialPreviewPeriodDates(period){const match=/^(\d{4})-(\d{2})$/.exec(period||'');if(!match)return null;const year=Number(match[1]),month=Number(match[2]),lastDay=new Date(Date.UTC(year,month,0)).getUTCDate();return {from:`${year}-${match[2]}-01`,to:`${year}-${match[2]}-${String(lastDay).padStart(2,'0')}`};}
 function renderSourceFinancialPreview(){
   const sourceOptions=financialPreviewSourceOptions();
-  $('#canvas').innerHTML=`<section class="screen financial-preview-screen"><div class="screen-head"><h2>SC 2025 只讀財報預覽</h2><span class="code">來源總帳只讀</span><button class="btn" id="financialPreviewReload" type="button">重新整理</button></div><div class="screen-body"><div class="desc">本頁直接查詢公司別來源資料庫的 ACTMA／ACTMB／ACTTA／ACTTB，產生損益表、資產負債表與現金流量預覽；完整月份會優先使用 ACTMB 的期初 00 與月份摘要，其他日期範圍依已核准過帳傳票彙總。不寫入 ${esc(targetDatabaseLabel())}，不回寫 SC 原始資料。現金流依現金／銀行科目與對方科目推導，未分類項目會保留為待對照。</div><form id="financialPreviewFilter" class="form"><div class="row c4"><div class="field"><label>公司別／資料來源</label><select name="source_database">${sourceOptions.html}</select></div><div class="field"><label>會計期間</label><select name="period">${financialPreviewPeriodOptions()}</select></div><div class="field"><label>日期起日</label><input name="from_date" type="date" value="2025-01-01" required></div><div class="field"><label>日期迄日</label><input name="to_date" type="date" value="2025-12-31" required></div><div class="field"><label>幣別</label><select name="currency_code"><option value="">全部幣別</option></select></div><div class="field"><label>現金流明細上限</label><select name="limit"><option value="200">200</option><option value="500">500</option></select></div></div><button class="btn primary" type="submit">查詢只讀財報</button></form><div id="financialPreviewMeta"></div><div id="financialPreviewChecks"></div><div id="financialPreviewResult"><div class="empty-hint">查詢中…</div></div></div></section>`;
+  const currentSource=String(sourceOptions.preferred||currentDatabase||'').toUpperCase();
+  const currentCompanyName=currentCompanyContext?.company_name||currentCompanyContext?.short_name||currentSource;
+  $('#canvas').innerHTML=`<section class="screen financial-preview-screen"><div class="screen-head"><h2>${esc(currentCompanyName)} 只讀財報預覽</h2><span class="code">來源總帳只讀</span><button class="btn" id="financialPreviewReload" type="button">重新整理</button></div><div class="screen-body"><div class="desc">本頁直接查詢目前公司來源資料庫的 ACTMA／ACTMB／ACTTA／ACTTB，產生損益表、資產負債表與現金流量預覽；完整月份會優先使用 ACTMB 的期初 00 與月份摘要，其他日期範圍依已核准過帳傳票彙總。不寫入 ${esc(targetDatabaseLabel())}，不回寫目前公司原始資料。現金流依現金／銀行科目與對方科目推導，未分類項目會保留為待對照。</div><form id="financialPreviewFilter" class="form"><div class="row c4"><div class="field"><label>公司別／資料來源</label><select name="source_database">${sourceOptions.html}</select></div><div class="field"><label>會計期間</label><select name="period">${financialPreviewPeriodOptions()}</select></div><div class="field"><label>日期起日</label><input name="from_date" type="date" value="2025-01-01" required></div><div class="field"><label>日期迄日</label><input name="to_date" type="date" value="2025-12-31" required></div><div class="field"><label>幣別</label><select name="currency_code"><option value="">全部幣別</option></select></div><div class="field"><label>現金流明細上限</label><select name="limit"><option value="200">200</option><option value="500">500</option></select></div></div><button class="btn primary" type="submit">查詢只讀財報</button></form><div id="financialPreviewMeta"></div><div id="financialPreviewChecks"></div><div id="financialPreviewResult"><div class="empty-hint">查詢中…</div></div></div></section>`;
   const form=$('#financialPreviewFilter');
   const updatePeriodDates=()=>{const dates=financialPreviewPeriodDates(form.elements.period.value);if(dates){form.elements.from_date.value=dates.from;form.elements.to_date.value=dates.to;}};
   form.elements.period.onchange=updatePeriodDates;
@@ -676,7 +687,9 @@ function renderAccountingDrafts(){
   const load=async()=>{try{const rows=await api(`/api/accounting/drafts?source_database=${encodeURIComponent(currentDatabase)}`);$('#accountingDraftRows').innerHTML=rows.map(x=>`<tr><td>${esc(x.draft_no)}</td><td>${esc(displayDateOf(x.draft_date))}</td><td>${esc(x.source_document_no||x.source_kind||'')}</td><td>${esc(x.line_count||0)}</td><td>${esc(x.debit_total||0)}</td><td>${esc(x.credit_total||0)}</td><td>${esc(statusName[x.status]||x.status)}</td><td>${Number(x.source_locked)?'是':'否'}</td><td><button class="btn small" data-draft-open="${x.id}">查看／維護</button></td></tr>`).join('')||'<tr><td colspan="9" class="empty-hint">尚無會計分錄底稿。</td></tr>';document.querySelectorAll('[data-draft-open]').forEach(b=>b.onclick=()=>openDetail(b.dataset.draftOpen));await loadSources();}catch(e){toast(e.message,true);}};
   $('#draftGenerateForm').onsubmit=async e=>{e.preventDefault();const selected=[...document.querySelectorAll('[data-draft-source]:checked')].map(x=>Number(x.value));if(!selected.length){toast('請至少選擇一筆來源帳款',true);return;}const form=e.currentTarget;try{const result=await api('/api/accounting/drafts/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_database:currentDatabase,source_refs:selected,draft_date:form.elements.draft_date.value,memo:form.elements.memo.value})});toast(`底稿 ${result.draft_no} 已產生並鎖定來源`);form.reset();form.elements.draft_date.value=procurementToday();await load();await openDetail(result.id);}catch(x){toast(x.message,true);}};$('#accountingDraftReload').onclick=load;load();
 }
-const confirmedNextPhaseRoadmap=[];
+const confirmedNextPhaseRoadmap=[
+  ['N15','登入帳號／公司／部門範圍權限','目前已完成登入工作階段固定公司上下文與公司別存取檢核；下一階段補齊帳號可用公司別、部門範圍、角色與作業權限的管理、權限異動歷程及跨公司／跨部門稽核。','planned']
+];
 function renderConfirmedNextPhaseRoadmap(items=confirmedNextPhaseRoadmap){
   return items.length?items.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${esc(no)}</span><div><strong>${esc(title)}</strong><p>${esc(desc)}</p></div></div>`).join(''):'<div class="desc">目前沒有其他已確認的開發項目。</div>';
 }
@@ -688,7 +701,7 @@ function renderFinanceFlow(){
   const body=`<div class="finance-flow-intro"><div class="desc">依《iSM-財務實作演練班》整理。綠框代表該節點範圍已驗證，橘框代表已可操作但仍有子流程缺口，紅色虛線代表尚未完成；點選可操作節點可直接進入對應作業。架構總覽與本圖使用同一套狀態。</div><div class="finance-flow-legend"><span class="done">目前可操作</span><span class="partial">部分完成／待補強</span><span class="planned">尚未完成</span></div></div>
     <div class="finance-flow-grid">
       ${column('訂單管理／應收','COP → ACR',[node('銷貨單／銷退單','銷貨追蹤、銷退回庫與應收沖帳／待抵／退款已完成','done','ar-source'),node('結帳／應收憑單','直接／手動／自動、發票與多幣別已完成','done','ar-source'),node('收款／沖銷','可多筆部分沖銷與匯差','done','ar-receipt'),node('應收票據','託收／兌現／退票／註銷／歷程／分錄底稿已完成','done','ar-notes'),node('銀行存款／對帳','存提款／逐筆對帳／餘額回寫已完成','done','bank-ledger')])}
-      <div class="finance-flow-column finance-flow-center"><div class="finance-flow-title">會計與資金中控<small>ACR／ACP → GL</small></div>${node('會計分錄底稿','產生／維護／核准／拋轉／還原','done','accounting-drafts')}${arrow}${node('銀行資金／對帳','存提款、票據狀態、逐筆對帳、餘額回寫','done','bank-ledger')}${arrow}${node('立沖／預收預付／對沖','期初批次、可用／已用／剩餘、分批轉抵／退款／對沖已完成','done','accounting-clearing')}${arrow}${node('月底／年度結轉','12 個月快照／跨年度結轉／關帳攔截已完成','done','accounting-year-close')}${arrow}${node('傳票／總帳','試算表／科目餘額／明細與期初期末核對','done','general-ledger')}${arrow}${node('SC 2025 只讀財報預覽','損益表／資產負債表／現金流量表；來源唯讀','done','accounting-financial-preview')}<div class="finance-flow-note">流程稽核已完成：逾期／未轉／未交／帳款帳齡與資金影響可依公司別、日期起訖、截至日查詢；異常可產生待核准更正建議，核准後仍須由受控更正作業執行。</div></div>
+      <div class="finance-flow-column finance-flow-center"><div class="finance-flow-title">會計與資金中控<small>ACR／ACP → GL</small></div>${node('會計分錄底稿','產生／維護／核准／拋轉／還原','done','accounting-drafts')}${arrow}${node('銀行資金／對帳','存提款、票據狀態、逐筆對帳、餘額回寫','done','bank-ledger')}${arrow}${node('立沖／預收預付／對沖','期初批次、可用／已用／剩餘、分批轉抵／退款／對沖已完成','done','accounting-clearing')}${arrow}${node('月底／年度結轉','12 個月快照／跨年度結轉／關帳攔截已完成','done','accounting-year-close')}${arrow}${node('傳票／總帳','試算表／科目餘額／明細與期初期末核對','done','general-ledger')}${arrow}${node('公司別只讀財報預覽','依目前公司來源產生損益／資產負債／現金流；來源唯讀','done','accounting-financial-preview')}<div class="finance-flow-note">流程稽核已完成：逾期／未轉／未交／帳款帳齡與資金影響可依公司別、日期起訖、截至日查詢；異常可產生待核准更正建議，核准後仍須由受控更正作業執行。</div></div>
       ${column('採購管理／應付','PUR → ACP',[node('進貨單／退貨單','驗收／退貨、計價／付款量與費用閉環已完成','done','ap-source'),node('應付憑單','多筆進貨／退貨負向應付與合併計價已完成','done','ap-source'),node('付款／沖銷','可多筆部分沖銷，付款量回寫已完成','done','ap-payment'),node('應付票據','託收／兌現／退票／註銷／歷程／分錄底稿已完成','done','ap-notes'),node('銀行提款／對帳','存提款／逐筆對帳／餘額回寫已完成','done','bank-ledger')])}
     </div>
     <div class="panel finance-flow-roadmap"><div class="panel-head">下一階段開發順序（已確認項目）</div><div class="panel-body"><div class="desc">本 SHEET 與「ERP 系統流程與開發狀態圖」共用清單；橘色代表部分完成，紅色虛線代表尚未完成。完成驗證後會移到下方的已完成內容區，不會再重複列為待辦。</div><div class="architecture-roadmap">${roadmapHtml}</div></div></div>
@@ -1427,4 +1440,23 @@ loadSalesDocs = async function(k) {
     } catch (error) { toast(error.message, true); }
   });
 };
+// 作業畫面的公司／來源是登入上下文，不是可自由切換的查詢條件。
+// 保留上方公司切換鈕作為唯一切換入口；所有下方表單一律顯示鎖定值並送出隱藏欄位。
+function enforceCompanyContextFields() {
+  const source = String(currentDatabase || '').toUpperCase();
+  const context = currentCompanyContext || companyContexts.find(row => String(row.source_database).toUpperCase() === source) || {};
+  const companyName = context.company_name || context.short_name || context.company_code || source;
+  document.querySelectorAll('select[name="source_database"]').forEach(select => {
+    const field = select.closest('.field');
+    if (!field) return;
+    if (field.dataset.erpContextLocked === source && field.querySelector('input[type="hidden"][name="source_database"]')) return;
+    const label = field.querySelector('label')?.textContent || '公司別／資料來源';
+    field.classList.add('context-locked-field');
+    field.dataset.erpContextLocked = source;
+    field.innerHTML = `<label>${esc(label)}</label><div class="context-locked-value" aria-readonly="true"><span class="context-lock-icon">🔒</span><strong>${esc(companyName)}</strong><span>｜${esc(source)}</span></div><small class="field-hint">依上方登入公司固定，作業畫面不可改用其他公司。</small><input type="hidden" name="source_database" value="${esc(source)}">`;
+  });
+  const financialTitle = document.querySelector('.financial-preview-screen .screen-head h2');
+  if (financialTitle) financialTitle.textContent = `${companyName} 2025 只讀財報預覽`;
+}
+
 applyTheme(state.theme); updateContextButtons(); renderAll();

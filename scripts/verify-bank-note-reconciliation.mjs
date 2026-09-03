@@ -56,6 +56,10 @@ function makeApi(token) {
   };
 }
 
+async function switchContext(api, sourceKey) {
+  return api('/auth/context', 'POST', { source_key: sourceKey });
+}
+
 async function expectError(work, label) {
   let rejected = false;
   try { await work(); } catch (_) { rejected = true; }
@@ -98,6 +102,7 @@ let token;
 try {
   token = await login();
   const api = makeApi(token);
+  await switchContext(api, SOURCE);
   const [[source]] = await control.query('SELECT target_database FROM erp_data_sources WHERE source_key=? AND enabled=1 LIMIT 1', [SOURCE]);
   assert(source, '找不到 SH 公司資料來源');
   target = await mysql.createConnection({ ...config, database: source.target_database || config.database });
@@ -116,15 +121,19 @@ try {
   assert(Number(permissions['finance-cash']?.can_create) === 1 && Number(permissions['finance-cash']?.can_update) === 1, '管錢權限未啟用存提款／票據異動', permissions);
   assert(Number(permissions['finance-reconcile']?.can_create) === 1 && Number(permissions['finance-reconcile']?.can_approve) === 1, '對帳權限未啟用建立／完成', permissions);
 
+  await switchContext(api, OTHER_SOURCE);
   const beforeOtherCompany = await api(`/finance-workflow/banks/accounts?source_database=${OTHER_SOURCE}`);
+  await switchContext(api, SOURCE);
   const createdAccount = await api('/finance-workflow/banks/accounts', 'POST', {
     source_database: SOURCE, bank_code: '013', bank_name: 'R07 測試銀行', account_no: ACCOUNT_NO,
     currency_code: 'TWD', opening_balance: 1000, note: MARKER,
   });
   const accountId = Number(createdAccount.id);
   assert(accountId, '銀行帳戶建立失敗', createdAccount);
+  await switchContext(api, OTHER_SOURCE);
   const afterOtherCompany = await api(`/finance-workflow/banks/accounts?source_database=${OTHER_SOURCE}`);
   assert(!afterOtherCompany.some(row => Number(row.id) === accountId) && afterOtherCompany.length === beforeOtherCompany.length, 'SH 銀行帳戶穿透到 SC 公司', { beforeOtherCompany, afterOtherCompany, accountId });
+  await switchContext(api, SOURCE);
 
   const deposit = await api('/finance-workflow/banks/transactions', 'POST', {
     source_database: SOURCE, bank_account_id: accountId, transaction_date: DATE, transaction_type: 'deposit',
