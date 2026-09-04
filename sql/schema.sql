@@ -180,6 +180,88 @@ CREATE TABLE IF NOT EXISTS erp_customer_item_mapping_events (
     FOREIGN KEY (mapping_id) REFERENCES erp_customer_item_mappings(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- COPI02 客戶產品計價：目標 ERP 的公司隔離計價版本。
+-- SH／SC 的 COPMB／COPMC 只作唯讀來源，不在來源資料庫新增或修改欄位。
+CREATE TABLE IF NOT EXISTS erp_customer_item_prices (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id VARCHAR(60) NOT NULL,
+  company_id VARCHAR(60) NOT NULL,
+  source_system VARCHAR(60) NOT NULL,
+  source_database VARCHAR(60) NOT NULL,
+  customer_id BIGINT UNSIGNED NULL,
+  customer_code VARCHAR(30) NOT NULL,
+  mapping_id BIGINT UNSIGNED NULL,
+  item_id BIGINT UNSIGNED NULL,
+  item_code VARCHAR(40) NOT NULL,
+  pricing_unit VARCHAR(20) NOT NULL,
+  currency_code VARCHAR(10) NOT NULL,
+  unit_price DECIMAL(24,6) NOT NULL DEFAULT 0,
+  discount_rate DECIMAL(12,8) NULL,
+  tax_included TINYINT(1) NOT NULL DEFAULT 0,
+  quantity_pricing_flag TINYINT(1) NOT NULL DEFAULT 0,
+  trade_condition VARCHAR(10) NOT NULL DEFAULT '1',
+  effective_from DATE NOT NULL,
+  effective_to DATE NULL,
+  status ENUM('draft','approved','voided') NOT NULL DEFAULT 'draft',
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  source_kind VARCHAR(30) NOT NULL DEFAULT 'manual',
+  source_document_id BIGINT UNSIGNED NULL,
+  source_document_no VARCHAR(80) NULL,
+  source_document_type VARCHAR(20) NULL,
+  source_table VARCHAR(60) NOT NULL DEFAULT 'manual',
+  source_key VARCHAR(160) NULL,
+  note VARCHAR(500) NULL,
+  created_by BIGINT UNSIGNED NULL,
+  updated_by BIGINT UNSIGNED NULL,
+  approved_by BIGINT UNSIGNED NULL,
+  approved_at DATETIME NULL,
+  voided_by BIGINT UNSIGNED NULL,
+  voided_at DATETIME NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_erp_customer_item_price_version
+    (tenant_id,company_id,source_system,source_database,customer_code,item_code,pricing_unit,currency_code,effective_from),
+  KEY ix_erp_customer_item_price_lookup
+    (tenant_id,company_id,source_system,source_database,customer_code,item_code,pricing_unit,currency_code,status,is_active,effective_from),
+  KEY ix_erp_customer_item_price_source
+    (source_database,source_kind,source_document_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS erp_customer_item_price_tiers (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  pricing_id BIGINT UNSIGNED NOT NULL,
+  line_no INT UNSIGNED NOT NULL DEFAULT 1,
+  quantity_from DECIMAL(24,6) NOT NULL DEFAULT 0,
+  unit_price DECIMAL(24,6) NULL,
+  discount_rate DECIMAL(12,8) NULL,
+  note VARCHAR(500) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_erp_customer_item_price_tier(pricing_id,quantity_from),
+  KEY ix_erp_customer_item_price_tier_line(pricing_id,line_no),
+  CONSTRAINT fk_erp_customer_item_price_tier
+    FOREIGN KEY (pricing_id) REFERENCES erp_customer_item_prices(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS erp_customer_item_price_events (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  pricing_id BIGINT UNSIGNED NOT NULL,
+  tenant_id VARCHAR(60) NOT NULL,
+  company_id VARCHAR(60) NOT NULL,
+  source_system VARCHAR(60) NOT NULL,
+  source_database VARCHAR(60) NOT NULL,
+  event_kind VARCHAR(30) NOT NULL,
+  before_json JSON NULL,
+  after_json JSON NULL,
+  reason VARCHAR(500) NOT NULL,
+  changed_by BIGINT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY ix_erp_customer_item_price_event_lookup
+    (tenant_id,company_id,source_system,source_database,pricing_id,created_at),
+  CONSTRAINT fk_erp_customer_item_price_event
+    FOREIGN KEY (pricing_id) REFERENCES erp_customer_item_prices(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS erp_job_categories (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,

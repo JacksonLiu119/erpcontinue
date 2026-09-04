@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { pool, ensureProcurementSchema, sourceDatabases } from './db.js';
+import { pool, controlPool, ensureProcurementSchema, sourceDatabases } from './db.js';
 
 const SESSION_HOURS = 12;
 
@@ -85,7 +85,8 @@ export async function recordAccessAudit({
 } = {}) {
   if (!actionCode || !entityType) return;
   const json = value => value == null ? null : JSON.stringify(value);
-  await pool.query(`INSERT INTO access_audit_log
+  // 權限／存取稽核屬於控制平面，不能隨目前 ERP 目標公司連線切換。
+  await controlPool.query(`INSERT INTO access_audit_log
     (actor_user_id,target_user_id,action_code,entity_type,entity_id,source_key,department_code,before_json,after_json,reason,ip_address,user_agent)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, [
     Number.isInteger(Number(actorUserId)) ? Number(actorUserId) : null,
@@ -171,6 +172,7 @@ const routeCapability = [
   [/^\/inventory-opening/, 'inventory-opening'],
   [/^\/sales-workflow\/document-types/, 'sales-document-types'],
   [/^\/sales-workflow\/customer-item(?:s|-mappings)(?:\/|$)/, 'sales-customer-items'],
+  [/^\/sales-workflow\/customer-pricing(?:\/|$)/, 'sales-customer-pricing'],
   [/^\/sales-workflow\/order-changes/, 'sales-order-changes'],
   [/^\/sales-workflow\/orders-for-reopen/, 'sales-order-changes'],
   [/^\/sales-workflow\/orders\/\d+\/reopen/, 'sales-order-changes'],

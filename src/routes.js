@@ -1,4 +1,4 @@
-import { pool, getSourcePool, sourceDatabases, reloadSourceDatabases, runWithTargetDatabase, tx, ensureProcurementSchema, ensureTargetProcurementTypeSchema, ensureTargetReceiptWorkflowSchema, ensureTargetReversalSchema, ensureTargetSalesWorkflowSchema, ensureTargetSalesCustomerItemSchema, ensureTargetDocumentNatureSchema, ensureTargetFinanceWorkflowSchema, validateOperationalSource } from './db.js';
+import { pool, getSourcePool, sourceDatabases, reloadSourceDatabases, runWithTargetDatabase, tx, ensureProcurementSchema, ensureTargetProcurementTypeSchema, ensureTargetReceiptWorkflowSchema, ensureTargetReversalSchema, ensureTargetSalesWorkflowSchema, ensureTargetSalesCustomerItemSchema, ensureTargetSalesPricingSchema, ensureTargetDocumentNatureSchema, ensureTargetFinanceWorkflowSchema, validateOperationalSource } from './db.js';
 import { hashPassword, getDepartmentScope, recordAccessAudit } from './auth.js';
 import { registerImportQualityRoutes } from './import-quality.js';
 import { registerReportingRoutes } from './reports.js';
@@ -1041,6 +1041,7 @@ export function registerApi(app) {
   registerSalesReturnInspectionRoutes(app);
   registerSalesWorkflowRoutes(app);
   registerSalesCustomerItemRoutes(app);
+  registerSalesCustomerPricingRoutes(app);
   registerFlowAuditRoutes(app);
   registerFinanceWorkflowRoutes(app);
   registerAccountingWorkflowRoutes(app);
@@ -3561,6 +3562,609 @@ function registerSalesCustomerItemRoutes(app) {
   });
 }
 
+const SALES_PRICING_EPS = 0.000001;
+
+function salesPricingContextForDatabase(db) {
+  const sourceName = String(db || '').trim().toUpperCase();
+  const source = sourceDatabases[sourceName];
+  if (!source) throw badRequest(`找不到資料來源：${sourceName}`);
+  if (source.adapter_code !== 'ism-sh') throw badRequest('目前客戶產品計價作業只適用 iSM 銷售來源');
+  return {
+    sourceName,
+    source,
+    context: {
+      tenant_id: source.tenant_id || 'default',
+      company_id: source.company_id || sourceName,
+      source_system: source.source_system || 'iSM',
+      source_database: sourceName
+    }
+  };
+}
+
+function pricingBoolean(value, fallback = 0) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if ([1, true, '1', 'true', 'TRUE', 'Y', 'y', 'yes', 'on'].includes(value)) return 1;
+  if ([0, false, '0', 'false', 'FALSE', 'N', 'n', 'no', 'off'].includes(value)) return 0;
+  throw badRequest('布林設定只能是 0／1 或 Y／N');
+}
+
+function pricingNumber(value, label, { required = false, min = null, max = null } = {}) {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    if (required) throw badRequest(`${label}為必填`);
+    return null;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw badRequest(`${label}必須是數字`);
+  if (min !== null && number < min - SALES_PRICING_EPS) throw badRequest(`${label}不可小於 ${min}`);
+  if (max !== null && number > max + SALES_PRICING_EPS) throw badRequest(`${label}不可大於 ${max}`);
+  return number;
+}
+
+function pricingText(value, label, max, required = false) {
+  const text = trim(value);
+  if (required && !text) throw badRequest(`${label}為必填`);
+  if (text.length > max) throw badRequest(`${label}不可超過 ${max} 個字元`);
+  return text || null;
+}
+
+function pricingDate(value, label, required = false) {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    if (required) throw badRequest(`${label}為必填`);
+    return null;
+  }
+  return validDate(value);
+}
+
+function pricingEffectiveStatus(row, asOfDate = null) {
+  if (String(row.status || '') === 'voided' || !Number(row.is_active ?? 1)) return '已作廢／停用';
+  if (String(row.status || '') === 'draft') return '待核准';
+  if (!asOfDate) return '已核准';
+  const from = dateText(row.effective_from), to = dateText(row.effective_to);
+  if (from && asOfDate < from) return '尚未生效';
+  if (to && asOfDate > to) return '已失效';
+  return '有效';
+}
+
+function salesPricingSnapshot(row, tiers = []) {
+  if (!row) return null;
+  const discount = row.discount_rate === null || row.discount_rate === undefined ? null : Number(row.discount_rate);
+  return {
+    id: Number(row.id), customer_code: trim(row.customer_code), item_code: trim(row.item_code),
+    pricing_unit: trim(row.pricing_unit), currency_code: trim(row.currency_code),
+    unit_price: Number(row.unit_price || 0), discount_rate: discount,
+    discount_rate_percent: discount === null ? null : discount * 100,
+    tax_included: Number(row.tax_included) ? 1 : 0,
+    quantity_pricing_flag: Number(row.quantity_pricing_flag) ? 1 : 0,
+    trade_condition: trim(row.trade_condition), effective_from: dateText(row.effective_from) || null,
+    effective_to: dateText(row.effective_to) || null, status: trim(row.status), is_active: Number(row.is_active) ? 1 : 0,
+    source_kind: trim(row.source_kind), source_document_id: row.source_document_id == null ? null : Number(row.source_document_id),
+    source_document_no: trim(row.source_document_no) || null, source_document_type: trim(row.source_document_type) || null,
+    source_table: trim(row.source_table), source_key: trim(row.source_key) || null, note: trim(row.note) || null,
+    tiers: tiers.map(tier => ({
+      id: Number(tier.id), line_no: Number(tier.line_no), quantity_from: Number(tier.quantity_from || 0),
+      unit_price: tier.unit_price === null || tier.unit_price === undefined ? null : Number(tier.unit_price),
+      discount_rate: tier.discount_rate === null || tier.discount_rate === undefined ? null : Number(tier.discount_rate),
+      discount_rate_percent: tier.discount_rate === null || tier.discount_rate === undefined ? null : Number(tier.discount_rate) * 100,
+      note: trim(tier.note) || null
+    }))
+  };
+}
+
+async function lookupTargetSalesPrice(conn, context, input = {}) {
+  const customerCode = trim(input.customer_code);
+  const itemCode = trim(input.item_code);
+  const pricingUnit = trim(input.pricing_unit || input.unit || 'PCS');
+  const currencyCode = trim(input.currency_code || 'TWD');
+  const documentDate = pricingDate(input.document_date || input.as_of_date, '計價基準日', true);
+  const quantity = pricingNumber(input.quantity ?? 0, '數量', { min: 0 }) ?? 0;
+  if (!customerCode || !itemCode) return null;
+  const [[price]] = await conn.query(`SELECT p.* FROM erp_customer_item_prices p
+    WHERE p.tenant_id=? AND p.company_id=? AND p.source_system=? AND p.source_database=?
+      AND p.customer_code=? AND p.item_code=? AND p.pricing_unit=? AND p.currency_code=?
+      AND p.status='approved' AND p.is_active=1 AND p.effective_from<=?
+      AND (p.effective_to IS NULL OR p.effective_to>=?)
+    ORDER BY p.effective_from DESC,p.id DESC LIMIT 1`, [
+    context.tenant_id, context.company_id, context.source_system, context.source_database,
+    customerCode, itemCode, pricingUnit, currencyCode, documentDate, documentDate
+  ]);
+  if (!price) return null;
+  let tier = null;
+  if (Number(price.quantity_pricing_flag)) {
+    [[tier]] = await conn.query(`SELECT * FROM erp_customer_item_price_tiers
+      WHERE pricing_id=? AND quantity_from<=? ORDER BY quantity_from DESC,id DESC LIMIT 1`, [price.id, quantity]);
+  }
+  const baseDiscount = price.discount_rate === null || price.discount_rate === undefined ? null : Number(price.discount_rate);
+  const applyDiscount = (unitPrice, discountRate) => Number(unitPrice || 0) * (discountRate === null ? 1 : Math.max(0, 1 - discountRate));
+  let appliedUnitPrice = applyDiscount(price.unit_price, baseDiscount);
+  let discountRate = baseDiscount;
+  if (tier) {
+    discountRate = tier.discount_rate === null || tier.discount_rate === undefined ? baseDiscount : Number(tier.discount_rate);
+    appliedUnitPrice = tier.unit_price === null || tier.unit_price === undefined
+      ? applyDiscount(price.unit_price, discountRate)
+      : Number(tier.unit_price || 0);
+  }
+  return {
+    price_rule_id: Number(price.id), price_tier_id: tier ? Number(tier.id) : null,
+    unit_price: appliedUnitPrice, base_unit_price: Number(price.unit_price || 0),
+    discount_rate: discountRate, discount_rate_percent: discountRate === null ? null : discountRate * 100,
+    pricing_unit: trim(price.pricing_unit), currency_code: trim(price.currency_code),
+    tax_included: Number(price.tax_included) ? 1 : 0, trade_condition: trim(price.trade_condition),
+    effective_from: dateText(price.effective_from), effective_to: dateText(price.effective_to) || null,
+    price_source_kind: 'customer_price', price_source_id: Number(price.id),
+    price_source_no: trim(price.source_document_no) || trim(price.source_key) || `PRICE:${price.id}`,
+    price_source_date: dateText(price.effective_from), source_kind: trim(price.source_kind),
+    source_document_id: price.source_document_id == null ? null : Number(price.source_document_id),
+    source_document_no: trim(price.source_document_no) || null
+  };
+}
+
+async function insertSalesPricingEvent(conn, pricingId, context, eventKind, before, after, reason, userId) {
+  await conn.query(`INSERT INTO erp_customer_item_price_events
+    (pricing_id,tenant_id,company_id,source_system,source_database,event_kind,before_json,after_json,reason,changed_by)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`, [
+    pricingId, context.tenant_id, context.company_id, context.source_system, context.source_database,
+    eventKind, before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after),
+    String(reason || eventKind).slice(0, 500), Number.isInteger(Number(userId)) ? Number(userId) : null
+  ]);
+}
+
+function previousPricingDate(value) {
+  const date = new Date(`${String(value).slice(0, 10)}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - 1);
+  return date.toISOString().slice(0, 10);
+}
+
+async function upsertSalesPriceFromDocument(conn, context, document, item, userId, reason = '銷售單據核准回寫客戶產品計價') {
+  if (!['quotation', 'sales_order', 'shipment'].includes(String(document.document_kind))) return { action:'skipped', reason:'此單據類型不回寫客戶產品計價' };
+  const customerCode = pricingText(document.customer_code, '客戶代號', 30, true);
+  const itemCode = pricingText(item.item_code, '品號', 40, true);
+  const pricingUnit = pricingText(item.unit, '計價單位', 20, true);
+  const currencyCode = pricingText(document.currency_code, '幣別', 10, true);
+  const effectiveFrom = pricingDate(document.document_date, '單據日期', true);
+  const unitPrice = pricingNumber(item.unit_price, '單價', { required:true, min:0 });
+  const [[customer]] = await conn.query(`SELECT id FROM erp_customers
+    WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND customer_code=? LIMIT 1`, [
+    context.tenant_id, context.company_id, context.source_system, context.source_database, customerCode
+  ]);
+  const [[erpItem]] = await conn.query(`SELECT id FROM erp_items
+    WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND item_code=? LIMIT 1`, [
+    context.tenant_id, context.company_id, context.source_system, context.source_database, itemCode
+  ]);
+  if (!customer) throw badRequest(`找不到目前公司別的客戶主檔：${customerCode}`);
+  if (!erpItem) throw badRequest(`找不到目前公司別的品號主檔：${itemCode}`);
+  const [[currency]] = await conn.query(`SELECT currency_code FROM erp_currencies
+    WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND currency_code=? LIMIT 1`, [
+    context.tenant_id, context.company_id, context.source_system, context.source_database, currencyCode
+  ]);
+  if (!currency) throw badRequest(`目前公司尚未建立幣別主檔：${currencyCode}`);
+  const [[mapping]] = await conn.query(`SELECT id FROM erp_customer_item_mappings
+    WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+      AND customer_code=? AND item_code=? AND is_active=1 AND effective_from<=?
+      AND (effective_to IS NULL OR effective_to>=?) ORDER BY effective_from DESC,id DESC LIMIT 1`, [
+    context.tenant_id, context.company_id, context.source_system, context.source_database,
+    customerCode, itemCode, effectiveFrom, effectiveFrom
+  ]);
+  const [[latest]] = await conn.query(`SELECT * FROM erp_customer_item_prices
+    WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+      AND customer_code=? AND item_code=? AND pricing_unit=? AND currency_code=?
+      AND status='approved' AND is_active=1 AND effective_from<=?
+      AND (effective_to IS NULL OR effective_to>=?)
+    ORDER BY effective_from DESC,id DESC LIMIT 1 FOR UPDATE`, [
+    context.tenant_id, context.company_id, context.source_system, context.source_database,
+    customerCode, itemCode, pricingUnit, currencyCode, effectiveFrom, effectiveFrom
+  ]);
+  if (latest && dateText(latest.effective_from) >= effectiveFrom) {
+    return { action:'skipped', reason:`單據日期 ${effectiveFrom} 不晚於既有生效版本 ${dateText(latest.effective_from)}，保留既有價格`, pricing_id:Number(latest.id) };
+  }
+  const [[sameDate]] = await conn.query(`SELECT * FROM erp_customer_item_prices
+    WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+      AND customer_code=? AND item_code=? AND pricing_unit=? AND currency_code=? AND effective_from=?
+    LIMIT 1 FOR UPDATE`, [
+    context.tenant_id, context.company_id, context.source_system, context.source_database,
+    customerCode, itemCode, pricingUnit, currencyCode, effectiveFrom
+  ]);
+  if (sameDate) return { action:'skipped', reason:`已有 ${effectiveFrom} 的計價版本（${sameDate.status}），不直接覆蓋既有紀錄`, pricing_id:Number(sameDate.id) };
+  if (latest) {
+    const before = salesPricingSnapshot(latest);
+    const closedTo = previousPricingDate(effectiveFrom);
+    await conn.query(`UPDATE erp_customer_item_prices SET effective_to=?,updated_by=?
+      WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`, [
+      closedTo, userId || null, latest.id, context.tenant_id, context.company_id, context.source_system, context.source_database
+    ]);
+    const [[afterPrevious]] = await conn.query('SELECT * FROM erp_customer_item_prices WHERE id=? FOR UPDATE', [latest.id]);
+    await insertSalesPricingEvent(conn, latest.id, context, 'superseded', before, salesPricingSnapshot(afterPrevious), reason, userId);
+  }
+  const [result] = await conn.query(`INSERT INTO erp_customer_item_prices
+    (tenant_id,company_id,source_system,source_database,customer_id,customer_code,mapping_id,item_id,item_code,
+     pricing_unit,currency_code,unit_price,discount_rate,tax_included,quantity_pricing_flag,trade_condition,
+     effective_from,effective_to,status,is_active,source_kind,source_document_id,source_document_no,source_document_type,
+     source_table,source_key,note,created_by,updated_by,approved_by,approved_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    context.tenant_id, context.company_id, context.source_system, context.source_database,
+    customer.id, customerCode, mapping?.id || null, erpItem.id, itemCode, pricingUnit, currencyCode, unitPrice, null,
+    0, 0, '1', effectiveFrom, null, 'approved', 1, document.document_kind, document.id || null,
+    document.document_no || null, document.document_type || null, 'sales_documents',
+    `SALES:${document.id || 'NEW'}:${item.id || 'LINE'}`, reason, userId || null, userId || null, userId || null, new Date()
+  ]);
+  const id = Number(result.insertId);
+  const [[after]] = await conn.query('SELECT * FROM erp_customer_item_prices WHERE id=? FOR UPDATE', [id]);
+  await insertSalesPricingEvent(conn, id, context, 'created_from_document', null, salesPricingSnapshot(after), reason, userId);
+  return { action:'created', pricing_id:id, effective_from:effectiveFrom, unit_price:unitPrice };
+}
+
+function registerSalesCustomerPricingRoutes(app) {
+  const contextForRequest = req => salesPricingContextForDatabase(sourceDbFromRequest(req));
+  const currentWhere = context => [
+    'p.tenant_id=?', 'p.company_id=?', 'p.source_system=?', 'p.source_database=?'
+  ];
+  const contextParams = context => [context.tenant_id, context.company_id, context.source_system, context.source_database];
+  const pricingInput = async (conn, context, body, current = null) => {
+    const value = (key, fallback = null) => Object.prototype.hasOwnProperty.call(body, key) ? body[key] : current?.[key] ?? fallback;
+    const customerCode = pricingText(value('customer_code'), '客戶代號', 30, true);
+    const itemCode = pricingText(value('item_code'), '品號', 40, true);
+    const pricingUnit = pricingText(value('pricing_unit', value('unit', 'PCS')), '計價單位', 20, true);
+    const currencyCode = pricingText(value('currency_code', 'TWD'), '幣別', 10, true);
+    const unitPrice = pricingNumber(value('unit_price'), '單價', { required:true, min:0 });
+    const discountPercent = pricingNumber(value('discount_rate_pct', current?.discount_rate == null ? null : Number(current.discount_rate) * 100), '折扣率（%）', { min:0, max:100 });
+    const discountRate = discountPercent === null ? null : discountPercent / 100;
+    const effectiveFrom = pricingDate(value('effective_from'), '生效日', true);
+    const effectiveTo = pricingDate(value('effective_to'), '失效日');
+    if (effectiveTo && effectiveTo < effectiveFrom) throw badRequest('失效日不可早於生效日');
+    const taxIncluded = pricingBoolean(value('tax_included', current?.tax_included ?? 0));
+    const quantityPricing = pricingBoolean(value('quantity_pricing_flag', current?.quantity_pricing_flag ?? 0));
+    const tradeCondition = pricingText(value('trade_condition', '1'), '交易條件', 10, true);
+    const note = pricingText(value('note'), '備註', 500);
+    const [[customer]] = await conn.query(`SELECT id,customer_code,customer_name FROM erp_customers
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND customer_code=? LIMIT 1`, [
+      context.tenant_id, context.company_id, context.source_system, context.source_database, customerCode
+    ]);
+    const [[item]] = await conn.query(`SELECT id,item_code,item_name,specification,unit FROM erp_items
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND item_code=? LIMIT 1`, [
+      context.tenant_id, context.company_id, context.source_system, context.source_database, itemCode
+    ]);
+    if (!customer) throw badRequest(`找不到目前公司別的客戶主檔：${customerCode}`);
+    if (!item) throw badRequest(`找不到目前公司別的品號主檔：${itemCode}`);
+    const [[currency]] = await conn.query(`SELECT currency_code FROM erp_currencies
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND currency_code=? LIMIT 1`, [
+      context.tenant_id, context.company_id, context.source_system, context.source_database, currencyCode
+    ]);
+    if (!currency) throw badRequest(`目前公司尚未建立幣別主檔：${currencyCode}，請先維護幣別主檔`);
+    let mappingId = Number(value('mapping_id') || 0) || null;
+    if (mappingId) {
+      const [[mapping]] = await conn.query(`SELECT id,customer_code,item_code FROM erp_customer_item_mappings
+        WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? LIMIT 1`, [
+        mappingId, context.tenant_id, context.company_id, context.source_system, context.source_database
+      ]);
+      if (!mapping || mapping.customer_code !== customerCode || mapping.item_code !== itemCode) throw badRequest('客戶品號對照必須屬於同公司、同客戶與同品號');
+    } else {
+      const [[mapping]] = await conn.query(`SELECT id FROM erp_customer_item_mappings
+        WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+          AND customer_code=? AND item_code=? AND is_active=1 AND effective_from<=?
+          AND (effective_to IS NULL OR effective_to>=?) ORDER BY effective_from DESC,id DESC LIMIT 1`, [
+        context.tenant_id, context.company_id, context.source_system, context.source_database,
+        customerCode, itemCode, effectiveFrom, effectiveFrom
+      ]);
+      mappingId = mapping?.id || null;
+    }
+    const rawTiers = value('tiers', []);
+    if (rawTiers !== undefined && !Array.isArray(rawTiers)) throw badRequest('分量計價明細格式錯誤');
+    const tiers = (rawTiers || []).map((tier, index) => {
+      const quantityFrom = pricingNumber(tier.quantity_from, `第 ${index + 1} 筆數量以上`, { required:true, min:0 });
+      const tierUnitPrice = pricingNumber(tier.unit_price, `第 ${index + 1} 筆分量單價`, { min:0 });
+      const tierDiscountPercent = pricingNumber(tier.discount_rate_pct, `第 ${index + 1} 筆分量折扣率（%）`, { min:0, max:100 });
+      if (tierUnitPrice === null && tierDiscountPercent === null) throw badRequest(`第 ${index + 1} 筆分量計價請輸入單價或折扣率`);
+      return {
+        line_no: index + 1, quantity_from: quantityFrom, unit_price: tierUnitPrice,
+        discount_rate: tierDiscountPercent === null ? null : tierDiscountPercent / 100,
+        note: pricingText(tier.note, `第 ${index + 1} 筆分量備註`, 500)
+      };
+    });
+    const seen = new Set();
+    for (const tier of tiers) {
+      const key = String(tier.quantity_from);
+      if (seen.has(key)) throw badRequest('分量計價的數量以上不可重複');
+      seen.add(key);
+    }
+    if (!quantityPricing && tiers.length) throw badRequest('未啟用分量計價時不可輸入分量明細');
+    if (quantityPricing && !tiers.length) throw badRequest('啟用分量計價時至少要有一筆分量明細');
+    return { customer, item, customerCode, itemCode, pricingUnit, currencyCode, unitPrice, discountRate,
+      taxIncluded, quantityPricing, tradeCondition, effectiveFrom, effectiveTo, note, mappingId, tiers };
+  };
+  const assertNoApprovedOverlap = async (conn, context, input, excludeId = null) => {
+    const params = [context.tenant_id, context.company_id, context.source_system, context.source_database,
+      input.customerCode, input.itemCode, input.pricingUnit, input.currencyCode, input.effectiveTo, input.effectiveFrom];
+    let exclude = '';
+    if (excludeId) { exclude = ' AND id<>?'; params.push(excludeId); }
+    const [[row]] = await conn.query(`SELECT id,effective_from,effective_to FROM erp_customer_item_prices
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+        AND customer_code=? AND item_code=? AND pricing_unit=? AND currency_code=?
+        AND status='approved' AND is_active=1
+        AND effective_from<=COALESCE(?, '9999-12-31')
+        AND COALESCE(effective_to,'9999-12-31')>=?${exclude}
+      ORDER BY effective_from,id LIMIT 1 FOR UPDATE`, params);
+    if (row) throw badRequest(`同一客戶／品號／計價單位／幣別的核准有效期間重疊（${dateText(row.effective_from)}～${dateText(row.effective_to) || '永久'}）`);
+  };
+  const loadPrice = async (conn, context, id, lock = false) => {
+    const [[row]] = await conn.query(`SELECT p.* FROM erp_customer_item_prices p
+      WHERE p.id=? AND p.tenant_id=? AND p.company_id=? AND p.source_system=? AND p.source_database=?
+      LIMIT 1${lock ? ' FOR UPDATE' : ''}`, [id, context.tenant_id, context.company_id, context.source_system, context.source_database]);
+    if (!row) throw notFound('找不到目前公司別的客戶產品計價');
+    const [tiers] = await conn.query('SELECT * FROM erp_customer_item_price_tiers WHERE pricing_id=? ORDER BY quantity_from,line_no,id', [id]);
+    return { row, tiers };
+  };
+
+  app.get('/api/sales-workflow/customer-pricing/lookup', async (req, res, next) => {
+    try {
+      await ensureTargetSalesPricingSchema();
+      const { sourceName, context } = contextForRequest(req);
+      await syncCanonicalMaster(sourceName, 'currencies');
+      const data = await lookupTargetSalesPrice(pool, context, req.query);
+      res.json({ ok:true, data: data ? { ...data, company_id:context.company_id, source_database:context.source_database } : null,
+        message: data ? '已找到目前公司有效計價' : '目前公司查無符合日期、客戶、品號、計價單位與幣別的核准計價' });
+    } catch (error) { next(error); }
+  });
+
+  app.get('/api/sales-workflow/customer-pricing/source', async (req, res, next) => {
+    try {
+      const { sourceName, source } = contextForRequest(req);
+      const sourcePool = getSourcePool(sourceName);
+      const [tableRows] = await sourcePool.query(`SELECT LOWER(TABLE_NAME) table_name
+        FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND LOWER(TABLE_NAME) IN ('copma','copmb','copmc','invmb')`);
+      const tables = new Set(tableRows.map(row => String(row.table_name).toLowerCase()));
+      if (!tables.has('copmb')) return res.json({ ok:true, data:{base:[],tiers:[]}, source:`${sourceName}.COPMB`, source_read_only:true, warning:'來源沒有 COPMB' });
+      const companyCode = String(source.company_id || sourceName).trim();
+      const customerCode = trim(req.query.customer_code), itemCode = trim(req.query.item_code), limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 300);
+      const where = ['TRIM(b.COMPANY)=?'], params = [companyCode];
+      if (customerCode) { where.push('TRIM(b.MB001) LIKE ?'); params.push(`%${customerCode}%`); }
+      if (itemCode) { where.push('TRIM(b.MB002) LIKE ?'); params.push(`%${itemCode}%`); }
+      const customerJoin = tables.has('copma') ? "LEFT JOIN copma c ON c.COMPANY=b.COMPANY AND TRIM(c.MA001)=TRIM(b.MB001)" : '';
+      const itemJoin = tables.has('invmb') ? "LEFT JOIN invmb i ON i.COMPANY=b.COMPANY AND TRIM(i.MB001)=TRIM(b.MB002)" : '';
+      const [base] = await sourcePool.query(`SELECT TRIM(b.MB001) customer_code,
+          ${tables.has('copma') ? "COALESCE(NULLIF(TRIM(c.MA003),''),NULLIF(TRIM(c.MA002),''))" : 'NULL'} customer_name,
+          TRIM(b.MB002) item_code,${tables.has('invmb') ? "NULLIF(TRIM(i.MB002),'')" : 'NULL'} item_name,
+          ${tables.has('invmb') ? "NULLIF(TRIM(i.MB003),'')" : 'NULL'} specification,
+          NULLIF(TRIM(b.MB003),'') pricing_unit,NULLIF(TRIM(b.MB004),'') currency_code,b.MB008 unit_price,
+          NULLIF(TRIM(b.MB007),'') quantity_pricing_flag,NULLIF(TRIM(b.MB013),'') tax_included,
+          NULLIF(TRIM(b.MB019),'') trade_condition,NULLIF(TRIM(b.MB017),'') effective_from,
+          NULLIF(TRIM(b.MB018),'') effective_to,'COPMB' source_table,
+          CONCAT(TRIM(b.COMPANY),':COPMB:',TRIM(b.MB001),':',TRIM(b.MB002),':',TRIM(b.MB017),':',TRIM(b.MB018),':',TRIM(b.CREATE_DATE),':',TRIM(b.CREATOR),':',b.FLAG) source_key
+        FROM copmb b ${customerJoin} ${itemJoin} WHERE ${where.join(' AND ')}
+        ORDER BY TRIM(b.MB001),TRIM(b.MB002),TRIM(b.MB017) DESC,b.FLAG DESC LIMIT ?`, [...params, limit]);
+      let tiers = [];
+      if (tables.has('copmc')) {
+        const tierWhere = ['TRIM(MC001) LIKE ?'], tierParams = [customerCode ? `%${customerCode}%` : '%'];
+        if (itemCode) { tierWhere.push('TRIM(MC002) LIKE ?'); tierParams.push(`%${itemCode}%`); }
+        tierWhere.push('TRIM(COMPANY)=?'); tierParams.push(companyCode);
+        [tiers] = await sourcePool.query(`SELECT TRIM(MC001) customer_code,TRIM(MC002) item_code,
+          NULLIF(TRIM(MC003),'') pricing_unit,NULLIF(TRIM(MC004),'') currency_code,MC005 quantity_from,
+          MC006 unit_price,MC007 note,MC008 discount_rate_percent,MC009 effective_from,
+          'COPMC' source_table,CONCAT(TRIM(COMPANY),':COPMC:',TRIM(MC001),':',TRIM(MC002),':',TRIM(MC005),':',TRIM(MC009),':',TRIM(MC011)) source_key
+          FROM copmc WHERE ${tierWhere.join(' AND ')} ORDER BY TRIM(MC001),TRIM(MC002),MC005 LIMIT ?`, [...tierParams, limit]);
+      }
+      res.json({ ok:true, data:{
+        base:base.map(row => ({ ...row, source_database:sourceName, effective_from:dateText(row.effective_from) || null, effective_to:dateText(row.effective_to) || null })),
+        tiers:tiers.map(row => ({ ...row, source_database:sourceName, effective_from:dateText(row.effective_from) || null, discount_rate_percent:row.discount_rate_percent == null ? null : Number(row.discount_rate_percent) }))
+      }, source:`${sourceName}.COPMB/COPMC`, source_read_only:Boolean(source.read_only), target_database:source.target_database });
+    } catch (error) { next(error); }
+  });
+
+  app.get('/api/sales-workflow/customer-pricing', async (req, res, next) => {
+    try {
+      await ensureTargetSalesPricingSchema();
+      const { sourceName, source, context } = contextForRequest(req);
+      const conditions = currentWhere(context), params = contextParams(context);
+      const customerCode = trim(req.query.customer_code), itemCode = trim(req.query.item_code), currencyCode = trim(req.query.currency_code);
+      const keyword = trim(req.query.keyword), status = trim(req.query.status), asOfDate = trim(req.query.as_of_date) ? validDate(req.query.as_of_date) : null;
+      const activeOnly = String(req.query.active_only ?? '0') === '1';
+      if (customerCode) { conditions.push('p.customer_code LIKE ?'); params.push(`%${customerCode}%`); }
+      if (itemCode) { conditions.push('p.item_code LIKE ?'); params.push(`%${itemCode}%`); }
+      if (currencyCode) { conditions.push('p.currency_code=?'); params.push(currencyCode); }
+      if (status) { conditions.push('p.status=?'); params.push(status); }
+      if (keyword) { conditions.push('CONCAT_WS(\' \',p.customer_code,p.item_code,p.pricing_unit,p.currency_code,p.source_kind,p.source_document_no,p.note) LIKE ?'); params.push(`%${keyword}%`); }
+      if (activeOnly) conditions.push('p.is_active=1');
+      if (asOfDate) { conditions.push("p.effective_from<=? AND (p.effective_to IS NULL OR p.effective_to>=?)"); params.push(asOfDate, asOfDate); }
+      const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
+      const [rows] = await pool.query(`SELECT p.*,c.customer_name,i.item_name,i.specification,
+        (SELECT m.external_item_code FROM erp_customer_item_mappings m WHERE m.tenant_id=p.tenant_id AND m.company_id=p.company_id
+          AND m.source_system=p.source_system AND m.source_database=p.source_database AND m.customer_code=p.customer_code AND m.item_code=p.item_code
+          AND m.effective_from<=p.effective_from ORDER BY m.effective_from DESC,m.id DESC LIMIT 1) external_item_code,
+        (SELECT COUNT(*) FROM erp_customer_item_price_tiers t WHERE t.pricing_id=p.id) tier_count,
+        (SELECT COUNT(*) FROM erp_customer_item_price_events e WHERE e.pricing_id=p.id AND e.tenant_id=p.tenant_id AND e.company_id=p.company_id
+          AND e.source_system=p.source_system AND e.source_database=p.source_database) event_count
+        FROM erp_customer_item_prices p
+        LEFT JOIN erp_customers c ON c.tenant_id=p.tenant_id AND c.company_id=p.company_id AND c.source_system=p.source_system
+          AND c.source_database=p.source_database AND c.customer_code=p.customer_code
+        LEFT JOIN erp_items i ON i.tenant_id=p.tenant_id AND i.company_id=p.company_id AND i.source_system=p.source_system
+          AND i.source_database=p.source_database AND i.item_code=p.item_code
+        WHERE ${conditions.join(' AND ')} ORDER BY p.customer_code,p.item_code,p.effective_from DESC,p.id DESC LIMIT ?`, [...params, limit]);
+      res.json({ ok:true, data:rows.map(row => ({ ...row, source_database:sourceName, source_label:source.label, target_database:source.target_database,
+        effective_from:dateText(row.effective_from), effective_to:dateText(row.effective_to) || null,
+        effective_status:pricingEffectiveStatus(row, asOfDate), discount_rate_percent:row.discount_rate == null ? null : Number(row.discount_rate) * 100,
+        record_type:'managed', source_read_only:Boolean(source.read_only) })) });
+    } catch (error) { next(error); }
+  });
+
+  app.get('/api/sales-workflow/customer-pricing/:id', async (req, res, next) => {
+    try {
+      await ensureTargetSalesPricingSchema();
+      const { context } = contextForRequest(req); const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id < 1) throw badRequest('客戶產品計價編號錯誤');
+      const { row, tiers } = await loadPrice(pool, context, id);
+      const [events] = await pool.query(`SELECT id,pricing_id,event_kind,before_json,after_json,reason,changed_by,created_at
+        FROM erp_customer_item_price_events WHERE pricing_id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? ORDER BY id DESC`, [
+        id, context.tenant_id, context.company_id, context.source_system, context.source_database
+      ]);
+      res.json({ ok:true, data:{ ...salesPricingSnapshot(row, tiers), events } });
+    } catch (error) { next(error); }
+  });
+
+  app.post('/api/sales-workflow/customer-pricing', async (req, res, next) => {
+    try {
+      await ensureTargetSalesPricingSchema();
+      const { sourceName, source, context } = contextForRequest(req); const body = req.body || {};
+      await syncCanonicalMaster(sourceName, 'currencies');
+      const reason = pricingText(body.reason, '異動原因', 500) || '建立客戶產品計價';
+      const out = await tx(async conn => {
+        const input = await pricingInput(conn, context, body);
+        const [[same]] = await conn.query(`SELECT id FROM erp_customer_item_prices WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+          AND customer_code=? AND item_code=? AND pricing_unit=? AND currency_code=? AND effective_from=? LIMIT 1 FOR UPDATE`, [
+          context.tenant_id, context.company_id, context.source_system, context.source_database, input.customerCode, input.itemCode,
+          input.pricingUnit, input.currencyCode, input.effectiveFrom
+        ]);
+        if (same) throw badRequest(`同一客戶／品號／計價單位／幣別已有 ${input.effectiveFrom} 的計價版本，請修改草稿或使用新的生效日`);
+        const [result] = await conn.query(`INSERT INTO erp_customer_item_prices
+          (tenant_id,company_id,source_system,source_database,customer_id,customer_code,mapping_id,item_id,item_code,pricing_unit,currency_code,
+           unit_price,discount_rate,tax_included,quantity_pricing_flag,trade_condition,effective_from,effective_to,status,is_active,source_kind,
+           source_table,note,created_by,updated_by)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',1,'manual','manual',?,?,?)`, [
+          context.tenant_id, context.company_id, context.source_system, context.source_database, input.customer.id, input.customerCode, input.mappingId,
+          input.item.id, input.itemCode, input.pricingUnit, input.currencyCode, input.unitPrice, input.discountRate, input.taxIncluded,
+          input.quantityPricing, input.tradeCondition, input.effectiveFrom, input.effectiveTo, input.note, req.auth?.id || null, req.auth?.id || null
+        ]);
+        const id = Number(result.insertId);
+        await conn.query('UPDATE erp_customer_item_prices SET source_key=? WHERE id=?', [`MANUAL:${id}`, id]);
+        for (const tier of input.tiers) await conn.query(`INSERT INTO erp_customer_item_price_tiers(pricing_id,line_no,quantity_from,unit_price,discount_rate,note) VALUES(?,?,?,?,?,?)`, [id, tier.line_no, tier.quantity_from, tier.unit_price, tier.discount_rate, tier.note]);
+        const [[after]] = await conn.query('SELECT * FROM erp_customer_item_prices WHERE id=? FOR UPDATE', [id]);
+        const [tiers] = await conn.query('SELECT * FROM erp_customer_item_price_tiers WHERE pricing_id=? ORDER BY quantity_from,line_no,id', [id]);
+        await insertSalesPricingEvent(conn, id, context, 'created', null, salesPricingSnapshot(after, tiers), reason, req.auth?.id);
+        return { id, pricing:salesPricingSnapshot(after, tiers) };
+      });
+      await recordAccessAudit({ actorUserId:req.auth?.id, targetUserId:req.auth?.id, actionCode:'CUSTOMER_PRICING_CREATED', entityType:'erp_customer_item_prices', entityId:String(out.id), sourceKey:sourceName, before:null, after:out.pricing, reason, ipAddress:req.ip, userAgent:req.get('user-agent') });
+      res.status(201).json({ ok:true, data:{ ...out, target_database:source.target_database, company_id:source.company_id } });
+    } catch (error) { next(error); }
+  });
+
+  app.put('/api/sales-workflow/customer-pricing/:id', async (req, res, next) => {
+    try {
+      await ensureTargetSalesPricingSchema();
+      const { sourceName, source, context } = contextForRequest(req); const id = Number(req.params.id); if (!Number.isInteger(id) || id < 1) throw badRequest('客戶產品計價編號錯誤');
+      await syncCanonicalMaster(sourceName, 'currencies');
+      const body = req.body || {}; const reason = pricingText(body.reason, '異動原因', 500) || '修改客戶產品計價草稿';
+      const out = await tx(async conn => {
+        const { row:beforeRow, tiers:beforeTiers } = await loadPrice(conn, context, id, true);
+        if (beforeRow.status !== 'draft') throw badRequest('核准／作廢後的計價不可直接修改，請建立新的生效版本');
+        const input = await pricingInput(conn, context, body, beforeRow);
+        const [[same]] = await conn.query(`SELECT id FROM erp_customer_item_prices WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+          AND customer_code=? AND item_code=? AND pricing_unit=? AND currency_code=? AND effective_from=? AND id<>? LIMIT 1 FOR UPDATE`, [
+          context.tenant_id, context.company_id, context.source_system, context.source_database, input.customerCode, input.itemCode,
+          input.pricingUnit, input.currencyCode, input.effectiveFrom, id
+        ]);
+        if (same) throw badRequest(`已有相同生效日的其他計價版本：${same.id}`);
+        await conn.query(`UPDATE erp_customer_item_prices SET customer_id=?,customer_code=?,mapping_id=?,item_id=?,item_code=?,pricing_unit=?,currency_code=?,
+          unit_price=?,discount_rate=?,tax_included=?,quantity_pricing_flag=?,trade_condition=?,effective_from=?,effective_to=?,note=?,updated_by=?
+          WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`, [
+          input.customer.id, input.customerCode, input.mappingId, input.item.id, input.itemCode, input.pricingUnit, input.currencyCode, input.unitPrice,
+          input.discountRate, input.taxIncluded, input.quantityPricing, input.tradeCondition, input.effectiveFrom, input.effectiveTo, input.note,
+          req.auth?.id || null, id, context.tenant_id, context.company_id, context.source_system, context.source_database
+        ]);
+        await conn.query('DELETE FROM erp_customer_item_price_tiers WHERE pricing_id=?', [id]);
+        for (const tier of input.tiers) await conn.query(`INSERT INTO erp_customer_item_price_tiers(pricing_id,line_no,quantity_from,unit_price,discount_rate,note) VALUES(?,?,?,?,?,?)`, [id, tier.line_no, tier.quantity_from, tier.unit_price, tier.discount_rate, tier.note]);
+        const [[after]] = await conn.query('SELECT * FROM erp_customer_item_prices WHERE id=? FOR UPDATE', [id]);
+        const [tiers] = await conn.query('SELECT * FROM erp_customer_item_price_tiers WHERE pricing_id=? ORDER BY quantity_from,line_no,id', [id]);
+        await insertSalesPricingEvent(conn, id, context, 'updated', salesPricingSnapshot(beforeRow, beforeTiers), salesPricingSnapshot(after, tiers), reason, req.auth?.id);
+        return { id, before:salesPricingSnapshot(beforeRow, beforeTiers), pricing:salesPricingSnapshot(after, tiers) };
+      });
+      await recordAccessAudit({ actorUserId:req.auth?.id, targetUserId:req.auth?.id, actionCode:'CUSTOMER_PRICING_UPDATED', entityType:'erp_customer_item_prices', entityId:String(out.id), sourceKey:sourceName, before:out.before, after:out.pricing, reason, ipAddress:req.ip, userAgent:req.get('user-agent') });
+      res.json({ ok:true, data:{ ...out, target_database:source.target_database, company_id:source.company_id } });
+    } catch (error) { next(error); }
+  });
+
+  app.post('/api/sales-workflow/customer-pricing/:id/approve', async (req, res, next) => {
+    try {
+      await ensureTargetSalesPricingSchema();
+      const { sourceName, source, context } = contextForRequest(req); const id = Number(req.params.id); if (!Number.isInteger(id) || id < 1) throw badRequest('客戶產品計價編號錯誤');
+      await syncCanonicalMaster(sourceName, 'currencies');
+      const reason = pricingText(req.body?.reason, '核准說明', 500) || '核准客戶產品計價';
+      const out = await tx(async conn => {
+        const { row:beforeRow, tiers } = await loadPrice(conn, context, id, true);
+        if (beforeRow.status !== 'draft') throw badRequest('只有待核准草稿可以核准');
+        await assertNoApprovedOverlap(conn, context, {
+          customerCode: beforeRow.customer_code,
+          itemCode: beforeRow.item_code,
+          pricingUnit: beforeRow.pricing_unit,
+          currencyCode: beforeRow.currency_code,
+          effectiveFrom: dateText(beforeRow.effective_from),
+          effectiveTo: dateText(beforeRow.effective_to) || null
+        }, id);
+        await conn.query(`UPDATE erp_customer_item_prices SET status='approved',is_active=1,approved_by=?,approved_at=NOW(),updated_by=?
+          WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`, [req.auth?.id || null, req.auth?.id || null, id, context.tenant_id, context.company_id, context.source_system, context.source_database]);
+        const [[after]] = await conn.query('SELECT * FROM erp_customer_item_prices WHERE id=? FOR UPDATE', [id]);
+        await insertSalesPricingEvent(conn, id, context, 'approved', salesPricingSnapshot(beforeRow, tiers), salesPricingSnapshot(after, tiers), reason, req.auth?.id);
+        return { id, pricing:salesPricingSnapshot(after, tiers) };
+      });
+      await recordAccessAudit({ actorUserId:req.auth?.id, targetUserId:req.auth?.id, actionCode:'CUSTOMER_PRICING_APPROVED', entityType:'erp_customer_item_prices', entityId:String(out.id), sourceKey:sourceName, before:null, after:out.pricing, reason, ipAddress:req.ip, userAgent:req.get('user-agent') });
+      res.json({ ok:true, data:{ ...out, target_database:source.target_database, company_id:source.company_id } });
+    } catch (error) { next(error); }
+  });
+
+  app.post('/api/sales-workflow/customer-pricing/:id/void', async (req, res, next) => {
+    try {
+      await ensureTargetSalesPricingSchema();
+      const { sourceName, source, context } = contextForRequest(req); const id = Number(req.params.id); if (!Number.isInteger(id) || id < 1) throw badRequest('客戶產品計價編號錯誤');
+      const reason = pricingText(req.body?.reason, '作廢說明', 500, true);
+      const out = await tx(async conn => {
+        const { row:beforeRow, tiers } = await loadPrice(conn, context, id, true);
+        if (beforeRow.status === 'voided') throw badRequest('此計價已作廢');
+        await conn.query(`UPDATE erp_customer_item_prices SET status='voided',is_active=0,voided_by=?,voided_at=NOW(),updated_by=?
+          WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`, [req.auth?.id || null, req.auth?.id || null, id, context.tenant_id, context.company_id, context.source_system, context.source_database]);
+        const [[after]] = await conn.query('SELECT * FROM erp_customer_item_prices WHERE id=? FOR UPDATE', [id]);
+        await insertSalesPricingEvent(conn, id, context, 'voided', salesPricingSnapshot(beforeRow, tiers), salesPricingSnapshot(after, tiers), reason, req.auth?.id);
+        return { id, pricing:salesPricingSnapshot(after, tiers) };
+      });
+      await recordAccessAudit({ actorUserId:req.auth?.id, targetUserId:req.auth?.id, actionCode:'CUSTOMER_PRICING_VOIDED', entityType:'erp_customer_item_prices', entityId:String(out.id), sourceKey:sourceName, before:null, after:out.pricing, reason, ipAddress:req.ip, userAgent:req.get('user-agent') });
+      res.json({ ok:true, data:{ ...out, target_database:source.target_database, company_id:source.company_id, message:'計價已作廢，資料與歷程保留' } });
+    } catch (error) { next(error); }
+  });
+}
+
+// Resolve a sales line price only inside the current target-company context.
+// A blank unit price means "look up the approved customer price" for a quote
+// or order; an explicit number is treated as a manual document price.  When a
+// document is converted, the source line's price lineage is carried forward
+// instead of looking up another company or another currency by accident.
+async function resolveSalesDocumentPrice(conn, context, document, itemInput, sourceItem = null) {
+  const customerCode = pricingText(document.customer_code, '客戶代號', 30, true);
+  const itemCode = pricingText(itemInput.item_code, '品號', 40, true);
+  const pricingUnit = pricingText(itemInput.unit || sourceItem?.unit || 'PCS', '計價單位', 20, true);
+  let currencyCode = pricingText(document.currency_code || sourceItem?.currency_code, '幣別', 10);
+  if (!currencyCode) {
+    const [[customer]] = await conn.query(`SELECT currency_code FROM erp_customers
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND customer_code=? LIMIT 1`, [
+      context.tenant_id, context.company_id, context.source_system, context.source_database, customerCode
+    ]);
+    currencyCode = pricingText(customer?.currency_code, '幣別', 10) || 'TWD';
+  }
+  const hasExplicitUnitPrice = Object.prototype.hasOwnProperty.call(itemInput, 'unit_price')
+    && String(itemInput.unit_price ?? '').trim() !== '';
+  let pricing = null;
+  if (!hasExplicitUnitPrice && ['quotation', 'sales_order'].includes(String(document.document_kind))) {
+    pricing = await lookupTargetSalesPrice(conn, context, {
+      customer_code: customerCode, item_code: itemCode, pricing_unit: pricingUnit,
+      currency_code: currencyCode, document_date: document.document_date, quantity: itemInput.quantity ?? 0
+    });
+  }
+  const explicitPrice = hasExplicitUnitPrice ? pricingNumber(itemInput.unit_price, '單價', { required:true, min:0 }) : null;
+  const inheritedPrice = !hasExplicitUnitPrice && sourceItem ? pricingNumber(sourceItem.unit_price, '來源單價', { required:true, min:0 }) : null;
+  const unitPrice = pricing?.unit_price ?? explicitPrice ?? inheritedPrice ?? 0;
+  const lineage = pricing ? {
+    price_source_kind: pricing.price_source_kind, price_source_id: pricing.price_source_id,
+    price_source_no: pricing.price_source_no, price_source_date: pricing.price_source_date,
+    price_rule_id: pricing.price_rule_id, price_tier_id: pricing.price_tier_id
+  } : sourceItem?.price_source_kind ? {
+    price_source_kind: sourceItem.price_source_kind, price_source_id: sourceItem.price_source_id,
+    price_source_no: sourceItem.price_source_no, price_source_date: dateText(sourceItem.price_source_date) || null,
+    price_rule_id: sourceItem.price_rule_id, price_tier_id: sourceItem.price_tier_id
+  } : hasExplicitUnitPrice ? {
+    price_source_kind: 'manual_document', price_source_id: null,
+    price_source_no: document.document_no || null, price_source_date: document.document_date,
+    price_rule_id: null, price_tier_id: null
+  } : {
+    price_source_kind: 'unpriced', price_source_id: null,
+    price_source_no: null, price_source_date: null, price_rule_id: null, price_tier_id: null
+  };
+  return { customerCode, itemCode, pricingUnit, currencyCode, unitPrice, pricing, hasExplicitUnitPrice, ...lineage };
+}
+
 function registerSalesWorkflowRoutes(app){
   const ctx=db=>{const s=sourceDatabases[db];if(!s)throw badRequest(`找不到資料來源：${db}`);return{tenant_id:s.tenant_id||'default',company_id:s.company_id||db,source_system:s.source_system||s.adapter_code||'ism-sh',source_database:db};};
   const EPS=0.000001;
@@ -3645,7 +4249,7 @@ function registerSalesWorkflowRoutes(app){
     }
   }
   const defs=[['quotation','QT','報價單','QT'],['sales_order','SO','客戶訂單','SO'],['shipment','SA','銷貨單','SA'],['sales_return','SR','銷退折讓單','SR']];
-  const ensure=async db=>{const c=ctx(db);for(const x of defs)await pool.query(`INSERT IGNORE INTO sales_document_types(tenant_id,company_id,source_system,document_kind,type_code,type_name,number_prefix) VALUES(?,?,?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,...x]);return c;};
+  const ensure=async db=>{const c=ctx(db);for(const x of defs)await pool.query(`INSERT IGNORE INTO sales_document_types(tenant_id,company_id,source_system,document_kind,type_code,type_name,number_prefix,source_database) VALUES(?,?,?,?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,...x,db]);await pool.query("UPDATE sales_document_types SET source_database=? WHERE tenant_id=? AND company_id=? AND source_system=? AND (source_database IS NULL OR source_database='')",[db,c.tenant_id,c.company_id,c.source_system]);return c;};
   // 銷貨／銷退過帳前檢查會計期間與來源單據日期。
   app.use('/api/sales-workflow/documents/:id/post', async (req,res,next) => {
     try {
@@ -3668,13 +4272,19 @@ function registerSalesWorkflowRoutes(app){
     } catch(e){next(e);}
   });
   app.get('/api/sales-workflow/document-types',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const db=String(req.query.source_database||'SH').toUpperCase(),c=await ensure(db),sp=getSourcePool(db);await pool.query("UPDATE sales_document_types SET source_database=? WHERE tenant_id=? AND company_id=? AND source_system=? AND (source_database IS NULL OR source_database='')",[db,c.tenant_id,c.company_id,c.source_system]);for(const [kind,table,column] of [['sales_order','copta','TA001'],['shipment','coptg','TG001'],['sales_return','copti','TI001']]){try{const[types]=await sp.query(`SELECT DISTINCT t.${column} type_code,COALESCE(NULLIF(q.MQ002,''),t.${column}) type_name,q.MQ034 type_full_name,q.MQ003 nature_code,q.MQ004 numbering_method,q.MQ005 year_digits,q.MQ006 serial_digits,q.MQ024 item_input_method,q.MQ015 auto_confirm,q.MQ061 auto_confirm_on_edit,q.MQ018 update_customer_price,q.MQ019 require_sales_order,q.MQ020 settlement_mode,q.MQ021 ar_document_type,q.MQ060 is_default,q.MQ022 note FROM ${table} t LEFT JOIN cmsmq q ON q.COMPANY=t.COMPANY AND q.MQ001=t.${column} WHERE t.COMPANY=? AND t.${column}<>''`,[db]);for(const x of types){const yes=v=>['Y','y','1','true'].includes(String(v??'').trim()),map={'1':'daily','2':'monthly','3':'sequence','4':'manual'},settlement={'Y':'whole','y':'per_document','N':'batch'};await pool.query(`INSERT INTO sales_document_types(tenant_id,company_id,source_system,document_kind,type_code,type_name,type_full_name,nature_code,number_prefix,numbering_method,year_digits,serial_digits,requires_approval,auto_confirm,auto_confirm_on_edit,update_customer_price,require_sales_order,settlement_mode,ar_document_type,is_default,is_active,note,source_database,source_table) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE type_name=VALUES(type_name),type_full_name=VALUES(type_full_name),nature_code=VALUES(nature_code),numbering_method=VALUES(numbering_method),year_digits=VALUES(year_digits),serial_digits=VALUES(serial_digits),requires_approval=VALUES(requires_approval),auto_confirm=VALUES(auto_confirm),auto_confirm_on_edit=VALUES(auto_confirm_on_edit),update_customer_price=VALUES(update_customer_price),require_sales_order=VALUES(require_sales_order),settlement_mode=VALUES(settlement_mode),ar_document_type=VALUES(ar_document_type),is_default=VALUES(is_default),note=VALUES(note),source_database=VALUES(source_database),source_table=VALUES(source_table)`,[c.tenant_id,c.company_id,c.source_system,kind,String(x.type_code).trim(),String(x.type_name||x.type_code).trim(),String(x.type_full_name||'').trim()||null,String(x.nature_code||'').trim()||null,String(x.type_code).trim(),map[String(x.numbering_method||'').trim()]||'daily',Number(x.year_digits)||4,Number(x.serial_digits)||4,yes(x.auto_confirm)?0:1,yes(x.auto_confirm),yes(x.auto_confirm_on_edit),yes(x.update_customer_price),yes(x.require_sales_order),settlement[String(x.settlement_mode||'').trim()]||'batch',String(x.ar_document_type||'').trim()||null,yes(x.is_default),1,String(x.note||'').trim()||'由客戶舊 ERP CMSMQ 匯入',db,'cmsmq']);}}catch(_){}}const[rows]=await pool.query('SELECT * FROM sales_document_types WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? ORDER BY document_kind,type_code',[c.tenant_id,c.company_id,c.source_system,db]);res.json({ok:true,data:rows});}catch(e){next(e);}});
-  app.post('/api/sales-workflow/document-types',async(req,res,next)=>{try{const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),c=ctx(db);if(!defs.some(x=>x[0]===b.document_kind)||!trim(b.type_code)||!trim(b.type_name))throw badRequest('請輸入有效的銷售單據性質');const[r]=await pool.query('INSERT INTO sales_document_types(tenant_id,company_id,source_system,document_kind,type_code,type_name,number_prefix,requires_approval,note) VALUES(?,?,?,?,?,?,?,?,?)',[c.tenant_id,c.company_id,c.source_system,b.document_kind,trim(b.type_code),trim(b.type_name),trim(b.number_prefix)||trim(b.type_code),Number(b.requires_approval??1),trim(b.note)]);res.status(201).json({ok:true,data:{id:r.insertId}});}catch(e){next(e);}});
-  app.get('/api/sales-workflow/documents',async(req,res,next)=>{try{const db=String(req.query.source_database||'SH').toUpperCase(),kind=trim(req.query.document_kind),limit=Math.min(Math.max(Number(req.query.limit)||10,1),100),p=[db];let f='d.source_database=?';if(kind){f+=' AND d.document_kind=?';p.push(kind);}const[rows]=await pool.query(`SELECT d.*,i.id item_id,i.source_item_id,i.item_code,i.item_name,i.unit,i.warehouse_code,i.quantity,i.related_quantity,i.unit_price,i.unit_cost,i.expected_date,i.allowance_amount FROM sales_documents d JOIN sales_document_items i ON i.document_id=d.id WHERE ${f} ORDER BY d.document_date DESC,d.id DESC LIMIT ?`,[...p,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
+   app.post('/api/sales-workflow/document-types',async(req,res,next)=>{try{const b=req.body||{},db=sourceDbFromRequest(req),c=ctx(db);if(!defs.some(x=>x[0]===b.document_kind)||!trim(b.type_code)||!trim(b.type_name))throw badRequest('請輸入有效的銷售單據性質');const[r]=await pool.query('INSERT INTO sales_document_types(tenant_id,company_id,source_system,document_kind,type_code,type_name,number_prefix,requires_approval,note,source_database) VALUES(?,?,?,?,?,?,?,?,?,?)',[c.tenant_id,c.company_id,c.source_system,b.document_kind,trim(b.type_code),trim(b.type_name),trim(b.number_prefix)||trim(b.type_code),Number(b.requires_approval??1),trim(b.note),db]);res.status(201).json({ok:true,data:{id:r.insertId}});}catch(e){next(e);}});
+   app.get('/api/sales-workflow/documents',async(req,res,next)=>{try{const db=String(req.query.source_database||'SH').toUpperCase(),kind=trim(req.query.document_kind),limit=Math.min(Math.max(Number(req.query.limit)||10,1),100),p=[db];let f='d.source_database=?';if(kind){f+=' AND d.document_kind=?';p.push(kind);}const[rows]=await pool.query(`SELECT d.*,i.id item_id,i.source_item_id,i.item_code,i.item_name,i.unit,i.warehouse_code,i.quantity,i.related_quantity,i.unit_price,i.unit_cost,i.expected_date,i.allowance_amount,i.price_source_kind,i.price_source_id,i.price_source_no,i.price_source_date,i.price_rule_id,i.price_tier_id FROM sales_documents d JOIN sales_document_items i ON i.document_id=d.id WHERE ${f} ORDER BY d.document_date DESC,d.id DESC LIMIT ?`,[...p,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
   app.use('/api/sales-workflow/documents',async(req,res,next)=>{try{if(req.method!=='POST'||trim(req.body?.document_kind)!=='sales_return'||Number(req.body?.source_item_id||0)||!trim(req.body?.source_document_no))return next();const db=String(req.body.source_database||req.get('X-Source-Database')||'SH').toUpperCase(),documentNo=trim(req.body.source_document_no),customer=trim(req.body.customer_code),item=trim(req.body.item_code);const[[source]]=await pool.query(`SELECT i.id source_item_id,i.document_id,d.customer_code,d.status,d.document_kind FROM sales_document_items i JOIN sales_documents d ON d.id=i.document_id WHERE d.source_database=? AND d.document_kind='shipment' AND d.document_no=? AND d.customer_code=? AND i.item_code=? LIMIT 1`,[db,documentNo,customer,item]);if(!source)throw badRequest('找不到指定的原銷貨單，請確認公司別、客戶與品號');req.body={...req.body,source_item_id:source.source_item_id,source_document_id:source.document_id};next();}catch(e){next(e);}});
   app.post('/api/sales-workflow/documents',async(req,res,next)=>{
     try{
-      const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),c=await ensure(db),kind=trim(b.document_kind),date=validDate(b.document_date),type=trim(b.document_type);
-      const [[dt]]=await pool.query('SELECT * FROM sales_document_types WHERE tenant_id=? AND company_id=? AND source_system=? AND document_kind=? AND type_code=? AND is_active=1',[c.tenant_id,c.company_id,c.source_system,kind,type]);
+      await ensureTargetSalesPricingSchema();
+       const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),c=await ensure(db),kind=trim(b.document_kind),date=validDate(b.document_date),type=trim(b.document_type);
+       await syncCanonicalMaster(db, 'currencies');
+       const [[dt]]=await pool.query(`SELECT * FROM sales_document_types
+         WHERE tenant_id=? AND company_id=? AND source_system=? AND document_kind=? AND type_code=?
+           AND (source_database=? OR source_database IS NULL OR source_database='') AND is_active=1`,[
+           c.tenant_id,c.company_id,c.source_system,kind,type,db
+       ]);
       if(!dt)throw badRequest('請選擇目前公司啟用中的銷售單別');
       if(!['quotation','sales_order','shipment','sales_return'].includes(kind))throw badRequest('銷售單據類型錯誤');
       const qty=positiveNumber(b.quantity,'數量'),sourceItemId=Number(b.source_item_id||0)||null,returnType=kind==='sales_return'?(trim(b.return_type)||'return'):null;
@@ -3684,7 +4294,7 @@ function registerSalesWorkflowRoutes(app){
       const out=await tx(async conn=>{
         let source=null;
         if(sourceItemId){
-          const [[x]]=await conn.query(`SELECT i.*,d.customer_code,d.currency_code,d.status,d.inventory_status,d.document_kind,d.id document_id
+          const [[x]]=await conn.query(`SELECT i.*,d.customer_code,d.currency_code,d.status,d.inventory_status,d.document_kind,d.document_no,d.id document_id
             FROM sales_document_items i JOIN sales_documents d ON d.id=i.document_id
             WHERE i.id=? AND d.source_database=? FOR UPDATE`,[sourceItemId,db]);
           const validSource=kind==='sales_return'?x?.document_kind==='shipment'&&x?.status==='posted'&&x?.inventory_status==='posted':['approved','partial'].includes(x?.status);
@@ -3713,15 +4323,118 @@ function registerSalesWorkflowRoutes(app){
         if(!customerCode||!itemCode)throw badRequest('客戶與品號不可空白');
         assertConfiguredSource(dt,source?.document_kind,Boolean(source),'銷售單據');
         const no=trim(b.document_no)||await nextConfiguredDocumentNumber(conn,'sales_documents','document_no',dt,date),inventory=['shipment','sales_return'].includes(kind)?'pending':'not_applicable',status=documentTypeNeedsApproval(dt)?'draft':'approved';
-        const [h]=await conn.query(`INSERT INTO sales_documents(tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,customer_code,currency_code,warehouse_code,salesperson_code,source_document_id,return_type,status,inventory_status,note,created_by,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,db,kind,type,no,date,customerCode,trim(b.currency_code)||source?.currency_code||'TWD',trim(b.warehouse_code)||source?.warehouse_code,trim(b.salesperson_code),source?.document_id||Number(b.source_document_id||0)||null,returnType,status,inventory,trim(b.note),req.auth.id,documentTypeNeedsApproval(dt)?null:req.auth.id,documentTypeNeedsApproval(dt)?null:new Date()]);
-        const [i]=await conn.query(`INSERT INTO sales_document_items(document_id,line_no,source_item_id,item_code,item_name,specification,unit,warehouse_code,quantity,unit_price,unit_cost,expected_date,allowance_amount,note) VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?)`,[h.insertId,sourceItemId,itemCode,trim(b.item_name)||source?.item_name,trim(b.specification)||source?.specification,trim(b.unit)||source?.unit||'PCS',trim(b.warehouse_code)||source?.warehouse_code,qty,Number(b.unit_price??source?.unit_price??0),Number(b.unit_cost??source?.unit_cost??0),nullableDate(b.expected_date),allowance,trim(b.item_note)]);
-        return{id:h.insertId,item_id:i.insertId,document_no:no,status};
+        const document={document_kind:kind,document_type:type,document_no:no,document_date:date,customer_code:customerCode,currency_code:trim(b.currency_code)||source?.currency_code||null};
+        const price=await resolveSalesDocumentPrice(conn,c,document,{item_code:itemCode,item_name:trim(b.item_name)||source?.item_name,specification:trim(b.specification)||source?.specification,unit:trim(b.unit)||source?.unit||'PCS',quantity:qty,unit_price:b.unit_price},source);
+        const [h]=await conn.query(`INSERT INTO sales_documents(tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,customer_code,currency_code,warehouse_code,salesperson_code,source_document_id,return_type,status,inventory_status,note,created_by,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,db,kind,type,no,date,customerCode,price.currencyCode,trim(b.warehouse_code)||source?.warehouse_code,trim(b.salesperson_code),source?.document_id||Number(b.source_document_id||0)||null,returnType,status,inventory,trim(b.note),req.auth.id,documentTypeNeedsApproval(dt)?null:req.auth.id,documentTypeNeedsApproval(dt)?null:new Date()]);
+        const [i]=await conn.query(`INSERT INTO sales_document_items(
+          document_id,line_no,source_item_id,item_code,item_name,specification,unit,warehouse_code,
+          quantity,unit_price,unit_cost,expected_date,allowance_amount,
+          price_source_kind,price_source_id,price_source_no,price_source_date,price_rule_id,price_tier_id,note)
+          VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[h.insertId,sourceItemId,price.itemCode,trim(b.item_name)||source?.item_name,trim(b.specification)||source?.specification,price.pricingUnit,trim(b.warehouse_code)||source?.warehouse_code,qty,price.unitPrice,Number(b.unit_cost??source?.unit_cost??0),nullableDate(b.expected_date),allowance,price.price_source_kind,price.price_source_id,price.price_source_no,price.price_source_date,price.price_rule_id,price.price_tier_id,trim(b.item_note)]);
+        let priceUpdate=null;
+        if(status==='approved'&&Number(dt.update_customer_price)) {
+          priceUpdate=await upsertSalesPriceFromDocument(conn,c,{...document,id:h.insertId,currency_code:price.currencyCode},{...price,unit:price.pricingUnit,item_code:price.itemCode,unit_price:price.unitPrice},req.auth.id);
+        }
+        return{id:h.insertId,item_id:i.insertId,document_no:no,status,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
       });
       res.status(201).json({ok:true,data:out});
     }catch(e){next(e);}
   });
-  app.post('/api/sales-workflow/documents/:id/approve',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const id=Number(req.params.id),sourceDatabase=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase();const[r]=await pool.query("UPDATE sales_documents SET status='approved',approved_by=?,approved_at=NOW() WHERE id=? AND source_database=? AND status='draft'",[req.auth.id,id,sourceDatabase]);if(!r.affectedRows)throw badRequest('只有目前公司別的草稿可以核準');res.json({ok:true,data:{id,source_database:sourceDatabase}});}catch(e){next(e);}});
-  app.post('/api/sales-workflow/items/:id/convert',async(req,res,next)=>{try{const id=Number(req.params.id),b=req.body||{};const[[s]]=await pool.query('SELECT i.*,d.document_kind,d.customer_code,d.source_database FROM sales_document_items i JOIN sales_documents d ON d.id=i.document_id WHERE i.id=?',[id]);if(!s)throw badRequest('找不到來源明細');const target=s.document_kind==='quotation'?'sales_order':s.document_kind==='sales_order'?'shipment':null;if(!target)throw badRequest('此單據不可轉下一階段');const documentType=trim(b.document_type);if(!documentType)throw badRequest(`請選擇目前公司要使用的${target==='sales_order'?'訂單':'銷貨'}單別`);req.body={...b,source_database:s.source_database,document_kind:target,document_type:documentType,document_date:b.document_date,customer_code:s.customer_code,source_item_id:id,item_code:s.item_code,item_name:s.item_name,unit:s.unit,warehouse_code:b.warehouse_code||s.warehouse_code,quantity:b.quantity||Number(s.quantity)-Number(s.related_quantity),unit_price:s.unit_price};next();}catch(e){next(e);}},async(req,res,next)=>{try{const b=req.body,db=String(b.source_database).toUpperCase(),c=await ensure(db),date=validDate(b.document_date),kind=b.document_kind;const[[dt]]=await pool.query('SELECT * FROM sales_document_types WHERE tenant_id=? AND company_id=? AND source_system=? AND document_kind=? AND type_code=? AND is_active=1',[c.tenant_id,c.company_id,c.source_system,kind,b.document_type]);if(!dt)throw badRequest('找不到目前公司啟用中的目標單別');const out=await tx(async conn=>{const[[s]]=await conn.query('SELECT i.*,d.customer_code,d.document_kind FROM sales_document_items i JOIN sales_documents d ON d.id=i.document_id WHERE i.id=? AND d.status IN (\'approved\',\'partial\') FOR UPDATE',[b.source_item_id]);const qty=Number(b.quantity);if(!s||qty<=0||qty>Number(s.quantity)-Number(s.related_quantity))throw badRequest('轉單數量超過未交量');assertConfiguredSource(dt,s.document_kind,true,'銷售轉單');const no=await nextConfiguredDocumentNumber(conn,'sales_documents','document_no',dt,date),status=documentTypeNeedsApproval(dt)?'draft':'approved';const[h]=await conn.query(`INSERT INTO sales_documents(tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,customer_code,warehouse_code,status,inventory_status,created_by,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,db,kind,b.document_type,no,date,s.customer_code,b.warehouse_code,status,kind==='shipment'?'pending':'not_applicable',req.auth.id,documentTypeNeedsApproval(dt)?null:req.auth.id,documentTypeNeedsApproval(dt)?null:new Date()]);const[i]=await conn.query('INSERT INTO sales_document_items(document_id,line_no,source_item_id,item_code,item_name,unit,warehouse_code,quantity,unit_price,unit_cost,expected_date) VALUES(?,1,?,?,?,?,?,?,?,?,?)',[h.insertId,b.source_item_id,s.item_code,s.item_name,s.unit,b.warehouse_code||s.warehouse_code,qty,s.unit_price,Number(b.unit_cost||0),nullableDate(b.expected_date)]);await conn.query('UPDATE sales_document_items SET related_quantity=related_quantity+? WHERE id=?',[qty,b.source_item_id]);return{id:h.insertId,item_id:i.insertId,document_no:no,status};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
+  app.post('/api/sales-workflow/documents/:id/approve',async(req,res,next)=>{
+    try{
+      await ensureTargetSalesPricingSchema();
+      const id=Number(req.params.id),sourceDatabase=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase();
+       const c=ctx(sourceDatabase);
+       await syncCanonicalMaster(sourceDatabase, 'currencies');
+      const out=await tx(async conn=>{
+        const [[document]]=await conn.query(`SELECT d.* FROM sales_documents d
+          WHERE d.id=? AND d.source_database=? AND d.tenant_id=? AND d.company_id=? AND d.source_system=? AND d.status='draft' FOR UPDATE`,[
+          id,sourceDatabase,c.tenant_id,c.company_id,c.source_system
+        ]);
+        if(!document)throw badRequest('只有目前公司別的草稿可以核準');
+        const [[documentType]]=await conn.query(`SELECT * FROM sales_document_types
+          WHERE tenant_id=? AND company_id=? AND source_system=? AND document_kind=? AND type_code=?
+            AND (source_database=? OR source_database IS NULL OR source_database='') AND is_active=1 LIMIT 1`,[
+          c.tenant_id,c.company_id,c.source_system,document.document_kind,document.document_type,sourceDatabase
+        ]);
+        if(!documentType)throw badRequest('找不到目前公司別啟用中的單據性質');
+        const [items]=await conn.query('SELECT * FROM sales_document_items WHERE document_id=? ORDER BY line_no FOR UPDATE',[id]);
+        if(!items.length)throw badRequest('單據沒有明細，無法核准');
+        await conn.query(`UPDATE sales_documents SET status='approved',approved_by=?,approved_at=NOW()
+          WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`,[
+          req.auth.id,id,c.tenant_id,c.company_id,c.source_system,sourceDatabase
+        ]);
+        const priceUpdates=[];
+        if(Number(documentType.update_customer_price)) {
+          for(const item of items) priceUpdates.push(await upsertSalesPriceFromDocument(conn,c,document,item,req.auth.id));
+        }
+        return {id,source_database:sourceDatabase,status:'approved',price_updates:priceUpdates};
+      });
+      res.json({ok:true,data:out});
+    }catch(e){next(e);}
+  });
+  app.post('/api/sales-workflow/items/:id/convert', async (req,res,next) => {
+    try {
+      const id=Number(req.params.id), b=req.body||{}, db=sourceDbFromRequest(req);
+      const [[s]]=await pool.query(`SELECT i.*,d.document_kind,d.customer_code,d.currency_code,d.document_no,d.document_type,d.source_database
+        FROM sales_document_items i JOIN sales_documents d ON d.id=i.document_id
+        WHERE i.id=? AND d.source_database=?`,[id,db]);
+      if(!s)throw badRequest('找不到目前公司別的來源明細');
+      const target=s.document_kind==='quotation'?'sales_order':s.document_kind==='sales_order'?'shipment':null;
+      if(!target)throw badRequest('此單據不可轉下一階段');
+      const documentType=trim(b.document_type);
+      if(!documentType)throw badRequest(`請選擇目前公司要使用的${target==='sales_order'?'訂單':'銷貨'}單別`);
+      req.body={...b,source_database:db,document_kind:target,document_type:documentType,document_date:b.document_date,
+        customer_code:s.customer_code,source_item_id:id,item_code:s.item_code,item_name:s.item_name,unit:s.unit,
+        currency_code:trim(b.currency_code)||s.currency_code,warehouse_code:b.warehouse_code||s.warehouse_code,
+        quantity:b.quantity||Number(s.quantity)-Number(s.related_quantity),unit_price:String(b.unit_price??'').trim()};
+      next();
+    } catch(e){next(e);}
+  }, async (req,res,next) => {
+    try {
+       await ensureTargetSalesPricingSchema();
+       const b=req.body,db=sourceDbFromRequest(req),c=await ensure(db),date=validDate(b.document_date),kind=b.document_kind;
+       await syncCanonicalMaster(db, 'currencies');
+      const [[dt]]=await pool.query(`SELECT * FROM sales_document_types
+        WHERE tenant_id=? AND company_id=? AND source_system=? AND document_kind=? AND type_code=?
+          AND (source_database=? OR source_database IS NULL OR source_database='') AND is_active=1`,[
+        c.tenant_id,c.company_id,c.source_system,kind,b.document_type,db
+      ]);
+      if(!dt)throw badRequest('找不到目前公司啟用中的目標單別');
+      const out=await tx(async conn=>{
+        const [[s]]=await conn.query(`SELECT i.*,d.customer_code,d.currency_code,d.document_kind,d.document_no,d.document_type,d.id document_id
+          FROM sales_document_items i JOIN sales_documents d ON d.id=i.document_id
+          WHERE i.id=? AND d.source_database=? AND d.status IN ('approved','partial') FOR UPDATE`,[b.source_item_id,db]);
+        const qty=positiveNumber(b.quantity,'轉單數量');
+        if(!s||qty>Number(s.quantity)-Number(s.related_quantity)+SALES_PRICING_EPS)throw badRequest('轉單數量超過未交量');
+        assertConfiguredSource(dt,s.document_kind,true,'銷售轉單');
+        const no=await nextConfiguredDocumentNumber(conn,'sales_documents','document_no',dt,date),status=documentTypeNeedsApproval(dt)?'draft':'approved';
+        const document={document_kind:kind,document_type:b.document_type,document_no:no,document_date:date,customer_code:s.customer_code,currency_code:b.currency_code||s.currency_code};
+        const price=await resolveSalesDocumentPrice(conn,c,document,{item_code:s.item_code,item_name:s.item_name,specification:s.specification,unit:s.unit,quantity:qty,unit_price:b.unit_price},s);
+        const [h]=await conn.query(`INSERT INTO sales_documents(
+          tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,
+          customer_code,currency_code,warehouse_code,status,inventory_status,created_by,approved_by,approved_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
+          c.tenant_id,c.company_id,c.source_system,db,kind,b.document_type,no,date,s.customer_code,price.currencyCode,
+          b.warehouse_code||s.warehouse_code,status,kind==='shipment'?'pending':'not_applicable',req.auth.id,
+          documentTypeNeedsApproval(dt)?null:req.auth.id,documentTypeNeedsApproval(dt)?null:new Date()
+        ]);
+        const [i]=await conn.query(`INSERT INTO sales_document_items(
+          document_id,line_no,source_item_id,item_code,item_name,specification,unit,warehouse_code,quantity,unit_price,
+          unit_cost,expected_date,price_source_kind,price_source_id,price_source_no,price_source_date,price_rule_id,price_tier_id)
+          VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
+          h.insertId,b.source_item_id,price.itemCode,s.item_name,s.specification,price.pricingUnit,b.warehouse_code||s.warehouse_code,
+          qty,price.unitPrice,Number(b.unit_cost??s.unit_cost??0),nullableDate(b.expected_date),price.price_source_kind,
+          price.price_source_id,price.price_source_no,price.price_source_date,price.price_rule_id,price.price_tier_id
+        ]);
+        await conn.query('UPDATE sales_document_items SET related_quantity=related_quantity+? WHERE id=?',[qty,b.source_item_id]);
+        let priceUpdate=null;
+        if(status==='approved'&&Number(dt.update_customer_price)) priceUpdate=await upsertSalesPriceFromDocument(conn,c,{...document,id:h.insertId},{...price,unit:price.pricingUnit},req.auth.id);
+        return{id:h.insertId,item_id:i.insertId,document_no:no,status,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
+      });
+      res.status(201).json({ok:true,data:out});
+    }catch(e){next(e);}
+  });
   app.post('/api/sales-workflow/documents/:id/post',async(req,res,next)=>{
     try{
       await ensureTargetSalesWorkflowSchema();await ensureTargetFinanceWorkflowSchema();
@@ -3798,7 +4511,46 @@ function registerSalesWorkflowRoutes(app){
   app.get('/api/sales-workflow/order-versions',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const db=String(req.query.source_database||'SH').toUpperCase(),c=ctx(db),orderId=Number(req.query.order_id||0),limit=Math.min(Math.max(Number(req.query.limit)||100,1),500),where=['tenant_id=?','company_id=?','source_system=?','source_database=?'],params=[c.tenant_id,c.company_id,c.source_system,db];if(orderId){where.push('order_id=?');params.push(orderId);}const[rows]=await pool.query(`SELECT * FROM sales_order_versions WHERE ${where.join(' AND ')} ORDER BY order_id,version_no DESC LIMIT ?`,[...params,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
   app.post('/api/sales-workflow/order-changes',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),c=ctx(db),date=validDate(b.change_date),itemId=Number(b.order_item_id),reason=trim(b.reason);if(!reason)throw badRequest('請輸入訂單變更原因');const out=await tx(async conn=>{const[[i]]=await conn.query("SELECT i.*,d.id order_id,d.status order_status,d.source_database FROM sales_document_items i JOIN sales_documents d ON d.id=i.document_id WHERE i.id=? AND d.source_database=? AND d.document_kind='sales_order' FOR UPDATE",[itemId,db]);if(!i||!['approved','partial'].includes(i.order_status))throw badRequest('訂單尚未解結／重開，或已結案不可直接變更');const qty=positiveNumber(b.new_quantity,'變更數量');if(qty<Number(i.related_quantity))throw badRequest('變更數量不可小於已銷貨量');const no=trim(b.change_no)||await nextWorkflowNumber(conn,'sales_order_changes','change_no','OC',date),newPrice=Number(b.new_unit_price??i.unit_price),newExpectedDate=nullableDate(b.new_expected_date);const[r]=await conn.query(`INSERT INTO sales_order_changes(tenant_id,company_id,source_system,source_database,change_no,order_item_id,change_date,old_quantity,old_unit_price,old_expected_date,new_quantity,new_unit_price,new_expected_date,reason,status,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?)`,[c.tenant_id,c.company_id,c.source_system,db,no,itemId,date,Number(i.quantity),Number(i.unit_price),i.expected_date,qty,newPrice,newExpectedDate,reason,req.auth.id]);return{id:r.insertId,change_no:no,order_id:i.order_id};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
   app.post('/api/sales-workflow/order-changes/:id/approve',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const id=Number(req.params.id);let versionNo=null,appliedStatus=null;await tx(async conn=>{const[[c]]=await conn.query("SELECT c.*,i.id order_item_id,i.quantity old_quantity_current,i.related_quantity,i.unit_price old_unit_price_current,i.expected_date old_expected_date_current,i.document_id,d.id order_id,d.status order_status,d.source_database FROM sales_order_changes c JOIN sales_document_items i ON i.id=c.order_item_id JOIN sales_documents d ON d.id=i.document_id WHERE c.id=? AND c.status='draft' FOR UPDATE",[id]);if(!c)throw badRequest('找不到待核準變更單');if(!['approved','partial'].includes(c.order_status))throw badRequest('訂單尚未解結／重開，不能核准變更');if(Number(c.new_quantity)<Number(c.related_quantity))throw badRequest('變更數量不可小於已銷貨量');const context=ctx(String(c.source_database).toUpperCase()),order={id:c.order_id,status:c.order_status},beforeItem={id:c.order_item_id,quantity:c.old_quantity_current,related_quantity:c.related_quantity,unit_price:c.old_unit_price_current},afterItem={...beforeItem,quantity:c.new_quantity,unit_price:c.new_unit_price,expected_date:c.new_expected_date},delivered=Number(c.related_quantity||0),newQuantity=Number(c.new_quantity||0);appliedStatus=delivered<=EPS?'approved':delivered+EPS>=newQuantity?(c.order_status==='closed'?'closed':'completed'):'partial';await conn.query('UPDATE sales_document_items SET quantity=?,unit_price=?,expected_date=? WHERE id=?',[c.new_quantity,c.new_unit_price,c.new_expected_date,c.order_item_id]);if(['completed','closed'].includes(appliedStatus))await conn.query("UPDATE sales_documents SET status=?,closed_by=?,closed_at=NOW(),close_note='訂單變更核准後已全部交付，訂單結案',note=TRIM(CONCAT(COALESCE(note,''),CASE WHEN COALESCE(note,'')='' THEN '' ELSE '；' END,'訂單變更已核准')) WHERE id=?",[appliedStatus,req.auth.id,c.document_id]);else await conn.query("UPDATE sales_documents SET status=?,closed_by=NULL,closed_at=NULL,close_note=NULL,note=TRIM(CONCAT(COALESCE(note,''),CASE WHEN COALESCE(note,'')='' THEN '' ELSE '；' END,'訂單變更已核准，可重新建立／核准銷貨')) WHERE id=?",[appliedStatus,c.document_id]);versionNo=await recordSalesOrderVersion(conn,context,order,beforeItem,afterItem,{change_kind:'order_change',source_kind:'sales_order_change',source_document_id:id,source_document_no:c.change_no,after_status:appliedStatus,reason:c.reason,changed_by:req.auth.id});await conn.query("UPDATE sales_order_changes SET status='approved',version_no=?,applied_at=NOW(),approved_by=?,approved_at=NOW() WHERE id=?",[versionNo,req.auth.id,id]);});res.json({ok:true,data:{id,version_no:versionNo,status:appliedStatus,message:'訂單變更已核准，版本已保留'}});}catch(e){next(e);}});
-  app.post('/api/sales-workflow/create',async(req,res,next)=>{try{const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),c=await ensure(db),date=validDate(b.document_date),kind=trim(b.document_kind);const[[dt]]=await pool.query('SELECT * FROM sales_document_types WHERE tenant_id=? AND company_id=? AND source_system=? AND document_kind=? AND type_code=? AND is_active=1',[c.tenant_id,c.company_id,c.source_system,kind,trim(b.document_type)]);if(!dt||!trim(b.customer_code)||!trim(b.item_code))throw badRequest('單據性質、客戶與品號不可空白');assertConfiguredSource(dt,null,false,'銷售單據');const qty=positiveNumber(b.quantity,'數量'),out=await tx(async conn=>{const no=trim(b.document_no)||await nextConfiguredDocumentNumber(conn,'sales_documents','document_no',dt,date),inv=['shipment','sales_return'].includes(kind)?'pending':'not_applicable',status=documentTypeNeedsApproval(dt)?'draft':'approved';const[h]=await conn.query(`INSERT INTO sales_documents(tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,customer_code,currency_code,warehouse_code,return_type,status,inventory_status,note,created_by,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,db,kind,dt.type_code,no,date,trim(b.customer_code),trim(b.currency_code)||'TWD',trim(b.warehouse_code),kind==='sales_return'?(trim(b.return_type)||'return'):null,status,inv,trim(b.note),req.auth.id,documentTypeNeedsApproval(dt)?null:req.auth.id,documentTypeNeedsApproval(dt)?null:new Date()]);const[i]=await conn.query(`INSERT INTO sales_document_items(document_id,line_no,item_code,item_name,unit,warehouse_code,quantity,unit_price,unit_cost,expected_date,allowance_amount) VALUES(?,1,?,?,?,?,?,?,?,?,?,?)`,[h.insertId,trim(b.item_code),trim(b.item_name),trim(b.unit)||'PCS',trim(b.warehouse_code),qty,Number(b.unit_price||0),Number(b.unit_cost||0),nullableDate(b.expected_date),Number(b.allowance_amount||0)]);return{id:h.insertId,item_id:i.insertId,document_no:no,status};});res.status(201).json({ok:true,data:out});}catch(e){next(e);}});
+  app.post('/api/sales-workflow/create',async(req,res,next)=>{
+    try{
+      await ensureTargetSalesPricingSchema();
+       const b=req.body||{},db=sourceDbFromRequest(req),c=await ensure(db),date=validDate(b.document_date),kind=trim(b.document_kind),customerCode=trim(b.customer_code),itemCode=trim(b.item_code);
+       await syncCanonicalMaster(db, 'currencies');
+      const [[dt]]=await pool.query(`SELECT * FROM sales_document_types
+        WHERE tenant_id=? AND company_id=? AND source_system=? AND document_kind=? AND type_code=?
+          AND (source_database=? OR source_database IS NULL OR source_database='') AND is_active=1`,[
+        c.tenant_id,c.company_id,c.source_system,kind,trim(b.document_type),db
+      ]);
+      if(!dt||!customerCode||!itemCode)throw badRequest('單據性質、客戶與品號不可空白');
+      assertConfiguredSource(dt,null,false,'銷售單據');
+      const qty=positiveNumber(b.quantity,'數量');
+      const out=await tx(async conn=>{
+        const no=trim(b.document_no)||await nextConfiguredDocumentNumber(conn,'sales_documents','document_no',dt,date),inv=['shipment','sales_return'].includes(kind)?'pending':'not_applicable',status=documentTypeNeedsApproval(dt)?'draft':'approved';
+        const document={document_kind:kind,document_type:dt.type_code,document_no:no,document_date:date,customer_code:customerCode,currency_code:trim(b.currency_code)||null};
+        const price=await resolveSalesDocumentPrice(conn,c,document,{item_code:itemCode,item_name:trim(b.item_name),specification:trim(b.specification),unit:trim(b.unit)||'PCS',quantity:qty,unit_price:b.unit_price});
+        const [h]=await conn.query(`INSERT INTO sales_documents(
+          tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,
+          customer_code,currency_code,warehouse_code,return_type,status,inventory_status,note,created_by,approved_by,approved_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
+          c.tenant_id,c.company_id,c.source_system,db,kind,dt.type_code,no,date,customerCode,price.currencyCode,trim(b.warehouse_code),
+          kind==='sales_return'?(trim(b.return_type)||'return'):null,status,inv,trim(b.note),req.auth.id,
+          documentTypeNeedsApproval(dt)?null:req.auth.id,documentTypeNeedsApproval(dt)?null:new Date()
+        ]);
+        const [i]=await conn.query(`INSERT INTO sales_document_items(
+          document_id,line_no,item_code,item_name,specification,unit,warehouse_code,quantity,unit_price,unit_cost,
+          expected_date,allowance_amount,price_source_kind,price_source_id,price_source_no,price_source_date,price_rule_id,price_tier_id)
+          VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
+          h.insertId,price.itemCode,trim(b.item_name),trim(b.specification),price.pricingUnit,trim(b.warehouse_code),qty,price.unitPrice,
+          Number(b.unit_cost||0),nullableDate(b.expected_date),Number(b.allowance_amount||0),price.price_source_kind,price.price_source_id,
+          price.price_source_no,price.price_source_date,price.price_rule_id,price.price_tier_id
+        ]);
+        let priceUpdate=null;
+        if(status==='approved'&&Number(dt.update_customer_price)) priceUpdate=await upsertSalesPriceFromDocument(conn,c,{...document,id:h.insertId},{...price,unit:price.pricingUnit},req.auth.id);
+        return{id:h.insertId,item_id:i.insertId,document_no:no,status,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
+      });
+      res.status(201).json({ok:true,data:out});
+    }catch(e){next(e);}
+  });
 }
 
 function registerSalesReturnInspectionRoutes(app) {

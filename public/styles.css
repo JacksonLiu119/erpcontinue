@@ -145,10 +145,30 @@ body.architecture-mode .workspace{grid-column:2}
 .sales-customer-item-screen .panel-head{gap:10px;justify-content:space-between;flex-wrap:wrap}
 .sales-customer-item-screen .panel-head .code{margin-left:auto}
 .sales-customer-item-screen table.grid td pre{max-width:260px;max-height:150px;margin:0;overflow:auto;white-space:pre-wrap;color:var(--muted);font:10px/1.45 Consolas,"Microsoft JhengHei",monospace}
+.sales-customer-pricing-screen table.grid{min-width:1560px}
+.sales-customer-pricing-screen table.grid th{white-space:nowrap}
+.sales-customer-pricing-screen table.grid td{vertical-align:top;white-space:nowrap}
+.sales-customer-pricing-screen table.grid td small{line-height:1.55}
+.sales-customer-pricing-screen .panel-head{gap:10px;justify-content:space-between;flex-wrap:wrap}
+.sales-customer-pricing-screen .panel-head .code{margin-left:auto}
+.pricing-tier-panel{margin-top:4px;border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
+.pricing-tier-panel>.panel-head{background:color-mix(in srgb,var(--accent) 9%,var(--soft))}
+.pricing-tier-head,.pricing-tier-row{display:grid;grid-template-columns:1fr 1fr 1fr 1.5fr auto;gap:8px;align-items:center}
+.pricing-tier-head{padding:0 0 6px;color:var(--muted);font-size:11px;font-weight:700}
+.pricing-tier-row{margin-top:7px}
+.pricing-tier-row input{width:100%;min-width:0;padding:7px 8px;color:var(--text);background:#fff;border:1px solid #d6cbb4;border-radius:8px}
+.pricing-tier-row input:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px #c97b3c28}
+.pricing-lookup-result{min-height:44px}
+.pricing-lookup-card{display:grid;gap:5px;padding:10px 12px;border:1px solid #28a66f;border-left:4px solid #28a66f;border-radius:10px;background:color-mix(in srgb,#28a66f 9%,var(--panel));color:var(--text);font-size:12px}
+.pricing-lookup-card.warn{border-color:#d98b09;border-left-color:#d98b09;background:color-mix(in srgb,#e6a329 10%,var(--panel))}
+.sales-customer-pricing-screen table.grid td pre{max-width:280px;max-height:150px;margin:0;overflow:auto;white-space:pre-wrap;color:var(--muted);font:10px/1.45 Consolas,"Microsoft JhengHei",monospace}
+.sales-customer-pricing-screen .sales-reference-card{margin-bottom:2px}
+.sales-customer-pricing-screen .panel details{border-radius:10px}
 .architecture-pipe-entry{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid color-mix(in srgb,var(--accent) 55%,var(--border));border-radius:13px;background:color-mix(in srgb,var(--accent) 8%,var(--panel))}
 .architecture-pipe-entry strong{display:block;color:var(--brand);font-size:12px}
 .architecture-pipe-entry small{display:block;margin-top:3px;color:var(--muted);font-size:10px}
 @media(max-width:900px){.sales-pipe-board{padding:12px}.sales-pipe-prereq-grid{min-width:650px}.sales-pipe-mainline{min-width:920px}.sales-pipe-downstream{min-width:760px}.architecture-pipe-entry{align-items:flex-start;flex-direction:column}.sales-reference-grid{grid-template-columns:1fr}}
+@media(max-width:760px){.pricing-tier-head{display:none}.pricing-tier-row{grid-template-columns:1fr 1fr;gap:7px;padding:8px;border:1px solid var(--border);border-radius:10px;background:var(--soft)}.pricing-tier-row .btn{grid-column:1/-1}.sales-customer-pricing-screen table.grid{min-width:1250px}}
 
 .quality-policy-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.quality-policy-grid>div{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--soft);color:var(--muted);font-size:11px;line-height:1.6}.quality-policy-grid strong{color:var(--brand);font-size:12px}.quality-badge,.quality-status{display:inline-block;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700}.quality-badge.warning{color:#8a5a00;background:#fff0c7}.quality-badge.error{color:#a9312d;background:#fde3e1}.quality-badge.info{color:#21618c;background:#dceefa}.quality-status.open,.quality-status.correction_pending{color:#a9312d;background:#fde3e1}.quality-status.acknowledged{color:#8a5a00;background:#fff0c7}.quality-status.resolved{color:#187b55;background:#e2f4e9}.quality-status.ignored{color:var(--muted);background:var(--soft)}
 @media(max-width:900px){.quality-policy-grid{grid-template-columns:1fr}}

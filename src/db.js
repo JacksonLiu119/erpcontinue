@@ -25,7 +25,7 @@ export const sourceDatabases = Object.create(null); /* legacy hardcoded list rem
 */
 
 const controlDatabase = process.env.DB_NAME || 'inventory_erp';
-const controlPool = mysql.createPool({ ...baseConfig, database: controlDatabase });
+export const controlPool = mysql.createPool({ ...baseConfig, database: controlDatabase });
 const targetContext = new AsyncLocalStorage();
 const targetPools = new Map();
 
@@ -522,7 +522,7 @@ export function ensureProcurementSchema() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS sales_document_types (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,tenant_id VARCHAR(60) NOT NULL,company_id VARCHAR(60) NOT NULL,source_system VARCHAR(60) NOT NULL,document_kind ENUM('quotation','sales_order','shipment','sales_return') NOT NULL,type_code VARCHAR(20) NOT NULL,type_name VARCHAR(80) NOT NULL,number_prefix VARCHAR(20) NOT NULL,requires_approval TINYINT(1) NOT NULL DEFAULT 1,is_active TINYINT(1) NOT NULL DEFAULT 1,note VARCHAR(255) NULL,UNIQUE KEY uq_sales_document_type(tenant_id,company_id,source_system,document_kind,type_code)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS sales_documents (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,tenant_id VARCHAR(60) NOT NULL,company_id VARCHAR(60) NOT NULL,source_system VARCHAR(60) NOT NULL,source_database VARCHAR(60) NOT NULL,document_kind ENUM('quotation','sales_order','shipment','sales_return') NOT NULL,document_type VARCHAR(20) NOT NULL,document_no VARCHAR(60) NOT NULL,document_date DATE NOT NULL,customer_code VARCHAR(30) NOT NULL,currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD',warehouse_code VARCHAR(30) NULL,salesperson_code VARCHAR(30) NULL,source_document_id BIGINT UNSIGNED NULL,return_type ENUM('return','allowance') NULL,status ENUM('draft','approved','partial','completed','posted','closed','voided') NOT NULL DEFAULT 'draft',inventory_status VARCHAR(20) NOT NULL DEFAULT 'not_applicable',note VARCHAR(500) NULL,created_by BIGINT UNSIGNED NULL,approved_by BIGINT UNSIGNED NULL,approved_at DATETIME NULL,posted_by BIGINT UNSIGNED NULL,posted_at DATETIME NULL,closed_by BIGINT UNSIGNED NULL,closed_at DATETIME NULL,close_note VARCHAR(255) NULL,reopened_by BIGINT UNSIGNED NULL,reopened_at DATETIME NULL,reopen_note VARCHAR(255) NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,UNIQUE KEY uq_sales_document(tenant_id,company_id,source_system,document_no),KEY ix_sales_document(source_database,document_kind,status,document_date)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
-      await pool.query(`CREATE TABLE IF NOT EXISTS sales_document_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,document_id BIGINT UNSIGNED NOT NULL,line_no INT UNSIGNED NOT NULL DEFAULT 1,source_item_id BIGINT UNSIGNED NULL,item_code VARCHAR(40) NOT NULL,item_name VARCHAR(160) NULL,specification VARCHAR(160) NULL,unit VARCHAR(20) NOT NULL DEFAULT 'PCS',warehouse_code VARCHAR(30) NULL,quantity DECIMAL(24,3) NOT NULL,related_quantity DECIMAL(24,3) NOT NULL DEFAULT 0,unit_price DECIMAL(24,6) NOT NULL DEFAULT 0,unit_cost DECIMAL(24,6) NOT NULL DEFAULT 0,expected_date DATE NULL,allowance_amount DECIMAL(24,6) NOT NULL DEFAULT 0,note VARCHAR(255) NULL,UNIQUE KEY uq_sales_document_item(document_id,line_no),CONSTRAINT fk_sales_document_item FOREIGN KEY(document_id) REFERENCES sales_documents(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS sales_document_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,document_id BIGINT UNSIGNED NOT NULL,line_no INT UNSIGNED NOT NULL DEFAULT 1,source_item_id BIGINT UNSIGNED NULL,item_code VARCHAR(40) NOT NULL,item_name VARCHAR(160) NULL,specification VARCHAR(160) NULL,unit VARCHAR(20) NOT NULL DEFAULT 'PCS',warehouse_code VARCHAR(30) NULL,quantity DECIMAL(24,3) NOT NULL,related_quantity DECIMAL(24,3) NOT NULL DEFAULT 0,unit_price DECIMAL(24,6) NOT NULL DEFAULT 0,unit_cost DECIMAL(24,6) NOT NULL DEFAULT 0,expected_date DATE NULL,allowance_amount DECIMAL(24,6) NOT NULL DEFAULT 0,price_source_kind VARCHAR(30) NULL,price_source_id BIGINT UNSIGNED NULL,price_source_no VARCHAR(80) NULL,price_source_date DATE NULL,price_rule_id BIGINT UNSIGNED NULL,price_tier_id BIGINT UNSIGNED NULL,note VARCHAR(255) NULL,UNIQUE KEY uq_sales_document_item(document_id,line_no),CONSTRAINT fk_sales_document_item FOREIGN KEY(document_id) REFERENCES sales_documents(id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS sales_order_changes (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,tenant_id VARCHAR(60) NOT NULL,company_id VARCHAR(60) NOT NULL,source_system VARCHAR(60) NOT NULL,source_database VARCHAR(60) NOT NULL,change_no VARCHAR(60) NOT NULL,order_item_id BIGINT UNSIGNED NOT NULL,change_date DATE NOT NULL,new_quantity DECIMAL(24,3) NOT NULL,new_unit_price DECIMAL(24,6) NOT NULL,new_expected_date DATE NULL,reason VARCHAR(255) NOT NULL,status ENUM('draft','approved','voided') DEFAULT 'draft',approved_by BIGINT UNSIGNED NULL,approved_at DATETIME NULL,created_by BIGINT UNSIGNED NULL,UNIQUE KEY uq_sales_change(tenant_id,company_id,source_system,change_no)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS erp_master_source_mappings (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -1509,6 +1509,14 @@ export async function ensureTargetSalesWorkflowSchema() {
   ];
   for (const [column, definition] of columns) await addColumnIfMissing('sales_documents', column, definition);
   for (const [column, definition] of [
+    ['price_source_kind', 'VARCHAR(30) NULL'],
+    ['price_source_id', 'BIGINT UNSIGNED NULL'],
+    ['price_source_no', 'VARCHAR(80) NULL'],
+    ['price_source_date', 'DATE NULL'],
+    ['price_rule_id', 'BIGINT UNSIGNED NULL'],
+    ['price_tier_id', 'BIGINT UNSIGNED NULL']
+  ]) await addColumnIfMissing('sales_document_items', column, definition);
+  for (const [column, definition] of [
     ['version_no', 'INT UNSIGNED NULL'],
     ['old_quantity', 'DECIMAL(24,3) NULL'],
     ['old_unit_price', 'DECIMAL(24,6) NULL'],
@@ -1591,6 +1599,74 @@ export async function ensureTargetSalesCustomerItemSchema() {
       (tenant_id,company_id,source_system,source_database,mapping_id,created_at),
     CONSTRAINT fk_erp_customer_item_mapping_event
       FOREIGN KEY (mapping_id) REFERENCES erp_customer_item_mappings(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+}
+
+// COPMB/COPMC are read-only historical pricing references.  The new ERP
+// keeps its approved customer/item prices in a separate target structure so
+// validity, approval and version history cannot alter the original SH/SC
+// databases.  A price version is never physically deleted; superseding it
+// creates a new effective version and voiding it preserves the audit trail.
+export async function ensureTargetSalesPricingSchema() {
+  await ensureTargetSalesWorkflowSchema();
+  await ensureTargetSalesCustomerItemSchema();
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_customer_item_prices (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    customer_id BIGINT UNSIGNED NULL, customer_code VARCHAR(30) NOT NULL,
+    mapping_id BIGINT UNSIGNED NULL,
+    item_id BIGINT UNSIGNED NULL, item_code VARCHAR(40) NOT NULL,
+    pricing_unit VARCHAR(20) NOT NULL, currency_code VARCHAR(10) NOT NULL,
+    unit_price DECIMAL(24,6) NOT NULL DEFAULT 0,
+    discount_rate DECIMAL(12,8) NULL,
+    tax_included TINYINT(1) NOT NULL DEFAULT 0,
+    quantity_pricing_flag TINYINT(1) NOT NULL DEFAULT 0,
+    trade_condition VARCHAR(10) NOT NULL DEFAULT '1',
+    effective_from DATE NOT NULL, effective_to DATE NULL,
+    status ENUM('draft','approved','voided') NOT NULL DEFAULT 'draft',
+    is_active TINYINT(1) NOT NULL DEFAULT 1,
+    source_kind VARCHAR(30) NOT NULL DEFAULT 'manual',
+    source_document_id BIGINT UNSIGNED NULL, source_document_no VARCHAR(80) NULL,
+    source_document_type VARCHAR(20) NULL, source_table VARCHAR(60) NOT NULL DEFAULT 'manual',
+    source_key VARCHAR(160) NULL, note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, updated_by BIGINT UNSIGNED NULL,
+    approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL,
+    voided_by BIGINT UNSIGNED NULL, voided_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_customer_item_price_version
+      (tenant_id,company_id,source_system,source_database,customer_code,item_code,pricing_unit,currency_code,effective_from),
+    KEY ix_erp_customer_item_price_lookup
+      (tenant_id,company_id,source_system,source_database,customer_code,item_code,pricing_unit,currency_code,status,is_active,effective_from),
+    KEY ix_erp_customer_item_price_source
+      (source_database,source_kind,source_document_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_customer_item_price_tiers (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    pricing_id BIGINT UNSIGNED NOT NULL, line_no INT UNSIGNED NOT NULL DEFAULT 1,
+    quantity_from DECIMAL(24,6) NOT NULL DEFAULT 0,
+    unit_price DECIMAL(24,6) NULL, discount_rate DECIMAL(12,8) NULL,
+    note VARCHAR(500) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_customer_item_price_tier(pricing_id,quantity_from),
+    KEY ix_erp_customer_item_price_tier_line(pricing_id,line_no),
+    CONSTRAINT fk_erp_customer_item_price_tier
+      FOREIGN KEY (pricing_id) REFERENCES erp_customer_item_prices(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_customer_item_price_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    pricing_id BIGINT UNSIGNED NOT NULL,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    event_kind VARCHAR(30) NOT NULL, before_json JSON NULL, after_json JSON NULL,
+    reason VARCHAR(500) NOT NULL, changed_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_erp_customer_item_price_event_lookup
+      (tenant_id,company_id,source_system,source_database,pricing_id,created_at),
+    CONSTRAINT fk_erp_customer_item_price_event
+      FOREIGN KEY (pricing_id) REFERENCES erp_customer_item_prices(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
 }
 
