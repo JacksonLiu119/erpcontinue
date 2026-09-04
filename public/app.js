@@ -843,7 +843,12 @@ function renderAccountingDrafts(){
   $('#draftGenerateForm').onsubmit=async e=>{e.preventDefault();const selected=[...document.querySelectorAll('[data-draft-source]:checked')].map(x=>Number(x.value));if(!selected.length){toast('請至少選擇一筆來源帳款',true);return;}const form=e.currentTarget;try{const result=await api('/api/accounting/drafts/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_database:currentDatabase,source_refs:selected,draft_date:form.elements.draft_date.value,memo:form.elements.memo.value})});toast(`底稿 ${result.draft_no} 已產生並鎖定來源`);form.reset();form.elements.draft_date.value=procurementToday();await load();await openDetail(result.id);}catch(x){toast(x.message,true);}};$('#accountingDraftReload').onclick=load;load();
 }
 const confirmedNextPhaseRoadmap=[
-  ['N16','第一階段：銷售管理水管圖／SHEET排序與節點連結','已完成銷售主流程圖與現有 SHEET 排序，節點可點選導向作業；客戶品號、客戶產品計價、銷售預測與銷售分析目前是部分完成或占位頁，待依 iSM 文件補成正式作業。','partial'],
+  ['N16','第一階段：銷售管理水管圖／SHEET排序與節點連結（總覽）','已完成銷售主流程圖與現有 SHEET 排序，節點可點選導向作業；下列部分完成／尚未完成節點已逐項列入本清單，待依 iSM 文件補成正式作業。','partial'],
+  ['N16-1','銷售管理：客戶品號資料建立作業','水管圖標示為部分完成；目前已有品號主檔可供作業，但尚缺客戶品號對照、客戶品號名稱／規格、有效期間與公司別隔離的獨立維護及查詢。','partial'],
+  ['N16-2','銷售管理：客戶產品計價建立作業','水管圖標示為尚未完成；待補客戶／品號價格、折扣、幣別、生效期間、核准規則，並讓報價／訂單依目前公司別自動帶入且保留來源。','planned'],
+  ['N16-3','銷售管理：銷售預測建立作業','水管圖標示為尚未完成；待依文件補上依品號／依類別的預測版本、期間、數量、明細與預測報表，並與接單／跟催資料分開核對。','planned'],
+  ['N16-4','銷售管理：銷售統計彙總報表','水管圖標示為部分完成；目前可依訂單進度資料按客戶／品號彙總訂單量、已交量、未交量與金額，仍待補齊文件中的客戶／品號／業務／期間等統計維度與正式報表。','partial'],
+  ['N16-5','銷售管理：銷售分析系統','水管圖標示為尚未完成；待補客戶、品號、部門、業務員、期間及後續分析維度，並與銷售統計、庫存及應收資料建立可追溯的分析來源；製造與成本暫不納入。','planned'],
   ['N17','採購管理水管圖／SHEET排序與節點連結','依 iSM 採購管理文件整理請購→採購→到貨→驗收→進貨→退貨→應付，並將每個節點連到對應 SHEET；現有採購流程先保留，水管圖尚未完成。','planned'],
   ['N18','庫存管理水管圖／SHEET排序與節點連結','整理庫存開帳→異動→驗收／過帳→可用量→異動台帳→反過帳／更正，並呈現銷售與採購對庫存的聯動；尚未完成獨立水管圖。','planned'],
   ['N19','應收管理水管圖／SHEET排序與節點連結','整理銷貨／銷退→應收→結帳／發票→收款／沖銷→待抵／退款，補多筆合併、原幣與狀態追蹤節點；尚未完成獨立水管圖。','planned'],
