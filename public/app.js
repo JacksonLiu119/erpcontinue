@@ -22,6 +22,25 @@ const masterConfigs = {
   calendars: { title: '行事曆建立作業', code: 'calendar_code', name: 'shift_name', required:['industry_type','calendar_year','shift_code'], fields: [['calendar_code','行事曆代號'],['industry_type','行業別（1工廠、2銀行、3刷卡班別）'],['calendar_year','年度'],['shift_code','班別'],['shift_name','班別名稱'],['note','備註']], detail: { type:'calendar-days', title:'行事曆日期明細', code:'calendar_day_code', required:['industry_type','calendar_year','shift_code','work_date'], fields:[['industry_type','行業別'],['calendar_year','年度'],['shift_code','班別'],['work_date','日期（YYYYMMDD）'],['day_type','日期屬性'],['work_hours','工時'],['closed_flag','關閉註記'],['note','備註']], makeCode:data=>`${data.industry_type}-${data.calendar_year}-${data.shift_code}:${data.work_date}`, prepare:data=>({ ...data, calendar_code:`${data.industry_type}-${data.calendar_year}-${data.shift_code}` }) } }
 };
 
+const salesPipeNodes = {
+  setup: { label:'單據性質設定作業', note:'依公司別維護單別、核准、前置與編號規則', status:'done', screen:'sales-document-types' },
+  customer: { label:'客戶資料建立作業', note:'客戶主檔、結帳日、幣別與付款條件', status:'done', screen:'customers' },
+  customerItem: { label:'客戶品號資料建立作業', note:'客戶與品號對照；目前列為獨立待補作業', status:'partial', screen:'sales-customer-items' },
+  customerPricing: { label:'客戶產品計價建立作業', note:'客戶品號、價格、生效日與幣別', status:'planned', screen:'sales-customer-pricing' },
+  forecast: { label:'銷售預測建立作業', note:'依品號／類別建立預測與明細報表', status:'planned', screen:'sales-forecast' },
+  quote: { label:'報價單建立作業', note:'報價、合約或獨立銷售起點', status:'done', screen:'sales-quotations' },
+  order: { label:'客戶訂單建立作業', note:'核准後可分批轉銷貨並追蹤未交量', status:'done', screen:'sales-orders' },
+  change: { label:'訂單變更單建立作業', note:'受控解結／重開、版本與重新核准', status:'done', screen:'sales-order-changes' },
+  followup: { label:'接單統計／跟催報表', note:'含訂單進度與未交訂單查詢', status:'done', screen:'sales-progress' },
+  shipment: { label:'銷貨單建立作業', note:'銷貨確認／過帳後才扣庫存', status:'done', screen:'sales-shipments' },
+  return: { label:'銷退單建立作業', note:'驗收合格回庫；折讓不動庫存', status:'done', screen:'sales-returns' },
+  statistics: { label:'銷售統計彙總報表', note:'客戶／品號／歷史交易彙總', status:'partial', screen:'sales-statistics' },
+  analysis: { label:'銷售分析系統', note:'獨立分析維度與圖表尚待建立', status:'planned', screen:'sales-analysis' },
+  inventory: { label:'庫存管理系統', note:'銷貨出庫與銷退回庫的中央控制', status:'done', screen:'inventory-new-ledger' },
+  receivable: { label:'帳款管理系統', note:'應收立帳、收款與總帳聯動', status:'done', screen:'finance-flow' }
+};
+const salesPipeStatusLabels = { done:'已完成', partial:'部分完成', planned:'尚未完成' };
+
 const modules = [
   { id:'DB', name:'資料庫查詢', screens:[['document-natures','單據／分錄性質'],['basicdata','基本資料'],['companies','公司資料建立作業'],['common-parameters','共用參數查詢'],['code-rules','編碼原則查詢'],['job-categories','職務類別建立作業'],['currencies','幣別匯率建立作業'],['payment-terms','付款條件建立作業'],['calendars','行事曆建立作業'],['source-mappings','標準主檔對照表'],['import-monitor','匯入批次管理'],['data-quality','匯入資料品質'],['warehouses','庫別建立作業'],['departments','部門建立作業'],['employees','員工建立作業'],['customers','客戶資料建立作業'],['suppliers','廠商資料建立作業']] },
   { id:'INV', name:'庫存管理', screens:[['item-categories','品號類別建立作業'],['items','品號主檔建立作業'],['inventory-opening','庫存開帳作業'],['inventory-detail','庫存明細表'],['inventory-ledger','庫存明細帳'],['inventory-balance','進耗存統計表'],['inventory-movement-stats','庫存異動統計表'],['department-movement-stats','部門異動單據統計表']] },
@@ -51,7 +70,24 @@ modules.find(module => module.id === 'INV').screens = [
   ['inventory-temporary','暫出／暫入作業'],['inventory-stocktake','庫存盤點作業'],['inventory-posting','進貨／退貨庫存過帳'],['inventory-reversals','反過帳／更正'],['inventory-new-balance','庫存餘額'],
   ['inventory-new-ledger','庫存異動帳']
 ];
-modules.push({id:'SAL',name:'銷售管理',screens:[['sales-document-types','銷售單據性質'],['sales-quotations','報價建立作業'],['sales-orders','訂單建立作業'],['sales-order-changes','訂單變更'],['sales-shipments','銷貨建立／出庫'],['sales-returns','銷退／折讓'],['sales-progress','訂單銷貨進度'],['sales-open-orders','未交訂單查詢']]});
+modules.push({id:'SAL',name:'銷售管理',screens:[
+  ['sales-pipe','銷售管理水管圖'],
+  ['sales-document-types','單據性質設定作業'],
+  ['customers','客戶資料建立作業'],
+  ['items','品號主檔建立作業'],
+  ['sales-customer-items','客戶品號資料建立作業'],
+  ['sales-customer-pricing','客戶產品計價建立作業'],
+  ['sales-forecast','銷售預測建立作業'],
+  ['sales-quotations','報價單建立作業'],
+  ['sales-orders','客戶訂單建立作業'],
+  ['sales-order-changes','訂單變更單建立作業'],
+  ['sales-progress','接單統計／跟催報表'],
+  ['sales-open-orders','未交訂單查詢'],
+  ['sales-shipments','銷貨單建立作業'],
+  ['sales-returns','銷退單建立作業'],
+  ['sales-statistics','銷售統計彙總報表'],
+  ['sales-analysis','銷售分析系統']
+]});
 
 modules.push({id:'FIN',name:'應收／應付管理',screens:[['finance-flow','財務流程圖'],['ar-source','銷貨轉應收'],['ar-open','應收帳款'],['ar-credits','銷退待抵／退款'],['ar-receipt','收款沖銷'],['ar-notes','應收票據'],['ar-aging','未收帳款查詢'],['ap-source','進貨轉應付'],['ap-open','應付帳款'],['ap-payment','付款沖銷'],['ap-notes','應付票據'],['ap-aging','未付帳款查詢'],['bank-ledger','銀行資金／對帳'],['accounting-clearing','立沖帳查詢'],['accounting-opening-balances','期初未結帳款'],['accounting-periods','會計期間管理'],['accounting-year-close','年度結轉'],['accounting-auto-rules','自動分錄規則'],['accounting-drafts','會計分錄底稿'],['general-ledger','會計傳票／總帳'],['accounting-financial-preview','公司別只讀財報預覽'] ]});
 modules.find(module => module.id === 'FIN').screens.splice(4,0,['advances-offset','預收／預付與對沖']);
@@ -572,7 +608,66 @@ function resetMasterForm(config) { const form = $('#masterForm'); if (!form) ret
 const inventoryKinds={issue:'其他領料',return:'其他退料',adjust_in:'庫存增加調整',adjust_out:'庫存減少調整',scrap:'庫存報廢',cost_adjust:'成本調整',transfer:'庫存轉撥',temp_in:'暫入',temp_in_return:'暫入歸還',temp_out:'暫出',temp_out_return:'暫出歸還',stocktake:'盤點調整'};
 const salesKinds={quotation:'報價單',sales_order:'客戶訂單',shipment:'銷貨單',sales_return:'銷退／折讓單'};
 function salesShell(t,b){$('#canvas').innerHTML=`<section class="screen"><div class="screen-head"><h2>${t}</h2><span class="code">${esc(targetDatabaseLabel())}</span></div><div class="screen-body"><div class="desc">${esc(currentDatabase)} 原始資料僅供歷史查詢；本公司新單據與庫存異動只寫入 ${esc(targetDatabaseLabel())}。</div>${b}</div></section>`;}
-function renderSalesScreen(s){if(s==='sales-document-types')return renderSalesTypes();if(s==='sales-progress'||s==='sales-open-orders')return renderSalesProgress(s==='sales-open-orders');if(s==='sales-order-changes')return renderSalesChanges();renderSalesEntry({'sales-quotations':'quotation','sales-orders':'sales_order','sales-shipments':'shipment','sales-returns':'sales_return'}[s]);}
+function renderSalesScreen(s){
+  if(s==='sales-pipe')return renderSalesPipe();
+  if(s==='sales-document-types')return renderSalesTypes();
+  if(s==='sales-progress'||s==='sales-open-orders')return renderSalesProgress(s==='sales-open-orders');
+  if(s==='sales-order-changes')return renderSalesChanges();
+  if(s==='sales-statistics')return renderSalesStatistics();
+  if(['sales-customer-items','sales-customer-pricing','sales-forecast','sales-analysis'].includes(s))return renderSalesReferenceScreen(s);
+  renderSalesEntry({'sales-quotations':'quotation','sales-orders':'sales_order','sales-shipments':'shipment','sales-returns':'sales_return'}[s]);
+}
+function salesPipeNode(id){
+  const item=salesPipeNodes[id];
+  if(!item)return '';
+  return '<button type="button" class="sales-pipe-node '+item.status+'" data-sales-screen="'+esc(item.screen)+'" title="開啟'+esc(item.label)+'"><span class="sales-pipe-node-title">'+esc(item.label)+'</span><small>'+esc(item.note)+'</small><em>'+esc(salesPipeStatusLabels[item.status]||item.status)+'・點選開啟</em></button>';
+}
+function navigateToSalesScreen(screen){
+  const visible=getVisibleModules();
+  const module=visible.find(item=>item.screens.some(([id])=>id===screen));
+  if(!module){toast('目前登入角色未開放此作業：'+screen,true);return;}
+  state.module=module.id;state.screen=screen;renderAll();
+}
+function bindSalesPipeLinks(){
+  document.querySelectorAll('[data-sales-screen]').forEach(button=>button.onclick=()=>navigateToSalesScreen(button.dataset.salesScreen));
+}
+function renderSalesPipe(){
+  const arrow='<div class="sales-pipe-arrow" aria-hidden="true">↓</div>';
+  const body='<div class="sales-pipe-intro"><div class="desc">依《iSM-訂單管理系統》整理銷售管理順序。主線為單據性質→主檔／計價→銷售預測→報價→訂單→銷貨→銷退；訂單變更、接單跟催與銷售統計以支線呈現。每個節點都可點選進入對應 SHEET；綠色代表已完成驗證，橘色代表部分完成，紅色虛線代表尚未完成。</div><div class="sales-pipe-legend"><span class="done">已完成且可操作</span><span class="partial">部分完成／待補</span><span class="planned">尚未完成／占位頁</span></div></div><div class="sales-pipe-board"><div class="sales-pipe-system">訂單管理系統<small>COP｜第一階段：銷售管理</small></div>'+arrow+'<div class="sales-pipe-narrow">'+salesPipeNode('setup')+'</div>'+arrow+'<div class="sales-pipe-prereq-grid">'+salesPipeNode('customer')+salesPipeNode('customerItem')+salesPipeNode('customerPricing')+'</div>'+arrow+'<div class="sales-pipe-narrow">'+salesPipeNode('forecast')+'</div>'+arrow+'<div class="sales-pipe-mainline">'+salesPipeNode('quote')+'<span class="sales-pipe-horizontal-arrow" aria-hidden="true">→</span><div class="sales-pipe-anchor">'+salesPipeNode('order')+'<div class="sales-pipe-branch-stack"><span>訂單管理支線</span>'+salesPipeNode('change')+salesPipeNode('followup')+'</div></div><span class="sales-pipe-horizontal-arrow" aria-hidden="true">→</span><div class="sales-pipe-anchor">'+salesPipeNode('shipment')+'<div class="sales-pipe-branch-stack"><span>銷售統計支線</span>'+salesPipeNode('statistics')+'</div></div><span class="sales-pipe-horizontal-arrow" aria-hidden="true">→</span>'+salesPipeNode('return')+'</div>'+arrow+'<div class="sales-pipe-downstream"><div class="sales-pipe-downstream-label">完成後聯動</div>'+salesPipeNode('analysis')+salesPipeNode('inventory')+salesPipeNode('receivable')+'</div></div><div class="desc">目前已對應的既有 SHEET 會直接開啟；客戶品號、客戶產品計價、銷售預測與銷售分析尚未有完整獨立資料作業，因此保留占位頁並列入「下一階段開發順序（已確認項目）」，不會假裝已有正式資料。</div>';
+  salesShell('銷售管理水管圖',body);
+  $('#canvas .screen')?.classList.add('sales-pipe-screen');
+  bindSalesPipeLinks();
+}
+function renderSalesStatistics(){
+  const start='2000-01-01',end=procurementToday();
+  salesShell('銷售統計彙總報表','<div class="desc">依文件中的客戶／品號／歷史交易彙總方向，先使用目前已驗證的訂單進度資料產生可核對的統計。此報表不新增資料表；正式銷售分析維度與更多報表列入下一階段。</div><form id="salesStatisticsFilter" class="form"><div class="row c3"><div class="field"><label>日期起日</label><input name="from_date" type="date" value="'+start+'"></div><div class="field"><label>日期迄日</label><input name="to_date" type="date" value="'+end+'"></div><div class="field"><label>彙總方式</label><select name="group_by"><option value="customer">依客戶</option><option value="item">依品號</option></select></div></div><button class="btn primary" type="submit">查詢銷售統計</button></form>'+panelTable('銷售統計彙總',['彙總類別','明細','訂單張數','訂單量','已交量','未交量','訂單金額','未交金額','狀態'],'salesStatisticsRows','salesStatisticsReload'));
+  const form=$('#salesStatisticsFilter'),load=async()=>{
+    try{
+      const from=form.elements.from_date.value,to=form.elements.to_date.value,group=form.elements.group_by.value;
+      const rows=await api('/api/sales-workflow/progress?source_database='+encodeURIComponent(currentDatabase)+'&limit=100');
+      const grouped=new Map();
+      (rows||[]).filter(row=>{const date=String(row.document_date||'').slice(0,10);return(!from||date>=from)&&(!to||date<=to);}).forEach(row=>{
+        const key=group==='item'?String(row.item_code||'未指定品號'):String(row.customer_code||'未指定客戶');
+        const current=grouped.get(key)||{key,detail:group==='item'?String(row.item_name||''):String(row.item_code||''),orders:0,ordered:0,delivered:0,remaining:0,orderedAmount:0,remainingAmount:0};
+        const quantity=Number(row.quantity||0),delivered=Number(row.related_quantity||0),unitPrice=Number(row.unit_price||0);
+        current.orders+=1;current.ordered+=quantity;current.delivered+=delivered;current.remaining+=Number(row.remaining_quantity||0);current.orderedAmount+=quantity*unitPrice;current.remainingAmount+=Number(row.remaining_amount||0);grouped.set(key,current);
+      });
+      $('#salesStatisticsRows').innerHTML=[...grouped.values()].sort((a,b)=>b.remainingAmount-a.remainingAmount||String(a.key).localeCompare(String(b.key))).map(row=>'<tr><td>'+esc(group==='item'?'品號':'客戶')+'</td><td><strong>'+esc(row.key)+'</strong><br><small>'+esc(row.detail)+'</small></td><td>'+flowAuditNumber(row.orders)+'</td><td>'+flowAuditNumber(row.ordered)+'</td><td>'+flowAuditNumber(row.delivered)+'</td><td>'+flowAuditNumber(row.remaining)+'</td><td>'+flowAuditNumber(row.orderedAmount)+'</td><td>'+flowAuditNumber(row.remainingAmount)+'</td><td>'+esc(row.remaining>0.000001?'未完成／待跟催':'已完成')+'</td></tr>').join('')||'<tr><td colspan="9" class="empty-hint">查無符合日期的銷售資料</td></tr>';
+    }catch(error){toast(error.message,true);}
+  };
+  form.onsubmit=event=>{event.preventDefault();load();};$('#salesStatisticsReload')?.addEventListener('click',load);load();
+}
+function renderSalesReferenceScreen(screen){
+  const definitions={
+    'sales-customer-items':{title:'客戶品號資料建立作業',code:'COP-ITEM',status:'partial',summary:'文件將客戶品號作為客戶與品號之間的銷售對照資料。目前系統已有品號主檔，但尚未建立獨立的客戶品號對照資料作業；此頁先保留流程位置。',next:'待補客戶品號、客戶品號名稱、客戶品號規格、有效期間與公司別隔離。',link:'items',linkText:'前往品號主檔建立作業'},
+    'sales-customer-pricing':{title:'客戶產品計價建立作業',code:'COP-PRICE',status:'planned',summary:'文件要求維護客戶／品號的價格、折扣、幣別與生效期間。目前訂單可輸入單價，但尚無獨立客戶產品計價主檔。',next:'待補依客戶品號、價格期間、幣別與核准規則帶入報價／訂單。',link:'sales-orders',linkText:'前往訂單建立作業（目前單價入口）'},
+    'sales-forecast':{title:'銷售預測建立作業',code:'COP-FORECAST',status:'planned',summary:'文件區分依品號、依類別的銷售預測建立與預測明細報表。目前系統可查訂單進度與未交量，但尚無預測資料維護。',next:'待補預測版本、期間、品號／類別、數量與預測明細報表，並與接單跟催區分。',link:'sales-progress',linkText:'前往接單統計／跟催報表'},
+    'sales-analysis':{title:'銷售分析系統',code:'COP-ANALYSIS',status:'planned',summary:'文件將銷售統計／管理報表與銷售分析列為銷售管理的後續聯動。目前已提供可核對的銷售統計彙總，尚未建立獨立分析維度與圖表。',next:'待補客戶、品號、部門、業務員、期間與毛利等分析維度；製造與成本暫不納入。',link:'sales-statistics',linkText:'前往銷售統計彙總報表'}
+  };
+  const item=definitions[screen];if(!item)return;
+  salesShell(item.title,'<div class="sales-reference-card '+item.status+'"><div class="sales-reference-status">'+esc(salesPipeStatusLabels[item.status]||item.status)+'</div><h3>'+esc(item.title)+'</h3><p>'+esc(item.summary)+'</p><div class="sales-reference-grid"><div><strong>目前狀態</strong><br>'+esc(item.status==='partial'?'已有相關主檔或欄位，尚缺完整獨立作業。':'目前僅保留流程位置，尚未形成正式資料作業。')+'</div><div><strong>下一步</strong><br>'+esc(item.next)+'</div></div><div class="desc">本頁不會自行建立資料表；完成規格確認後，才依原 ERP 文件與既有資料結構接續開發。</div><button class="btn primary" type="button" data-sales-screen="'+esc(item.link)+'">'+esc(item.linkText)+'</button></div>');
+  bindSalesPipeLinks();
+}
 function renderSalesTypes(){salesShell('銷售單據性質',`<form id="salesForm" class="form"><div class="row c3">${selectField('document_kind','種類',Object.entries(salesKinds).map(([k,v])=>`<option value="${k}">${v}</option>`).join(''))}${field('type_code','代號','text','required')}${field('type_name','名稱','text','required')}${field('number_prefix','前綴')}</div><button class="btn primary">新增</button></form>${panelTable('現有性質',['種類','代號','名稱','前綴'],'salesRows')}`);$('#salesForm').onsubmit=async e=>{e.preventDefault();let d=Object.fromEntries(new FormData(e.currentTarget));d.source_database=currentDatabase;try{await api('/api/sales-workflow/document-types',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});renderSalesTypes();}catch(x){toast(x.message,true);}};loadSalesTypes();}
 async function loadSalesTypes(render=true){let r=await api(`/api/sales-workflow/document-types?source_database=${currentDatabase}`);if(render&&$('#salesRows'))$('#salesRows').innerHTML=r.map(x=>`<tr><td>${salesKinds[x.document_kind]}</td><td>${x.type_code}</td><td>${x.type_name}</td><td>${x.number_prefix}</td></tr>`).join('');return r;}
 function renderSalesEntry(k){salesShell(salesKinds[k]+'建立作業',`<form id="salesForm" class="form"><input type="hidden" name="document_kind" value="${k}"><div class="row c3">${selectField('document_type','單據性質','')}${field('document_no','單號（手動編號時輸入）')}${field('document_date','日期','text',`value="${procurementToday()}"`)}${field('customer_code','客戶','text','required')}${k==='sales_return'?field('source_document_no','原銷貨單號（選填）','text','placeholder="可回溯原銷貨單"'):''}${field('warehouse_code','庫別')}${field('item_code','品號','text','required')}${field('item_name','品名')}${field('unit','單位','text','value="PCS"')}${field('quantity','數量','number','step="0.001" required')}${field('unit_price','單價','number','value="0"')}${field('unit_cost','成本','number','value="0"')}${field('expected_date','預交日')}${k==='sales_return'?selectField('return_type','方式','<option value="return">銷退</option><option value="allowance">折讓</option>'):''}</div><div class="desc" id="salesTypeRule">請先選擇單別；單別會決定核準、前置單據、結帳與編號規則。</div><button class="btn primary">建立單據</button></form>${panelTable('近期單據',['單號','日期','客戶','品號','數量','已交','狀態','作業'],'salesRows')}`);$('#salesForm').onsubmit=async e=>{e.preventDefault();let d=Object.fromEntries(new FormData(e.currentTarget));d.source_database=currentDatabase;try{await api('/api/sales-workflow/documents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});renderSalesEntry(k);}catch(x){toast(x.message,true);}};loadSalesTypes(false).then(t=>{const types=t.filter(x=>x.document_kind===k),select=$('#salesForm').elements.document_type;select.innerHTML=types.map(x=>`<option value="${x.type_code}">${x.type_code}｜${x.type_name}</option>`).join('')||'<option value="">尚未建立可用單別</option>';const describe=()=>{const x=types.find(row=>row.type_code===select.value);const note=$('#salesTypeRule');if(!x||!note)return;note.textContent=`規則：${x.number_prefix}／${x.numbering_method}${x.numbering_method==='manual'?'（請輸入單號）':''}；${Number(x.requires_approval)&&!Number(x.auto_confirm)?'需核準':'自動確認'}；${Number(x.require_source_document||x.require_sales_order)?`需前置 ${x.source_document_kind||'訂單'}`:'可獨立建立'}；${Number(x.direct_settlement)||['whole','per_document'].includes(x.settlement_mode)?'直接結帳':'批次／手動結帳'}`;};select.onchange=describe;describe();});loadSalesDocs(k);}
@@ -747,7 +842,15 @@ function renderAccountingDrafts(){
   const load=async()=>{try{const rows=await api(`/api/accounting/drafts?source_database=${encodeURIComponent(currentDatabase)}`);$('#accountingDraftRows').innerHTML=rows.map(x=>`<tr><td>${esc(x.draft_no)}</td><td>${esc(displayDateOf(x.draft_date))}</td><td>${esc(x.source_document_no||x.source_kind||'')}</td><td>${esc(x.line_count||0)}</td><td>${esc(x.debit_total||0)}</td><td>${esc(x.credit_total||0)}</td><td>${esc(statusName[x.status]||x.status)}</td><td>${Number(x.source_locked)?'是':'否'}</td><td><button class="btn small" data-draft-open="${x.id}">查看／維護</button></td></tr>`).join('')||'<tr><td colspan="9" class="empty-hint">尚無會計分錄底稿。</td></tr>';document.querySelectorAll('[data-draft-open]').forEach(b=>b.onclick=()=>openDetail(b.dataset.draftOpen));await loadSources();}catch(e){toast(e.message,true);}};
   $('#draftGenerateForm').onsubmit=async e=>{e.preventDefault();const selected=[...document.querySelectorAll('[data-draft-source]:checked')].map(x=>Number(x.value));if(!selected.length){toast('請至少選擇一筆來源帳款',true);return;}const form=e.currentTarget;try{const result=await api('/api/accounting/drafts/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_database:currentDatabase,source_refs:selected,draft_date:form.elements.draft_date.value,memo:form.elements.memo.value})});toast(`底稿 ${result.draft_no} 已產生並鎖定來源`);form.reset();form.elements.draft_date.value=procurementToday();await load();await openDetail(result.id);}catch(x){toast(x.message,true);}};$('#accountingDraftReload').onclick=load;load();
 }
-const confirmedNextPhaseRoadmap=[];
+const confirmedNextPhaseRoadmap=[
+  ['N16','第一階段：銷售管理水管圖／SHEET排序與節點連結','已完成銷售主流程圖與現有 SHEET 排序，節點可點選導向作業；客戶品號、客戶產品計價、銷售預測與銷售分析目前是部分完成或占位頁，待依 iSM 文件補成正式作業。','partial'],
+  ['N17','採購管理水管圖／SHEET排序與節點連結','依 iSM 採購管理文件整理請購→採購→到貨→驗收→進貨→退貨→應付，並將每個節點連到對應 SHEET；現有採購流程先保留，水管圖尚未完成。','planned'],
+  ['N18','庫存管理水管圖／SHEET排序與節點連結','整理庫存開帳→異動→驗收／過帳→可用量→異動台帳→反過帳／更正，並呈現銷售與採購對庫存的聯動；尚未完成獨立水管圖。','planned'],
+  ['N19','應收管理水管圖／SHEET排序與節點連結','整理銷貨／銷退→應收→結帳／發票→收款／沖銷→待抵／退款，補多筆合併、原幣與狀態追蹤節點；尚未完成獨立水管圖。','planned'],
+  ['N20','應付管理水管圖／SHEET排序與節點連結','整理進貨／退貨→應付→合併計價→付款／沖銷→待付與票據，呈現計價量、付款量與費用閉環；尚未完成獨立水管圖。','planned'],
+  ['N21','銀行／票據資金水管圖／SHEET排序與節點連結','整理存提款→票據託收／兌現／退票／註銷→對帳→餘額→資金報表，並標示管帳／管錢／對帳權責；尚未完成獨立水管圖。','planned'],
+  ['N22','會計總帳水管圖／SHEET排序與節點連結','整理分錄底稿→維護→核准→拋轉傳票→總帳→月底／年度結轉→試算表與明細報表，並串接來源鎖定與期間控制；尚未完成獨立水管圖。','planned']
+];
 function renderConfirmedNextPhaseRoadmap(items=confirmedNextPhaseRoadmap){
   return items.length?items.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${esc(no)}</span><div><strong>${esc(title)}</strong><p>${esc(desc)}</p></div></div>`).join(''):'<div class="desc">目前沒有其他已確認的開發項目。</div>';
 }
@@ -986,9 +1089,11 @@ function renderArchitectureScreen(){
   ])}<button class="compact-finance" type="button" data-finance-screen="finance-flow"><span>銷售應收</span><b>→</b><strong>會計傳票／總帳</strong><b>←</b><span>採購應付</span><small>點選展開財務流程</small></button></div>`;
   const roadmapHtml=renderConfirmedNextPhaseRoadmap(roadmap);
   $('#canvas').innerHTML=`<section class="screen architecture-screen"><div class="screen-head"><h2>ERP 系統流程與開發狀態圖</h2><span class="code">${target}</span><button class="btn" id="refreshScreen" type="button">重新整理</button></div><div class="screen-body"><div class="desc">目前公司：${company}；資料來源：${source}。本圖依 iSM 配銷實作演練班與財務實作演練班整理；綠色代表已實際驗證完成，橘色代表部分完成，紅色虛線代表尚未完成；已確認的落差列在「下一階段開發順序」。製造、BOM 與成本計算暫不納入。下方「銷售應收／會計傳票／採購應付」可點選展開財務流程圖。</div><div class="arch-status-legend"><span class="done">已完成且已驗證</span><span class="partial">部分完成／仍需補強</span><span class="planned">尚未完成／待確認</span><span class="readonly">舊 ERP 歷史資料維持唯讀</span></div><div class="architecture-block"><h3>全流程總覽：左銷售、中庫存、右採購、下方財務總帳</h3><div class="architecture-canvas">${flowSvg}${compactFlow}</div></div><div class="architecture-block"><h3>下一階段開發順序（已確認項目）</h3><div class="architecture-roadmap">${roadmapHtml}</div><details class="architecture-completed"><summary>已完成內容（點此展開）</summary><div class="architecture-roadmap">${completed.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${no}</span><div><strong>${title}</strong><p>${desc}</p></div></div>`).join('')}</div></details></div><div class="arch-rule-grid"><div><strong>數量控制</strong><br>來源單可一對多轉單，使用已交量與剩餘量判斷結案。</div><div><strong>庫存控制</strong><br>只有核准、驗收及過帳完成後，才更新庫存餘額與異動台帳。</div><div><strong>更正控制</strong><br>已過帳原單不可直接修改；以沖回單反向過帳，保留原單並記錄重作說明。</div><div><strong>關帳控制</strong><br>12 個月月底快照、年度結轉與重新開帳攔截已建立；關帳期間禁止財務、庫存、銷售、採購與沖回過帳。</div></div></div></section>`;
+  document.querySelector('.architecture-block .architecture-canvas')?.insertAdjacentHTML('beforebegin','<div class="architecture-pipe-entry"><div><strong>第一階段：銷售管理水管圖</strong><small>依《iSM-訂單管理系統》排序；節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-sales-screen="sales-pipe">開啟銷售水管圖</button></div>');
   $('#refreshScreen').onclick=renderArchitectureScreen;
   const recommendationBlock=`<div class="architecture-block"><h3>下一階段開發建議</h3><div class="desc">目前沒有尚未確認的建議；後續檢查到的新落差會先列在這裡，確認要修改後再移入上方「下一階段開發順序」。</div></div>`;
   $('#canvas .arch-rule-grid')?.insertAdjacentHTML('beforebegin',recommendationBlock);
+  bindSalesPipeLinks();
   document.querySelectorAll('[data-finance-screen]').forEach(button=>button.onclick=()=>{state.module='FIN';state.screen=button.dataset.financeScreen;renderAll();});
 }
 function finShell(t,b){$('#canvas').innerHTML=`<section class="screen"><div class="screen-head"><h2>${t}</h2><span class="code">${esc(targetDatabaseLabel())}</span></div><div class="screen-body"><div class="desc">財務資料依目前公司寫入 ${esc(targetDatabaseLabel())}；${esc(currentDatabase)} 原始 ACR／ACP 維持唯讀。</div>${b}</div></section>`;}
@@ -1244,7 +1349,7 @@ const displayDateOf = value => {
 };
 const field = (name, label, type='text', extra='') => `<div class="field"><label>${label}</label><input name="${name}" type="${type}" ${extra}></div>`;
 const selectField = (name, label, options) => `<div class="field"><label>${label}</label><select name="${name}">${options}</select></div>`;
-const panelTable = (title, headers, bodyId) => `<div class="panel"><div class="panel-head"><span>${String(title).replace('20','10')}</span><button class="btn small" type="button" id="procurementReload">重新整理</button></div><div class="panel-body"><div class="table-wrap"><table class="grid"><thead><tr>${headers.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody id="${bodyId}"></tbody></table></div></div></div>`;
+const panelTable = (title, headers, bodyId, reloadId = 'procurementReload') => `<div class="panel"><div class="panel-head"><span>${String(title).replace('20','10')}</span><button class="btn small" type="button" id="${reloadId}">重新整理</button></div><div class="panel-body"><div class="table-wrap"><table class="grid"><thead><tr>${headers.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody id="${bodyId}"></tbody></table></div></div></div>`;
 const bareGridTable = (headers, bodyId) => `<div class="table-wrap"><table class="grid"><thead><tr>${headers.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody id="${bodyId}"></tbody></table></div>`;
 const procurementShell = (title, code, body) => { $('#canvas').innerHTML=`<section class="screen"><div class="screen-head"><h2>${title}</h2><span class="code">${esc(targetDatabaseLabel())}</span></div><div class="screen-body"><div class="desc">新單據只寫入 ${esc(targetDatabaseLabel())}；${esc(currentDatabase)} 原始資料庫維持唯讀。</div>${body}</div></section>`; };
 

@@ -248,6 +248,12 @@ export async function authorizationMiddleware(req, _res, next) {
       if (!permission || !Number(permission.allowed)) throw forbidden();
       return next();
     }
+    // 銷售統計／預測／分析占位頁共用訂單進度資料；具備其中一項查詢權限即可讀取。
+    if (req.method === 'GET' && req.path === '/sales-workflow/progress') {
+      const [[permission]] = await pool.query("SELECT MAX(can_view) AS allowed FROM access_role_permissions WHERE role_id=? AND feature_code IN ('sales-progress','sales-open-orders','sales-statistics','sales-forecast','sales-analysis')", [req.auth.role_id]);
+      if (!permission || !Number(permission.allowed)) throw forbidden();
+      return next();
+    }
     if (/^\/inventory-workflow\/procurement(?:-|\/)/.test(req.path)) {
       const [[permission]] = await pool.query(`SELECT MAX(${action}) AS allowed FROM access_role_permissions
         WHERE role_id=? AND feature_code IN ('inventory-posting','receipt-posting')`, [req.auth.role_id]);
