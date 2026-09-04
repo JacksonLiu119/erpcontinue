@@ -25,7 +25,7 @@ const masterConfigs = {
 const salesPipeNodes = {
   setup: { label:'單據性質設定作業', note:'依公司別維護單別、核准、前置與編號規則', status:'done', screen:'sales-document-types' },
   customer: { label:'客戶資料建立作業', note:'客戶主檔、結帳日、幣別與付款條件', status:'done', screen:'customers' },
-  customerItem: { label:'客戶品號資料建立作業', note:'客戶與品號對照；目前列為獨立待補作業', status:'partial', screen:'sales-customer-items' },
+  customerItem: { label:'客戶品號資料建立作業', note:'已補 COPMB／INVMB 客戶與 ERP 品號對照查詢；正式維護仍待目標結構確認', status:'partial', screen:'sales-customer-items' },
   customerPricing: { label:'客戶產品計價建立作業', note:'客戶品號、價格、生效日與幣別', status:'planned', screen:'sales-customer-pricing' },
   forecast: { label:'銷售預測建立作業', note:'依品號／類別建立預測與明細報表', status:'planned', screen:'sales-forecast' },
   quote: { label:'報價單建立作業', note:'報價、合約或獨立銷售起點', status:'done', screen:'sales-quotations' },
@@ -614,7 +614,8 @@ function renderSalesScreen(s){
   if(s==='sales-progress'||s==='sales-open-orders')return renderSalesProgress(s==='sales-open-orders');
   if(s==='sales-order-changes')return renderSalesChanges();
   if(s==='sales-statistics')return renderSalesStatistics();
-  if(['sales-customer-items','sales-customer-pricing','sales-forecast','sales-analysis'].includes(s))return renderSalesReferenceScreen(s);
+  if(s==='sales-customer-items')return renderSalesCustomerItems();
+  if(['sales-customer-pricing','sales-forecast','sales-analysis'].includes(s))return renderSalesReferenceScreen(s);
   renderSalesEntry({'sales-quotations':'quotation','sales-orders':'sales_order','sales-shipments':'shipment','sales-returns':'sales_return'}[s]);
 }
 function salesPipeNode(id){
@@ -633,7 +634,7 @@ function bindSalesPipeLinks(){
 }
 function renderSalesPipe(){
   const arrow='<div class="sales-pipe-arrow" aria-hidden="true">↓</div>';
-  const body='<div class="sales-pipe-intro"><div class="desc">依《iSM-訂單管理系統》整理銷售管理順序。主線為單據性質→主檔／計價→銷售預測→報價→訂單→銷貨→銷退；訂單變更、接單跟催與銷售統計以支線呈現。每個節點都可點選進入對應 SHEET；綠色代表已完成驗證，橘色代表部分完成，紅色虛線代表尚未完成。</div><div class="sales-pipe-legend"><span class="done">已完成且可操作</span><span class="partial">部分完成／待補</span><span class="planned">尚未完成／占位頁</span></div></div><div class="sales-pipe-board"><div class="sales-pipe-system">訂單管理系統<small>COP｜第一階段：銷售管理</small></div>'+arrow+'<div class="sales-pipe-narrow">'+salesPipeNode('setup')+'</div>'+arrow+'<div class="sales-pipe-prereq-grid">'+salesPipeNode('customer')+salesPipeNode('customerItem')+salesPipeNode('customerPricing')+'</div>'+arrow+'<div class="sales-pipe-narrow">'+salesPipeNode('forecast')+'</div>'+arrow+'<div class="sales-pipe-mainline">'+salesPipeNode('quote')+'<span class="sales-pipe-horizontal-arrow" aria-hidden="true">→</span><div class="sales-pipe-anchor">'+salesPipeNode('order')+'<div class="sales-pipe-branch-stack"><span>訂單管理支線</span>'+salesPipeNode('change')+salesPipeNode('followup')+'</div></div><span class="sales-pipe-horizontal-arrow" aria-hidden="true">→</span><div class="sales-pipe-anchor">'+salesPipeNode('shipment')+'<div class="sales-pipe-branch-stack"><span>銷售統計支線</span>'+salesPipeNode('statistics')+'</div></div><span class="sales-pipe-horizontal-arrow" aria-hidden="true">→</span>'+salesPipeNode('return')+'</div>'+arrow+'<div class="sales-pipe-downstream"><div class="sales-pipe-downstream-label">完成後聯動</div>'+salesPipeNode('analysis')+salesPipeNode('inventory')+salesPipeNode('receivable')+'</div></div><div class="desc">目前已對應的既有 SHEET 會直接開啟；客戶品號、客戶產品計價、銷售預測與銷售分析尚未有完整獨立資料作業，因此保留占位頁並列入「下一階段開發順序（已確認項目）」，不會假裝已有正式資料。</div>';
+  const body='<div class="sales-pipe-intro"><div class="desc">依《iSM-訂單管理系統》整理銷售管理順序。主線為單據性質→主檔／計價→銷售預測→報價→訂單→銷貨→銷退；訂單變更、接單跟催與銷售統計以支線呈現。每個節點都可點選進入對應 SHEET；綠色代表已完成驗證，橘色代表部分完成，紅色虛線代表尚未完成。</div><div class="sales-pipe-legend"><span class="done">已完成且可操作</span><span class="partial">部分完成／待補</span><span class="planned">尚未完成／占位頁</span></div></div><div class="sales-pipe-board"><div class="sales-pipe-system">訂單管理系統<small>COP｜第一階段：銷售管理</small></div>'+arrow+'<div class="sales-pipe-narrow">'+salesPipeNode('setup')+'</div>'+arrow+'<div class="sales-pipe-prereq-grid">'+salesPipeNode('customer')+salesPipeNode('customerItem')+salesPipeNode('customerPricing')+'</div>'+arrow+'<div class="sales-pipe-narrow">'+salesPipeNode('forecast')+'</div>'+arrow+'<div class="sales-pipe-mainline">'+salesPipeNode('quote')+'<span class="sales-pipe-horizontal-arrow" aria-hidden="true">→</span><div class="sales-pipe-anchor">'+salesPipeNode('order')+'<div class="sales-pipe-branch-stack"><span>訂單管理支線</span>'+salesPipeNode('change')+salesPipeNode('followup')+'</div></div><span class="sales-pipe-horizontal-arrow" aria-hidden="true">→</span><div class="sales-pipe-anchor">'+salesPipeNode('shipment')+'<div class="sales-pipe-branch-stack"><span>銷售統計支線</span>'+salesPipeNode('statistics')+'</div></div><span class="sales-pipe-horizontal-arrow" aria-hidden="true">→</span>'+salesPipeNode('return')+'</div>'+arrow+'<div class="sales-pipe-downstream"><div class="sales-pipe-downstream-label">完成後聯動</div>'+salesPipeNode('analysis')+salesPipeNode('inventory')+salesPipeNode('receivable')+'</div></div><div class="desc">客戶品號節點已可查詢目前公司來源的 COPMB／INVMB 對照；正式新增／修改、外部客戶料號欄位與客戶產品計價仍依原 ERP 結構列為部分完成，不會假裝已有目標主檔。</div>';
   salesShell('銷售管理水管圖',body);
   $('#canvas .screen')?.classList.add('sales-pipe-screen');
   bindSalesPipeLinks();
@@ -657,9 +658,19 @@ function renderSalesStatistics(){
   };
   form.onsubmit=event=>{event.preventDefault();load();};$('#salesStatisticsReload')?.addEventListener('click',load);load();
 }
+function renderSalesCustomerItems(){
+  const today=procurementToday();
+  const sourceDate=value=>{const text=String(value??'').trim();return /^\d{8}$/.test(text)?`${text.slice(0,4)}-${text.slice(4,6)}-${text.slice(6,8)}`:displayDateOf(text);};
+  const amount=value=>value===null||value===undefined||value===''?'—':Number(value).toLocaleString('zh-TW',{maximumFractionDigits:6});
+  salesShell('客戶品號資料建立作業',`<div class="sales-reference-card partial"><div class="sales-reference-status">部分完成</div><h3>客戶／ERP 品號對照查詢</h3><p>依《iSM-訂單管理系統》客戶商品計價規則，從目前公司別的 COPMB 讀取客戶代號與 ERP 品號，再由 INVMB 帶出品名／規格；生效日與失效日依 COPMB.MB017／MB018 判斷。來源資料庫維持唯讀，不新增資料表。</p><div class="sales-reference-grid"><div><strong>本次已補</strong><br>客戶代號、客戶名稱、ERP 品號、品名、規格、計價單位、有效期間、有效狀態與來源鍵查詢。</div><div><strong>仍屬部分完成</strong><br>原始結構沒有獨立外部客戶料號欄位；正式新增／修改的目標主檔與維護權限，需先確認既有目標結構或取得新增結構同意。</div></div></div><form id="salesCustomerItemFilter" class="form"><div class="row c4">${field('customer_code','客戶代號')}${field('item_code','品號（COPMB.MB002）')}${field('as_of_date','有效基準日','date',`value="${today}"`)}${selectField('range_mode','資料範圍','<option value="active">只看基準日有效</option><option value="all">顯示全部歷史</option>')}</div><div class="row c2">${field('keyword','關鍵字','text','placeholder="客戶代號／品號／品名／規格"')}<button class="btn primary" type="submit">查詢客戶品號</button></div></form>${panelTable('目前公司客戶／品號對照（COPMB）',['客戶代號','客戶名稱','ERP 品號','品名','規格','計價單位','幣別','來源單價','生效日','失效日','有效狀態','品號主檔','來源鍵'],'salesCustomerItemRows','salesCustomerItemReload')}<div class="desc" id="salesCustomerItemMeta">查詢範圍固定為目前登入公司；尚未載入。</div>`);
+  $('#canvas .screen')?.classList.add('sales-customer-item-screen');
+  const form=$('#salesCustomerItemFilter');
+  const load=async()=>{try{const values=Object.fromEntries(new FormData(form)),query=new URLSearchParams({source_database:currentDatabase,customer_code:values.customer_code||'',item_code:values.item_code||'',keyword:values.keyword||'',as_of_date:values.as_of_date||today,active_only:values.range_mode==='active'?'1':'0',limit:'200'}),rows=await api(`/api/sales-workflow/customer-items?${query}`);const status=(value)=>value==='有效'?'<span class="pill ok">有效</span>':value==='未套用基準日'?'<span class="pill info">未套用基準日</span>':'<span class="pill warn">'+esc(value||'—')+'</span>';$('#salesCustomerItemRows').innerHTML=(rows||[]).map(row=>`<tr><td>${esc(row.customer_code)}</td><td>${esc(row.customer_name||'客戶主檔未找到')}</td><td>${esc(row.item_code)}</td><td>${esc(row.item_name||'品號主檔未找到')}</td><td>${esc(row.specification||'')}</td><td>${esc(row.pricing_unit||row.item_unit||'')}</td><td>${esc(row.currency_code||'')}</td><td class="num">${amount(row.unit_price)}</td><td>${esc(sourceDate(row.effective_from))}</td><td>${esc(sourceDate(row.effective_to))}</td><td>${status(row.effective_status)}</td><td>${Number(row.item_master_match)?'<span class="pill ok">已對應</span>':'<span class="pill warn">未對應</span>'}</td><td><small>${esc(row.source_table||'COPMB')}<br>${esc(row.source_key||'')}</small></td></tr>`).join('')||'<tr><td colspan="13" class="empty-hint">目前公司查無符合條件的客戶品號／ERP 品號對照。</td></tr>';$('#salesCustomerItemMeta').textContent=`公司別：${currentDatabase}；來源：${currentDatabase}／COPMB（唯讀）；本次顯示 ${(rows||[]).length} 筆${values.range_mode==='active'?'目前有效':'歷史資料'}，最多 200 筆。品名／規格由 INVMB 帶入；若顯示未對應，代表來源品號主檔需另列資料品質問題。`;}catch(error){$('#salesCustomerItemRows').innerHTML=`<tr><td colspan="13" class="empty-hint">載入失敗：${esc(error.message)}</td></tr>`;$('#salesCustomerItemMeta').textContent='查詢失敗，請確認目前公司來源與登入權限。';}};
+  form.onsubmit=event=>{event.preventDefault();load();};$('#salesCustomerItemReload').onclick=load;load();
+}
 function renderSalesReferenceScreen(screen){
   const definitions={
-    'sales-customer-items':{title:'客戶品號資料建立作業',code:'COP-ITEM',status:'partial',summary:'文件將客戶品號作為客戶與品號之間的銷售對照資料。目前系統已有品號主檔，但尚未建立獨立的客戶品號對照資料作業；此頁先保留流程位置。',next:'待補客戶品號、客戶品號名稱、客戶品號規格、有效期間與公司別隔離。',link:'items',linkText:'前往品號主檔建立作業'},
+    'sales-customer-items':{title:'客戶品號資料建立作業',code:'COP-ITEM',status:'partial',summary:'已依來源 COPMB／INVMB 補上客戶與 ERP 品號、品名／規格、有效期間及公司別唯讀查詢；正式目標主檔維護仍待既有結構確認。',next:'待確認是否存在獨立外部客戶料號欄位；若不存在，需經同意後才可建立目標維護結構，並補新增／修改／停用與權限稽核。',link:'items',linkText:'前往品號主檔建立作業'},
     'sales-customer-pricing':{title:'客戶產品計價建立作業',code:'COP-PRICE',status:'planned',summary:'文件要求維護客戶／品號的價格、折扣、幣別與生效期間。目前訂單可輸入單價，但尚無獨立客戶產品計價主檔。',next:'待補依客戶品號、價格期間、幣別與核准規則帶入報價／訂單。',link:'sales-orders',linkText:'前往訂單建立作業（目前單價入口）'},
     'sales-forecast':{title:'銷售預測建立作業',code:'COP-FORECAST',status:'planned',summary:'文件區分依品號、依類別的銷售預測建立與預測明細報表。目前系統可查訂單進度與未交量，但尚無預測資料維護。',next:'待補預測版本、期間、品號／類別、數量與預測明細報表，並與接單跟催區分。',link:'sales-progress',linkText:'前往接單統計／跟催報表'},
     'sales-analysis':{title:'銷售分析系統',code:'COP-ANALYSIS',status:'planned',summary:'文件將銷售統計／管理報表與銷售分析列為銷售管理的後續聯動。目前已提供可核對的銷售統計彙總，尚未建立獨立分析維度與圖表。',next:'待補客戶、品號、部門、業務員、期間與毛利等分析維度；製造與成本暫不納入。',link:'sales-statistics',linkText:'前往銷售統計彙總報表'}
@@ -844,7 +855,7 @@ function renderAccountingDrafts(){
 }
 const confirmedNextPhaseRoadmap=[
   ['N16','第一階段：銷售管理水管圖／SHEET排序與節點連結（總覽）','已完成銷售主流程圖與現有 SHEET 排序，節點可點選導向作業；下列部分完成／尚未完成節點已逐項列入本清單，待依 iSM 文件補成正式作業。','partial'],
-  ['N16-1','銷售管理：客戶品號資料建立作業','水管圖標示為部分完成；目前已有品號主檔可供作業，但尚缺客戶品號對照、客戶品號名稱／規格、有效期間與公司別隔離的獨立維護及查詢。','partial'],
+  ['N16-1','銷售管理：客戶品號資料建立作業','水管圖標示為部分完成；已依文件以目前公司來源 COPMB／INVMB 補上客戶—ERP 品號、品名／規格、有效期間與來源鍵的唯讀查詢；仍缺獨立外部客戶料號欄位、正式目標主檔新增／修改／停用與維護權限，未經同意不新增資料表。','partial'],
   ['N16-2','銷售管理：客戶產品計價建立作業','水管圖標示為尚未完成；待補客戶／品號價格、折扣、幣別、生效期間、核准規則，並讓報價／訂單依目前公司別自動帶入且保留來源。','planned'],
   ['N16-3','銷售管理：銷售預測建立作業','水管圖標示為尚未完成；待依文件補上依品號／依類別的預測版本、期間、數量、明細與預測報表，並與接單／跟催資料分開核對。','planned'],
   ['N16-4','銷售管理：銷售統計彙總報表','水管圖標示為部分完成；目前可依訂單進度資料按客戶／品號彙總訂單量、已交量、未交量與金額，仍待補齊文件中的客戶／品號／業務／期間等統計維度與正式報表。','partial'],

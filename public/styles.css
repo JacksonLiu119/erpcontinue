@@ -136,6 +136,10 @@ body.architecture-mode .workspace{grid-column:2}
 .sales-reference-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .sales-reference-grid>div{padding:11px 13px;border:1px solid var(--border);border-radius:12px;background:var(--soft);color:var(--muted);font-size:11px;line-height:1.65}
 .sales-reference-grid strong{color:var(--brand);font-size:12px}
+.sales-customer-item-screen table.grid{min-width:1480px}
+.sales-customer-item-screen table.grid th{white-space:nowrap}
+.sales-customer-item-screen table.grid td{vertical-align:top;white-space:nowrap}
+.sales-customer-item-screen table.grid td small{line-height:1.55}
 .architecture-pipe-entry{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid color-mix(in srgb,var(--accent) 55%,var(--border));border-radius:13px;background:color-mix(in srgb,var(--accent) 8%,var(--panel))}
 .architecture-pipe-entry strong{display:block;color:var(--brand);font-size:12px}
 .architecture-pipe-entry small{display:block;margin-top:3px;color:var(--muted);font-size:10px}

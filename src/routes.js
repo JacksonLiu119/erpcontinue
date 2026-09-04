@@ -1040,6 +1040,7 @@ export function registerApi(app) {
   registerProcurementWorkflowRoutes(app);
   registerSalesReturnInspectionRoutes(app);
   registerSalesWorkflowRoutes(app);
+  registerSalesCustomerItemRoutes(app);
   registerFlowAuditRoutes(app);
   registerFinanceWorkflowRoutes(app);
   registerAccountingWorkflowRoutes(app);
@@ -3152,6 +3153,104 @@ async function syncPendingSalesReturnAdjustmentsForOpenItem(conn, openItemId, us
     if (result) results.push(result);
   }
   return results;
+}
+
+function registerSalesCustomerItemRoutes(app) {
+  app.get('/api/sales-workflow/customer-items', async (req, res, next) => {
+    try {
+      const sourceName = sourceDbFromRequest(req);
+      const source = sourceDatabases[sourceName];
+      if (source?.adapter_code !== 'ism-sh') throw badRequest('目前客戶品號查詢只適用 iSM 銷售來源');
+      const sourcePool = getSourcePool(sourceName);
+      const [tableRows] = await sourcePool.query(
+        "SELECT LOWER(TABLE_NAME) AS table_name FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND LOWER(TABLE_NAME) IN ('copmb','copma','invmb')"
+      );
+      const tables = new Set(tableRows.map(row => String(row.table_name).toLowerCase()));
+      if (!tables.has('copmb')) {
+        return res.json({ ok:true, data:[], source:sourceName + '.COPMB', warning:'目前公司來源沒有 COPMB 客戶品號資料' });
+      }
+
+      const companyCode = String(source.company_id || sourceName).trim();
+      const customerCode = trim(req.query.customer_code);
+      const itemCode = trim(req.query.item_code);
+      const keyword = trim(req.query.keyword);
+      const requestedDate = trim(req.query.as_of_date);
+      const asOfDate = requestedDate ? validDate(requestedDate).replace(/-/g, '') : null;
+      const activeOnly = String(req.query.active_only ?? '1') !== '0';
+      const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
+      const where = ['TRIM(b.COMPANY)=?'];
+      const params = [companyCode];
+      const statusParams = [];
+      if (customerCode) {
+        where.push('TRIM(b.MB001) LIKE ?');
+        params.push('%' + customerCode + '%');
+      }
+      if (itemCode) {
+        where.push('TRIM(b.MB002) LIKE ?');
+        params.push('%' + itemCode + '%');
+      }
+      const keywordFields = ['b.MB001', 'b.MB002'];
+      if (tables.has('copma')) keywordFields.push('c.MA002', 'c.MA003');
+      if (tables.has('invmb')) keywordFields.push('i.MB002', 'i.MB003');
+      if (keyword) {
+        where.push(`CONCAT_WS(' ',${keywordFields.join(',')}) LIKE ?`);
+        params.push('%' + keyword + '%');
+      }
+      if (activeOnly && asOfDate) {
+        where.push("NULLIF(TRIM(b.MB017),'')<=? AND (NULLIF(TRIM(b.MB018),'') IS NULL OR NULLIF(TRIM(b.MB018),'')>=?)");
+        params.push(asOfDate, asOfDate);
+      }
+
+      const customerJoin = tables.has('copma')
+        ? " LEFT JOIN copma c ON c.COMPANY=b.COMPANY AND TRIM(c.MA001)=TRIM(b.MB001)"
+        : '';
+      const itemJoin = tables.has('invmb')
+        ? " LEFT JOIN invmb i ON i.COMPANY=b.COMPANY AND TRIM(i.MB001)=TRIM(b.MB002)"
+        : '';
+      const customerName = tables.has('copma')
+        ? "COALESCE(NULLIF(TRIM(c.MA003),''),NULLIF(TRIM(c.MA002),''))"
+        : 'NULL';
+      const itemName = tables.has('invmb') ? "NULLIF(TRIM(i.MB002),'')" : 'NULL';
+      const itemSpecification = tables.has('invmb') ? "NULLIF(TRIM(i.MB003),'')" : 'NULL';
+      const itemUnit = tables.has('invmb') ? "NULLIF(TRIM(i.MB004),'')" : 'NULL';
+      let effectiveStatus = "'未套用基準日'";
+      if (asOfDate) {
+        effectiveStatus = "CASE WHEN NULLIF(TRIM(b.MB017),'') IS NULL THEN '未設定生效日' WHEN TRIM(b.MB017)>? THEN '尚未生效' WHEN NULLIF(TRIM(b.MB018),'') IS NOT NULL AND TRIM(b.MB018)<? THEN '已失效' ELSE '有效' END";
+        statusParams.push(asOfDate, asOfDate);
+      }
+      const sql = "SELECT TRIM(b.MB001) AS customer_code," +
+        customerName + " AS customer_name," +
+        "TRIM(b.MB002) AS item_code," +
+        itemName + " AS item_name," +
+        itemSpecification + " AS specification," +
+        "NULLIF(TRIM(b.MB003),'') AS pricing_unit," +
+        itemUnit + " AS item_unit," +
+        "NULLIF(TRIM(b.MB004),'') AS currency_code," +
+        "b.MB008 AS unit_price," +
+        "NULLIF(TRIM(b.MB007),'') AS quantity_pricing_flag," +
+        "NULLIF(TRIM(b.MB013),'') AS tax_included," +
+        "NULLIF(TRIM(b.MB019),'') AS trade_condition," +
+        "NULLIF(TRIM(b.MB017),'') AS effective_from," +
+        "NULLIF(TRIM(b.MB018),'') AS effective_to," +
+        effectiveStatus + " AS effective_status," +
+        (tables.has('invmb') ? "CASE WHEN i.MB001 IS NULL THEN 0 ELSE 1 END" : "0") + " AS item_master_match," +
+        "b.COMPANY AS source_company," +
+        "'COPMB' AS source_table," +
+        "CONCAT(TRIM(b.COMPANY),':COPMB:',TRIM(b.MB001),':',TRIM(b.MB002),':',TRIM(b.MB017),':',TRIM(b.MB018),':',TRIM(b.CREATE_DATE),':',TRIM(b.CREATOR),':',b.FLAG) AS source_key " +
+        "FROM copmb b" + customerJoin + itemJoin +
+        " WHERE " + where.join(' AND ') +
+        " ORDER BY TRIM(b.MB001),TRIM(b.MB002),TRIM(b.MB017) DESC,b.FLAG DESC LIMIT ?";
+      const [rows] = await sourcePool.query(sql, [...statusParams, ...params, limit]);
+      const data = rows.map(row => ({
+        ...row,
+        source_database: sourceName,
+        source_label: source.label,
+        target_database: source.target_database,
+        company_id: source.company_id
+      }));
+      res.json({ ok:true, data, source:sourceName + '.COPMB', source_read_only:Boolean(source.read_only) });
+    } catch (error) { next(error); }
+  });
 }
 
 function registerSalesWorkflowRoutes(app){
