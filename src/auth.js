@@ -29,6 +29,74 @@ function normalizeSourceKey(value) {
   return key || null;
 }
 
+function normalizeDepartmentCode(value) {
+  const code = String(value ?? '').trim().toUpperCase();
+  return code || null;
+}
+
+export async function getDepartmentScope(userId, sourceKey) {
+  const key = normalizeSourceKey(sourceKey);
+  if (!key || !Number.isInteger(Number(userId))) return { source_key:key, mode:'none', department_codes:[] };
+  const [rows] = await pool.query(`
+    SELECT auc.department_scope_mode, aud.department_code
+    FROM access_user_companies auc
+    LEFT JOIN access_user_departments aud
+      ON aud.user_id=auc.user_id AND aud.source_key=auc.source_key
+    WHERE auc.user_id=? AND auc.source_key=?
+    ORDER BY aud.department_code`, [Number(userId), key]);
+  if (!rows.length) return { source_key:key, mode:'none', department_codes:[] };
+  const mode = ['all','selected'].includes(String(rows[0].department_scope_mode)) ? String(rows[0].department_scope_mode) : 'all';
+  const departmentCodes = [...new Set(rows.map(row => normalizeDepartmentCode(row.department_code)).filter(Boolean))];
+  return { source_key:key, mode, department_codes:departmentCodes };
+}
+
+export async function getUserAccessScope(userId, roleCode) {
+  if (String(roleCode || '').toUpperCase() === 'ADMIN') {
+    return { allowed_sources:['*'], department_scopes:[] };
+  }
+  const [companies] = await pool.query(`
+    SELECT source_key, department_scope_mode
+    FROM access_user_companies
+    WHERE user_id=? ORDER BY source_key`, [Number(userId)]);
+  const departmentScopes = [];
+  for (const company of companies) {
+    const scope = await getDepartmentScope(userId, company.source_key);
+    departmentScopes.push({ source_key:scope.source_key, mode:scope.mode, department_codes:scope.department_codes });
+  }
+  return {
+    allowed_sources:companies.map(row => String(row.source_key).toUpperCase()),
+    department_scopes:departmentScopes
+  };
+}
+
+export async function hasDepartmentAccess(userId, roleCode, sourceKey, departmentCode) {
+  if (String(roleCode || '').toUpperCase() === 'ADMIN') return true;
+  const scope = await getDepartmentScope(userId, sourceKey);
+  if (scope.mode === 'all') return true;
+  const code = normalizeDepartmentCode(departmentCode);
+  if (!code) return false;
+  return scope.mode === 'all' || (scope.mode === 'selected' && scope.department_codes.includes(code));
+}
+
+export async function recordAccessAudit({
+  actorUserId = null, targetUserId = null, actionCode, entityType, entityId = null,
+  sourceKey = null, departmentCode = null, before = null, after = null,
+  reason = null, ipAddress = null, userAgent = null
+} = {}) {
+  if (!actionCode || !entityType) return;
+  const json = value => value == null ? null : JSON.stringify(value);
+  await pool.query(`INSERT INTO access_audit_log
+    (actor_user_id,target_user_id,action_code,entity_type,entity_id,source_key,department_code,before_json,after_json,reason,ip_address,user_agent)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    Number.isInteger(Number(actorUserId)) ? Number(actorUserId) : null,
+    Number.isInteger(Number(targetUserId)) ? Number(targetUserId) : null,
+    String(actionCode).slice(0,60), String(entityType).slice(0,60), entityId == null ? null : String(entityId).slice(0,100),
+    normalizeSourceKey(sourceKey), normalizeDepartmentCode(departmentCode), json(before), json(after),
+    reason == null ? null : String(reason).slice(0,500), ipAddress == null ? null : String(ipAddress).slice(0,64),
+    userAgent == null ? null : String(userAgent).slice(0,255)
+  ]);
+}
+
 async function hasSourceAccess(userId, roleCode, sourceKey) {
   const key = normalizeSourceKey(sourceKey);
   if (!key) return false;
@@ -222,6 +290,11 @@ export function registerAuthRoutes(app) {
         throw forbidden('您沒有此公司別的存取權限');
       }
       await pool.query('UPDATE access_sessions SET current_source_key=?, context_changed_at=NOW() WHERE id=? AND user_id=?', [sourceKey, req.auth.session_id, req.auth.id]);
+      await recordAccessAudit({
+        actorUserId:req.auth.id, targetUserId:req.auth.id, actionCode:'COMPANY_CONTEXT_SWITCHED', entityType:'session',
+        entityId:req.auth.session_id, sourceKey, before:{source_key:req.auth.current_source_key||null},
+        after:{source_key:sourceKey}, reason:'登入工作階段正式切換公司別', ipAddress:req.ip, userAgent:req.get('user-agent')
+      });
       req.auth.current_source_key = sourceKey;
       req.auth.current_company_id = source.company_id || null;
       res.json({ ok:true, data:{
@@ -233,10 +306,11 @@ export function registerAuthRoutes(app) {
   });
   app.get('/api/auth/access', async (req, res, next) => {
     try {
-      if (req.auth.role_code === 'ADMIN') return res.json({ ok:true, data:{ is_admin:true, permissions:[] } });
+      if (req.auth.role_code === 'ADMIN') return res.json({ ok:true, data:{ is_admin:true, permissions:[], allowed_sources:['*'], department_scopes:[] } });
       const [permissions] = await pool.query(`SELECT feature_code,can_view,can_create,can_update,can_delete,can_approve
         FROM access_role_permissions WHERE role_id=?`, [req.auth.role_id]);
-      res.json({ ok:true, data:{ is_admin:false, permissions } });
+      const scope = await getUserAccessScope(req.auth.id, req.auth.role_code);
+      res.json({ ok:true, data:{ is_admin:false, permissions, ...scope } });
     } catch (error) { next(error); }
   });
   app.post('/api/auth/admin-reset-password', async (req, res, next) => {
@@ -254,6 +328,10 @@ export function registerAuthRoutes(app) {
       await pool.query(`UPDATE access_password_reset_requests
         SET status='completed', completed_at=NOW(), completed_by=?
         WHERE user_id=? AND status='pending'`, [req.auth.id, userId]);
+      await recordAccessAudit({
+        actorUserId:req.auth.id, targetUserId:userId, actionCode:'PASSWORD_RESET', entityType:'access_user', entityId:userId,
+        reason:'系統管理員重設登入密碼', ipAddress:req.ip, userAgent:req.get('user-agent')
+      });
       res.json({ ok:true, data:{ id:userId } });
     } catch (error) { next(error); }
   });

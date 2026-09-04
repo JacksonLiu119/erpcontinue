@@ -1169,10 +1169,32 @@ export function ensureProcurementSchema() {
       await pool.query(`CREATE TABLE IF NOT EXISTS access_user_companies (
         user_id BIGINT UNSIGNED NOT NULL,
         source_key VARCHAR(60) NOT NULL,
+        department_scope_mode VARCHAR(12) NOT NULL DEFAULT 'all',
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY(user_id,source_key),
         CONSTRAINT fk_access_user_company_user FOREIGN KEY(user_id) REFERENCES access_users(id) ON DELETE CASCADE,
         CONSTRAINT fk_access_user_company_source FOREIGN KEY(source_key) REFERENCES erp_data_sources(source_key) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      // 公司可用範圍與部門可用範圍分開保存：all 代表該公司全部部門，
+      // selected 則必須在 access_user_departments 找到明確授權的部門。
+      await addColumnIfMissing('access_user_companies', 'department_scope_mode', "VARCHAR(12) NOT NULL DEFAULT 'all'");
+      await pool.query(`UPDATE access_user_companies
+        SET department_scope_mode='all'
+        WHERE department_scope_mode IS NULL OR department_scope_mode NOT IN ('all','selected')`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS access_user_departments (
+        user_id BIGINT UNSIGNED NOT NULL,
+        source_key VARCHAR(60) NOT NULL,
+        department_code VARCHAR(30) NOT NULL,
+        created_by BIGINT UNSIGNED NULL,
+        updated_by BIGINT UNSIGNED NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY(user_id,source_key,department_code),
+        KEY ix_access_user_department_scope(source_key,department_code),
+        CONSTRAINT fk_access_user_department_user FOREIGN KEY(user_id) REFERENCES access_users(id) ON DELETE CASCADE,
+        CONSTRAINT fk_access_user_department_source FOREIGN KEY(source_key) REFERENCES erp_data_sources(source_key) ON DELETE CASCADE,
+        CONSTRAINT fk_access_user_department_created_by FOREIGN KEY(created_by) REFERENCES access_users(id) ON DELETE SET NULL,
+        CONSTRAINT fk_access_user_department_updated_by FOREIGN KEY(updated_by) REFERENCES access_users(id) ON DELETE SET NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS access_sessions (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -1187,6 +1209,28 @@ export function ensureProcurementSchema() {
       // 在沒有重新授權的情況下切換到另一家公司。
       await addColumnIfMissing('access_sessions', 'current_source_key', 'VARCHAR(60) NULL');
       await addColumnIfMissing('access_sessions', 'context_changed_at', 'DATETIME NULL');
+      await pool.query(`CREATE TABLE IF NOT EXISTS access_audit_log (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        actor_user_id BIGINT UNSIGNED NULL,
+        target_user_id BIGINT UNSIGNED NULL,
+        action_code VARCHAR(60) NOT NULL,
+        entity_type VARCHAR(60) NOT NULL,
+        entity_id VARCHAR(100) NULL,
+        source_key VARCHAR(60) NULL,
+        department_code VARCHAR(30) NULL,
+        before_json JSON NULL,
+        after_json JSON NULL,
+        reason VARCHAR(500) NULL,
+        ip_address VARCHAR(64) NULL,
+        user_agent VARCHAR(255) NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        KEY ix_access_audit_actor(actor_user_id,created_at),
+        KEY ix_access_audit_target(target_user_id,created_at),
+        KEY ix_access_audit_scope(source_key,department_code,created_at),
+        KEY ix_access_audit_action(action_code,created_at),
+        CONSTRAINT fk_access_audit_actor FOREIGN KEY(actor_user_id) REFERENCES access_users(id) ON DELETE SET NULL,
+        CONSTRAINT fk_access_audit_target FOREIGN KEY(target_user_id) REFERENCES access_users(id) ON DELETE SET NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
       await pool.query(`CREATE TABLE IF NOT EXISTS access_password_reset_requests (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         user_id BIGINT UNSIGNED NOT NULL,

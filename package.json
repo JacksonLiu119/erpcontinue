@@ -23,6 +23,7 @@
     "verify:import-quality": "node scripts/verify-import-quality.mjs",
     "verify:company-regression": "node scripts/verify-company-regression.mjs",
     "verify:company-context": "node scripts/verify-company-context-isolation.mjs",
+    "verify:access-scope": "node scripts/verify-access-scope.mjs",
     "verify:flow-audit-recommendations": "node scripts/verify-flow-audit-recommendations.mjs",
     "backup:github": "powershell -ExecutionPolicy Bypass -File scripts/backup-github.ps1"
   },

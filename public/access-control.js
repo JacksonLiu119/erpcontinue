@@ -1,5 +1,5 @@
 // 權限頁面由 API 端強制驗證；這裡保留登入流程所需的相容狀態。
-const accessState = { roles: [], activeRoleId: null, isAdmin: false, permissions: [] };
+const accessState = { roles: [], activeRoleId: null, isAdmin: false, permissions: [], allowed_sources: [], department_scopes: [] };
 const featureAliases = {
   basicdata:'basicdata', companies:'basicdata', 'common-parameters':'basicdata', 'code-rules':'basicdata',
   'job-categories':'basicdata', currencies:'basicdata', 'payment-terms':'basicdata', calendars:'basicdata',

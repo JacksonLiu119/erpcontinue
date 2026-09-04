@@ -1,5 +1,5 @@
 import { pool, getSourcePool, sourceDatabases, reloadSourceDatabases, runWithTargetDatabase, tx, ensureProcurementSchema, ensureTargetProcurementTypeSchema, ensureTargetReceiptWorkflowSchema, ensureTargetReversalSchema, ensureTargetSalesWorkflowSchema, ensureTargetDocumentNatureSchema, ensureTargetFinanceWorkflowSchema, validateOperationalSource } from './db.js';
-import { hashPassword } from './auth.js';
+import { hashPassword, getDepartmentScope, recordAccessAudit } from './auth.js';
 import { registerImportQualityRoutes } from './import-quality.js';
 import { registerReportingRoutes } from './reports.js';
 import { registerSourceFinancialPreviewRoutes } from './source-financial-preview.js';
@@ -60,8 +60,70 @@ function isControlApiPath(path) {
   return [
     '/api/company-contexts', '/api/source-databases', '/api/master-source-mappings',
     '/api/import/', '/api/access-users', '/api/access-roles', '/api/access-role-permissions',
+    '/api/access-departments', '/api/access-audit',
     '/api/reports/definitions'
   ].some(prefix => path === prefix || path.startsWith(prefix));
+}
+
+function normalizeDepartmentValue(value) {
+  const code = String(value ?? '').trim().toUpperCase();
+  return code || null;
+}
+
+function uniqueDepartmentValues(values) {
+  return [...new Set(values.map(normalizeDepartmentValue).filter(Boolean))];
+}
+
+function isDepartmentScopedPath(path) {
+  return [
+    '/api/sh/', '/api/master/departments', '/api/master/employees',
+    '/api/procurement/', '/api/sales-workflow/', '/api/inventory-workflow/',
+    '/api/inventory-opening', '/api/finance-workflow/', '/api/accounting/',
+    '/api/flow-audit/', '/api/reports/'
+  ].some(prefix => path === prefix || path.startsWith(prefix));
+}
+
+function scopedRowHasDepartment(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).some(key => key === 'department_code' || /_department_code$/i.test(key));
+}
+
+function scopedRowDepartmentCodes(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  return Object.entries(value)
+    .filter(([key]) => key === 'department_code' || /_department_code$/i.test(key))
+    .map(([, item]) => normalizeDepartmentValue(item))
+    .filter(Boolean);
+}
+
+function scopedRowAllowed(value, allowedCodes) {
+  const codes = scopedRowDepartmentCodes(value);
+  // 沒有部門值的公司層級資料不因部門範圍被誤當成其他部門；
+  // 有明確部門值時，所有部門欄位都必須在授權集合內。
+  return !codes.length || codes.every(code => allowedCodes.has(code));
+}
+
+function filterDepartmentPayload(value, allowedCodes) {
+  if (Array.isArray(value)) {
+    return value.filter(item => !scopedRowHasDepartment(item) || scopedRowAllowed(item, allowedCodes))
+      .map(item => filterDepartmentPayload(item, allowedCodes));
+  }
+  if (!value || typeof value !== 'object') return value;
+  if (scopedRowHasDepartment(value) && !scopedRowAllowed(value, allowedCodes)) return null;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, filterDepartmentPayload(item, allowedCodes)]));
+}
+
+async function recordAccessDenied(req, { actionCode = 'ACCESS_DENIED', sourceKey = null, departmentCode = null, reason }) {
+  try {
+    await recordAccessAudit({
+      actorUserId:req.auth?.id, targetUserId:req.auth?.id, actionCode, entityType:'access_request',
+      entityId:`${req.method} ${req.path}`, sourceKey, departmentCode, reason,
+      ipAddress:req.ip, userAgent:req.get('user-agent')
+    });
+  } catch (error) {
+    // 權限拒絕不能因為稽核寫入失敗而放行；將錯誤留在伺服器紀錄供管理員處理。
+    console.error('Access audit write failed:', error.message);
+  }
 }
 
 export function registerApi(app) {
@@ -78,15 +140,18 @@ export function registerApi(app) {
       req.headers['x-source-database'], req.headers['x-erp-context-key']
     ]);
     if (sourceCandidates.length > 1) {
+      await recordAccessDenied(req, { actionCode:'CROSS_COMPANY_REQUEST_REJECTED', sourceKey:sourceCandidates[0], reason:'請求同時帶入不同公司／資料庫來源' });
       return res.status(409).json({ ok:false, error:'公司上下文來源不一致，已拒絕此請求。請重新整理後再操作。' });
     }
     const requestedSource = sourceCandidates[0] || null;
     if (requestedSource && !sourceDatabases[requestedSource]) {
+      await recordAccessDenied(req, { actionCode:'UNKNOWN_COMPANY_REQUEST_REJECTED', sourceKey:requestedSource, reason:'請求指定不存在或未啟用的公司／資料庫來源' });
       return res.status(400).json({ ok:false, error:`不允許的資料庫來源：${requestedSource}` });
     }
 
     const sessionSource = normalizeContextKey(req.auth?.current_source_key);
     if (sessionSource && requestedSource && sessionSource !== requestedSource) {
+      await recordAccessDenied(req, { actionCode:'CROSS_COMPANY_REQUEST_REJECTED', sourceKey:requestedSource, reason:`登入工作階段固定為 ${sessionSource}，不可改用 ${requestedSource}` });
       return res.status(409).json({ ok:false, error:`目前登入公司為 ${sessionSource}，不可從此作業指定 ${requestedSource}。` });
     }
     const sourceName = sessionSource || requestedSource;
@@ -99,21 +164,63 @@ export function registerApi(app) {
 
     if (req.auth?.role_code !== 'ADMIN') {
       const [[access]] = await pool.query('SELECT 1 allowed FROM access_user_companies WHERE user_id=? AND source_key=?', [req.auth.id, sourceName]);
-      if (!access) return res.status(403).json({ ok:false, error:'您沒有此公司別的存取權限。' });
+      if (!access) {
+        await recordAccessDenied(req, { actionCode:'CROSS_COMPANY_REQUEST_REJECTED', sourceKey:sourceName, reason:'帳號未被授權進入此公司別' });
+        return res.status(403).json({ ok:false, error:'您沒有此公司別的存取權限。' });
+      }
     }
     const companyCandidates = uniqueContextValues([
       req.query.company_id, req.body?.company_id, req.headers['x-company-id']
     ]);
     const expectedCompany = normalizeContextKey(source.company_id || sourceName);
     if (companyCandidates.some(companyId => companyId !== expectedCompany)) {
+      await recordAccessDenied(req, { actionCode:'CROSS_COMPANY_REQUEST_REJECTED', sourceKey:sourceName, reason:'公司代號與資料庫來源不一致' });
       return res.status(409).json({ ok:false, error:'公司別與資料庫來源不一致，為避免資料混用已拒絕此請求。' });
+    }
+
+    const departmentCandidates = uniqueDepartmentValues([
+      req.query.department_code, req.query.department,
+      req.body?.department_code, req.body?.department,
+      req.headers['x-department-code'], req.headers['x-erp-department-code']
+    ]);
+    if (departmentCandidates.length > 1) {
+      await recordAccessDenied(req, { actionCode:'CROSS_DEPARTMENT_REQUEST_REJECTED', sourceKey:sourceName, reason:'請求同時帶入不同部門範圍' });
+      return res.status(409).json({ ok:false, error:'部門範圍參數不一致，已拒絕此請求。請重新整理後再操作。' });
+    }
+    const requestedDepartment = departmentCandidates[0] || null;
+    const departmentScope = req.auth?.role_code === 'ADMIN'
+      ? { source_key:sourceName, mode:'all', department_codes:[] }
+      : await getDepartmentScope(req.auth.id, sourceName);
+    if (req.auth?.role_code !== 'ADMIN' && departmentScope.mode === 'selected') {
+      if (requestedDepartment && !departmentScope.department_codes.includes(requestedDepartment)) {
+        await recordAccessDenied(req, { actionCode:'CROSS_DEPARTMENT_REQUEST_REJECTED', sourceKey:sourceName, departmentCode:requestedDepartment, reason:`部門不在帳號授權範圍：${departmentScope.department_codes.join('、')}` });
+        return res.status(403).json({ ok:false, error:`您沒有部門 ${requestedDepartment} 的存取權限。` });
+      }
+      if (!requestedDepartment && isDepartmentScopedPath(req.path)) {
+        await recordAccessDenied(req, { actionCode:'DEPARTMENT_CONTEXT_REQUIRED', sourceKey:sourceName, reason:'此帳號已設定指定部門範圍，但請求未帶入目前部門' });
+        return res.status(403).json({ ok:false, error:'此帳號已限制部門範圍，請先在上方選擇目前部門後再操作。' });
+      }
+    }
+    if (requestedDepartment) {
+      req.query.department_code = requestedDepartment;
+      if (req.body && typeof req.body === 'object' && !Array.isArray(req.body) && !req.body.department_code) {
+        req.body.department_code = requestedDepartment;
+      }
     }
 
     req.erpContext = {
       context_key: sourceName, source_database: sourceName, tenant_id: source.tenant_id,
       company_id: source.company_id, source_system: source.source_system,
-      target_database: source.target_database, read_only: source.read_only
+      target_database: source.target_database, read_only: source.read_only,
+      department_scope_mode:departmentScope.mode,
+      department_codes:departmentScope.department_codes,
+      department_code:requestedDepartment
     };
+    if (req.auth?.role_code !== 'ADMIN' && departmentScope.mode === 'selected') {
+      const allowedCodes = new Set(departmentScope.department_codes);
+      const sendJson = res.json.bind(res);
+      res.json = payload => sendJson(filterDepartmentPayload(payload, allowedCodes));
+    }
     // 讓既有各路由即使沒有顯式帶 source_database，也只能使用目前工作階段的公司。
     req.query.source_database = sourceName;
     req.query.db = sourceName;
@@ -6315,6 +6422,55 @@ function registerReversalRoutes(app) {
   });
 }
 
+function normalizedAccessSourceKeys(values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map(value => trim(value).toUpperCase()).filter(Boolean))];
+}
+
+function normalizedDepartmentCodes(values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map(value => trim(value).toUpperCase()).filter(value => /^[A-Z0-9_.-]{1,30}$/.test(value)))];
+}
+
+async function accessUserSnapshot(userId) {
+  const [[user]] = await pool.query(`SELECT u.id,u.username,u.employee_code,u.display_name,u.role_id,u.is_active,
+    r.role_code,r.role_name
+    FROM access_users u JOIN access_roles r ON r.id=u.role_id WHERE u.id=?`, [Number(userId)]);
+  if (!user) return null;
+  const [companies] = await pool.query(`SELECT source_key,department_scope_mode
+    FROM access_user_companies WHERE user_id=? ORDER BY source_key`, [Number(userId)]);
+  const [departments] = await pool.query(`SELECT source_key,department_code
+    FROM access_user_departments WHERE user_id=? ORDER BY source_key,department_code`, [Number(userId)]);
+  return { user, companies, departments };
+}
+
+function compactAccessSnapshot(snapshot) {
+  if (!snapshot) return null;
+  return {
+    user:snapshot.user,
+    companies:snapshot.companies,
+    departments:snapshot.departments
+  };
+}
+
+async function accessDepartmentOptions(sourceKey) {
+  const key = trim(sourceKey).toUpperCase();
+  const source = sourceDatabases[key];
+  if (!source) throw badRequest('指定的公司別不存在或未啟用');
+  return runWithTargetDatabase(key, async () => {
+    try {
+      // erp_departments 是既有標準主檔，原結構沒有 is_active 欄位；
+      // 部門範圍選項沿用現有主檔資料，不自行擴充或改寫客戶來源表。
+      const [rows] = await pool.query(`SELECT department_code,department_name,note
+        FROM erp_departments WHERE source_database=? ORDER BY department_code`, [key]);
+      return rows;
+    } catch (error) {
+      if (error.code === 'ER_NO_SUCH_TABLE') return [];
+      throw error;
+    }
+  });
+}
+
 function registerAccessControlRoutes(app) {
   app.get('/api/access-users', async (req, res, next) => {
     try {
@@ -6324,6 +6480,10 @@ function registerAccessControlRoutes(app) {
         u.force_password_change, r.role_name, r.role_code,
         COALESCE((SELECT GROUP_CONCAT(auc.source_key ORDER BY auc.source_key SEPARATOR ',')
           FROM access_user_companies auc WHERE auc.user_id=u.id), '') AS allowed_sources
+        ,COALESCE((SELECT GROUP_CONCAT(CONCAT(auc.source_key,':',auc.department_scope_mode) ORDER BY auc.source_key SEPARATOR ',')
+          FROM access_user_companies auc WHERE auc.user_id=u.id), '') AS company_scope_modes
+        ,COALESCE((SELECT GROUP_CONCAT(CONCAT(aud.source_key,':',aud.department_code) ORDER BY aud.source_key,aud.department_code SEPARATOR ',')
+          FROM access_user_departments aud WHERE aud.user_id=u.id), '') AS department_scopes
         FROM access_users u JOIN access_roles r ON r.id=u.role_id ORDER BY u.username`);
       res.json({ ok:true, data:rows });
     } catch (error) { next(error); }
@@ -6350,6 +6510,10 @@ function registerAccessControlRoutes(app) {
         for (const sourceKey of sourceKeys) await conn.query('INSERT INTO access_user_companies(user_id,source_key) VALUES(?,?)', [created.insertId, sourceKey]);
         return created;
       });
+      await recordAccessAudit({
+        actorUserId:req.auth.id, targetUserId:result.insertId, actionCode:'USER_CREATED', entityType:'access_user', entityId:result.insertId,
+        after:compactAccessSnapshot(await accessUserSnapshot(result.insertId)), reason:'建立登入帳號', ipAddress:req.ip, userAgent:req.get('user-agent')
+      });
       res.status(201).json({ ok:true, data:{ id:result.insertId } });
     } catch (error) { if (error.code === 'ER_DUP_ENTRY') error = badRequest('帳號已存在'); next(error); }
   });
@@ -6366,6 +6530,7 @@ function registerAccessControlRoutes(app) {
       if (userId === Number(req.auth.id) && (!isActive || role.role_code !== 'ADMIN')) throw badRequest('不可停用自己的帳號或移除自己的系統管理員角色');
       const sourceKeys = [...new Set((Array.isArray(body.source_keys) ? body.source_keys : []).map(x => trim(x).toUpperCase()).filter(Boolean))];
       if (role.role_code !== 'ADMIN' && !sourceKeys.length) throw badRequest('非管理員帳號至少要指定一個可進入的公司別');
+      const before = await accessUserSnapshot(userId);
       await tx(async conn => {
         if (sourceKeys.length) {
           const [valid] = await conn.query('SELECT source_key FROM erp_data_sources WHERE enabled=1 AND source_key IN (?)', [sourceKeys]);
@@ -6374,9 +6539,123 @@ function registerAccessControlRoutes(app) {
         await conn.query('UPDATE access_users SET employee_code=?,display_name=?,role_id=?,is_active=? WHERE id=?', [trim(body.employee_code) || null, displayName, roleId, isActive, userId]);
         await conn.query('DELETE FROM access_user_companies WHERE user_id=?', [userId]);
         for (const sourceKey of sourceKeys) await conn.query('INSERT INTO access_user_companies(user_id,source_key) VALUES(?,?)', [userId, sourceKey]);
+        if (sourceKeys.length) {
+          await conn.query('DELETE FROM access_user_departments WHERE user_id=? AND source_key NOT IN (?)', [userId, sourceKeys]);
+        } else {
+          await conn.query('DELETE FROM access_user_departments WHERE user_id=?', [userId]);
+        }
       });
       if (!isActive) await pool.query('DELETE FROM access_sessions WHERE user_id=?', [userId]);
+      await recordAccessAudit({
+        actorUserId:req.auth.id, targetUserId:userId, actionCode:'USER_ACCESS_UPDATED', entityType:'access_user', entityId:userId,
+        before:compactAccessSnapshot(before), after:compactAccessSnapshot(await accessUserSnapshot(userId)), reason:'修改帳號角色、啟用狀態或公司範圍', ipAddress:req.ip, userAgent:req.get('user-agent')
+      });
       res.json({ ok:true, data:{ id:userId } });
+    } catch (error) { next(error); }
+  });
+
+  // 後台使用者可查詢所有公司已設定的部門範圍；不接受前端傳入的公司上下文，
+  // 避免管理畫面因目前工作階段公司而漏掉另一家公司的權限設定。
+  app.get('/api/access-departments', async (req, res, next) => {
+    try {
+      if (req.auth?.role_code !== 'ADMIN') throw Object.assign(new Error('僅系統管理員可查詢部門範圍'), { status:403 });
+      await ensureProcurementSchema();
+      const userId = req.query.user_id ? Number(req.query.user_id) : null;
+      if (userId != null && (!Number.isInteger(userId) || userId < 1)) throw badRequest('帳號代號不正確');
+      const params = userId == null ? [] : [userId, userId];
+      const [rows] = await pool.query(`SELECT auc.user_id,auc.source_key,auc.department_scope_mode,
+        COALESCE(GROUP_CONCAT(aud.department_code ORDER BY aud.department_code SEPARATOR ','),'') AS department_codes
+        FROM access_user_companies auc
+        LEFT JOIN access_user_departments aud
+          ON aud.user_id=auc.user_id AND aud.source_key=auc.source_key
+        WHERE (? IS NULL OR auc.user_id=?)
+        GROUP BY auc.user_id,auc.source_key,auc.department_scope_mode
+        ORDER BY auc.user_id,auc.source_key`, params.length ? params : [null, null]);
+      res.json({ ok:true, data:rows.map(row => ({
+        ...row, user_id:Number(row.user_id),
+        department_codes:String(row.department_codes || '').split(',').filter(Boolean)
+      })) });
+    } catch (error) { next(error); }
+  });
+
+  app.get('/api/access-departments/options', async (req, res, next) => {
+    try {
+      if (req.auth?.role_code !== 'ADMIN') throw Object.assign(new Error('僅系統管理員可查詢部門選項'), { status:403 });
+      await ensureProcurementSchema();
+      const sourceKey = trim(req.query.source_key).toUpperCase();
+      const rows = await accessDepartmentOptions(sourceKey);
+      res.json({ ok:true, data:rows });
+    } catch (error) { next(error); }
+  });
+
+  app.put('/api/access-departments/:userId', async (req, res, next) => {
+    try {
+      if (req.auth?.role_code !== 'ADMIN') throw Object.assign(new Error('僅系統管理員可修改部門範圍'), { status:403 });
+      await ensureProcurementSchema();
+      const userId = Number(req.params.userId);
+      const sourceKey = trim(req.body?.source_key).toUpperCase();
+      const mode = trim(req.body?.mode || 'all').toLowerCase();
+      const rawCodes = Array.isArray(req.body?.department_codes) ? req.body.department_codes.map(value => trim(value).toUpperCase()).filter(Boolean) : [];
+      const departmentCodes = normalizedDepartmentCodes(rawCodes);
+      if (!Number.isInteger(userId) || userId < 1 || !sourceKey || !['all','selected'].includes(mode)) throw badRequest('帳號、公司別與部門範圍設定不完整');
+      if (rawCodes.some(code => !/^[A-Z0-9_.-]{1,30}$/.test(code))) throw badRequest('部門代號只能使用英文字母、數字、底線、連字號或句點');
+      if (mode === 'selected' && !departmentCodes.length) throw badRequest('指定部門模式至少要選擇一個部門');
+      const [[target]] = await pool.query('SELECT id,role_id FROM access_users WHERE id=?', [userId]);
+      if (!target || !sourceDatabases[sourceKey]) throw badRequest('帳號或公司別不存在');
+      const [[companyAccess]] = await pool.query('SELECT user_id FROM access_user_companies WHERE user_id=? AND source_key=?', [userId, sourceKey]);
+      if (!companyAccess) throw badRequest('請先在帳號資料設定此使用者可進入的公司別');
+      const available = await accessDepartmentOptions(sourceKey);
+      const availableCodes = new Set(available.map(row => trim(row.department_code).toUpperCase()));
+      if (mode === 'selected' && availableCodes.size && departmentCodes.some(code => !availableCodes.has(code))) {
+        throw badRequest('指定的部門不在目前公司部門主檔中，請重新整理選項');
+      }
+      const before = await accessUserSnapshot(userId);
+      await tx(async conn => {
+        await conn.query('UPDATE access_user_companies SET department_scope_mode=? WHERE user_id=? AND source_key=?', [mode, userId, sourceKey]);
+        await conn.query('DELETE FROM access_user_departments WHERE user_id=? AND source_key=?', [userId, sourceKey]);
+        if (mode === 'selected') {
+          for (const departmentCode of departmentCodes) {
+            await conn.query(`INSERT INTO access_user_departments(user_id,source_key,department_code,created_by,updated_by)
+              VALUES(?,?,?,?,?)`, [userId, sourceKey, departmentCode, req.auth.id, req.auth.id]);
+          }
+        }
+      });
+      const after = await accessUserSnapshot(userId);
+      await recordAccessAudit({
+        actorUserId:req.auth.id, targetUserId:userId, actionCode:'DEPARTMENT_SCOPE_UPDATED', entityType:'user_department_scope',
+        entityId:`${userId}:${sourceKey}`, sourceKey, before:compactAccessSnapshot(before), after:compactAccessSnapshot(after),
+        reason:trim(req.body?.reason) || `設定${sourceKey}部門範圍：${mode === 'all' ? '全部部門' : departmentCodes.join('、')}`,
+        ipAddress:req.ip, userAgent:req.get('user-agent')
+      });
+      res.json({ ok:true, data:{ user_id:userId, source_key:sourceKey, mode, department_codes:departmentCodes } });
+    } catch (error) { next(error); }
+  });
+
+  app.get('/api/access-audit', async (req, res, next) => {
+    try {
+      if (req.auth?.role_code !== 'ADMIN') throw Object.assign(new Error('僅系統管理員可查詢權限異動歷程'), { status:403 });
+      await ensureProcurementSchema();
+      const conditions = [];
+      const params = [];
+      const userId = req.query.target_user_id ? Number(req.query.target_user_id) : null;
+      const sourceKey = trim(req.query.source_key).toUpperCase();
+      const actionCode = trim(req.query.action_code);
+      if (userId != null) { if (!Number.isInteger(userId) || userId < 1) throw badRequest('目標帳號代號不正確'); conditions.push('a.target_user_id=?'); params.push(userId); }
+      if (sourceKey) { conditions.push('a.source_key=?'); params.push(sourceKey); }
+      if (actionCode) { conditions.push('a.action_code=?'); params.push(actionCode); }
+      if (req.query.from_date) { conditions.push('a.created_at>=?'); params.push(`${validDate(req.query.from_date)} 00:00:00`); }
+      if (req.query.to_date) { conditions.push('a.created_at<?'); const date = new Date(`${validDate(req.query.to_date)}T00:00:00Z`); date.setUTCDate(date.getUTCDate()+1); params.push(`${date.toISOString().slice(0,10)} 00:00:00`); }
+      const limit = Math.min(Math.max(Number(req.query.limit || 200), 1), 500);
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const [rows] = await pool.query(`SELECT a.id,a.actor_user_id,a.target_user_id,a.action_code,a.entity_type,a.entity_id,
+        a.source_key,a.department_code,a.before_json,a.after_json,a.reason,a.ip_address,a.user_agent,a.created_at,
+        actor.username actor_username,actor.display_name actor_display_name,
+        target.username target_username,target.display_name target_display_name
+        FROM access_audit_log a
+        LEFT JOIN access_users actor ON actor.id=a.actor_user_id
+        LEFT JOIN access_users target ON target.id=a.target_user_id
+        ${where} ORDER BY a.id DESC LIMIT ${limit}`, params);
+      res.json({ ok:true, data:rows });
     } catch (error) { next(error); }
   });
 
@@ -6397,6 +6676,11 @@ function registerAccessControlRoutes(app) {
       const roleCode = trim(req.body?.role_code).toUpperCase(); const roleName = trim(req.body?.role_name); const description = trim(req.body?.description);
       if (!/^[A-Z0-9_-]{2,30}$/.test(roleCode) || !roleName) throw badRequest('角色代號與角色名稱不可空白');
       const [result] = await pool.query('INSERT INTO access_roles(role_code,role_name,description,is_system) VALUES(?,?,?,0)', [roleCode, roleName, description || null]);
+      await recordAccessAudit({
+        actorUserId:req.auth.id, actionCode:'ROLE_CREATED', entityType:'access_role', entityId:result.insertId,
+        after:{id:result.insertId,role_code:roleCode,role_name:roleName,description:description||null}, reason:'建立角色',
+        ipAddress:req.ip, userAgent:req.get('user-agent')
+      });
       res.status(201).json({ ok:true, data:{ id:result.insertId } });
     } catch (error) { if (error.code === 'ER_DUP_ENTRY') error = badRequest('角色代號已存在'); next(error); }
   });
@@ -6408,6 +6692,10 @@ function registerAccessControlRoutes(app) {
       const roleId = Number(req.params.id);
       const rows = Array.isArray(req.body?.permissions) ? req.body.permissions : null;
       if (!Number.isInteger(roleId) || roleId < 1 || !rows) throw badRequest('Invalid role permission payload');
+      const [[roleInfo]] = await pool.query('SELECT id,role_code,role_name FROM access_roles WHERE id=?', [roleId]);
+      if (!roleInfo) throw notFound('Role not found');
+      const [beforePermissions] = await pool.query(`SELECT feature_code,can_view,can_create,can_update,can_delete,can_approve
+        FROM access_role_permissions WHERE role_id=? ORDER BY feature_code`, [roleId]);
       await tx(async (conn) => {
         const [[role]] = await conn.query('SELECT id FROM access_roles WHERE id=? FOR UPDATE', [roleId]);
         if (!role) throw notFound('Role not found');
@@ -6422,6 +6710,13 @@ function registerAccessControlRoutes(app) {
             Number(Boolean(row.can_update)), Number(Boolean(row.can_delete)), Number(Boolean(row.can_approve))
           ]);
         }
+      });
+      await recordAccessAudit({
+        actorUserId:req.auth.id, actionCode:'ROLE_PERMISSIONS_UPDATED', entityType:'access_role_permissions', entityId:roleId,
+        before:{role:roleInfo,permissions:beforePermissions}, after:{role:roleInfo,permissions:rows.map(row => ({
+          feature_code:trim(row.feature_code),can_view:Number(Boolean(row.can_view)),can_create:Number(Boolean(row.can_create)),
+          can_update:Number(Boolean(row.can_update)),can_delete:Number(Boolean(row.can_delete)),can_approve:Number(Boolean(row.can_approve))
+        }))}, reason:'修改角色作業權限', ipAddress:req.ip, userAgent:req.get('user-agent')
       });
       res.json({ ok: true, data: { roleId } });
     } catch (error) { next(error); }

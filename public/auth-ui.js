@@ -26,10 +26,12 @@ async function beginAuthenticatedApp() {
     hideLogin();
     accessState.activeRoleId = Number(profile.role_id); localStorage.setItem('erp-active-role-id', String(profile.role_id));
     accessState.isAdmin = Boolean(access.is_admin); accessState.permissions = access.permissions || [];
+    accessState.allowed_sources = access.allowed_sources || [];
+    accessState.department_scopes = access.department_scopes || [];
     const userLabel = $('#currentUserLabel'); const userAvatar = $('#currentUserAvatar');
     if (userLabel) userLabel.textContent = `${profile.display_name}（${profile.username}｜${profile.role_name}）`;
     if (userAvatar) userAvatar.textContent = String(profile.username || profile.display_name || '--').slice(0, 2).toUpperCase();
-    await loadCompanyOptions(); await loadDatabaseOptions(); renderAll(); await refresh();
+    await loadCompanyOptions(); await loadDepartmentOptions(); await loadDatabaseOptions(); renderAll(); await refresh();
   } catch (error) {
     console.error('ERP login initialization failed:', error);
     showLogin(`登入後初始化失敗：${error.message}`);

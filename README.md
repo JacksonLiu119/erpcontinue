@@ -97,7 +97,7 @@ npm run verify:flow-audit-recommendations
 
 `verify:company-context` 會驗證目前登入公司的 API 查詢、跨公司來源、衝突參數與錯誤公司代號攔截，並驗證正式切換公司後只能查到新公司的資料；測試最後會切回原公司並登出。
 
-互動式 API 會驗證 `X-ERP-Context-Key`、`X-Source-Database`、`X-Company-Id` 與登入 session 的公司是否一致；`POST /api/auth/context` 是唯一的公司切換入口。`access_user_companies` 控制一般帳號可進入的公司，管理員則在獨立 `/admin` 後台設定帳號、角色與公司範圍；部門範圍與權限異動稽核列在「下一階段開發順序（已確認項目）」。
+互動式 API 會驗證 `X-ERP-Context-Key`、`X-Source-Database`、`X-Company-Id` 與登入 session 的公司是否一致；`POST /api/auth/context` 是唯一的公司切換入口。`access_user_companies` 控制一般帳號可進入的公司，`access_user_departments` 控制每家公司全部或指定部門範圍；管理員可在獨立 `/admin` 後台設定帳號、角色、作業權限、公司與部門範圍。`access_audit_log` 保留帳號／角色／公司／部門權限異動、公司切換與跨公司／跨部門拒絕事件。`verify:access-scope` 會建立並清理暫存帳號，驗證指定部門可查、未授權部門與跨公司請求攔截及稽核紀錄。
 
 `verify:flow-audit-recommendations` 會驗證公司別／日期起訖／截至日條件、銷售／採購／庫存／應收應付摘要、逾期與資金影響、候選建議產生、待核准→核准及事件歷程；建議核准只建立目標 ERP 的決策紀錄，不會修改 SH／SC，測試結束會還原資料。流程稽核 API 為 `GET /api/flow-audit/health|sales|procurement`，更正建議 API 為 `GET /api/flow-audit/recommendations`、`POST /api/flow-audit/recommendations/generate` 及 `POST /api/flow-audit/recommendations/:id/approve|reject`。
 

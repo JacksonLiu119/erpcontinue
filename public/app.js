@@ -1,4 +1,5 @@
 let currentDatabase = localStorage.getItem('erp-source-database') || 'SH';
+let currentDepartmentCode = localStorage.getItem('erp-department-code') || '';
 let companyContexts = [];
 let currentCompanyContextKey = localStorage.getItem('erp-company-context') || '';
 let currentCompanyContext = null;
@@ -76,6 +77,14 @@ async function api(path, options = {}) {
   headers.set('X-Source-Database', requestedSource);
   headers.set('X-ERP-Context-Key', String(currentCompanyContext?.source_database || requestedSource).toUpperCase());
   headers.set('X-Company-Id', requestedContext?.company_id || requestedSource);
+  if (currentDepartmentCode && !path.startsWith('/api/auth/')) headers.set('X-ERP-Department-Code', currentDepartmentCode);
+  if (currentDepartmentCode && path.startsWith('/api/') && !path.startsWith('/api/auth/') && !path.startsWith('/api/access-')) {
+    try {
+      const url = new URL(path, location.origin);
+      if (!url.searchParams.has('department_code')) url.searchParams.set('department_code', currentDepartmentCode);
+      path = `${url.pathname}${url.search}${url.hash}`;
+    } catch (_) { /* 使用原始路徑；標頭仍會提供目前部門 */ }
+  }
   const response = await fetch(path, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok || body.ok === false) throw new Error(body.error || `HTTP ${response.status}`);
@@ -384,9 +393,59 @@ async function loadDatabaseOptions() {
 function updateContextButtons() {
   const companyButton = $('#companyButton');
   const databaseButton = $('#databaseButton');
+  const departmentButton = $('#departmentButton');
   const company = currentCompanyContext;
   if (companyButton) companyButton.textContent = `🏢 公司：${company?.short_name || company?.company_code || currentDatabase}`;
   if (databaseButton) databaseButton.textContent = `🗄️ 資料庫：${currentDatabase}`;
+  if (departmentButton) departmentButton.textContent = `🏷️ 部門：${currentDepartmentCode || '全部'}`;
+}
+
+function activeDepartmentScope() {
+  const scopes = (typeof accessState !== 'undefined' && Array.isArray(accessState.department_scopes)) ? accessState.department_scopes : [];
+  const source = String(currentDatabase || '').toUpperCase();
+  return scopes.find(scope => String(scope.source_key || '').toUpperCase() === source) || { source_key:source, mode:'all', department_codes:[] };
+}
+
+function renderDepartmentOptions() {
+  const container = $('#departmentOptions');
+  const note = $('#departmentContextNote');
+  if (!container) return;
+  const scope = activeDepartmentScope();
+  const codes = [...new Set((scope.department_codes || []).map(code => String(code).trim().toUpperCase()).filter(Boolean))];
+  const isSelected = scope.mode === 'selected';
+  if (note) note.textContent = isSelected ? `本公司只允許 ${codes.join('、')}；請選擇要作業的部門。` : '目前帳號可使用本公司的全部部門；未指定時查詢全公司。';
+  const all = !isSelected ? `<button class="department-option ${currentDepartmentCode === '' ? 'selected' : ''}" type="button" data-department-code=""><i class="department-status ready"></i><span>全部部門<small>公司範圍內查詢／作業</small></span></button>` : '';
+  const options = codes.map(code => `<button class="department-option ${currentDepartmentCode === code ? 'selected' : ''}" type="button" data-department-code="${esc(code)}"><i class="department-status ready"></i><span>${esc(code)}<small>已授權部門</small></span></button>`).join('');
+  container.innerHTML = all + options || '<div class="empty-hint">尚未設定可用部門；請聯絡系統管理員。</div>';
+  container.querySelectorAll('[data-department-code]').forEach(button => button.onclick = () => selectDepartmentContext(button.dataset.departmentCode));
+}
+
+async function loadDepartmentOptions() {
+  const scope = activeDepartmentScope();
+  const codes = [...new Set((scope.department_codes || []).map(code => String(code).trim().toUpperCase()).filter(Boolean))];
+  if (scope.mode === 'selected') {
+    if (!codes.includes(String(currentDepartmentCode).toUpperCase())) currentDepartmentCode = codes[0] || '';
+  } else {
+    currentDepartmentCode = '';
+  }
+  localStorage.setItem('erp-department-code', currentDepartmentCode);
+  renderDepartmentOptions();
+  updateContextButtons();
+}
+
+function selectDepartmentContext(code) {
+  const scope = activeDepartmentScope();
+  const normalized = String(code || '').trim().toUpperCase();
+  if (scope.mode === 'selected' && !scope.department_codes.map(x => String(x).toUpperCase()).includes(normalized)) {
+    toast('此部門不在登入帳號的授權範圍內。', true);
+    return;
+  }
+  currentDepartmentCode = normalized;
+  localStorage.setItem('erp-department-code', currentDepartmentCode);
+  updateContextButtons(); renderDepartmentOptions();
+  $('#departmentPopover').hidden = true;
+  toast(`目前部門：${currentDepartmentCode || '全部'}`);
+  renderAll();
 }
 
 function renderCompanyOptions() {
@@ -439,6 +498,7 @@ async function selectCompanyContext(contextKey) {
   if (typeof currentUser !== 'undefined' && currentUser) currentUser.current_source_key = selected.source_database;
   localStorage.setItem('erp-company-context', selected.context_key);
   localStorage.setItem('erp-source-database', currentDatabase);
+  await loadDepartmentOptions();
   updateContextButtons();
   renderCompanyOptions();
   $('#companyPopover').hidden = true;
@@ -687,9 +747,7 @@ function renderAccountingDrafts(){
   const load=async()=>{try{const rows=await api(`/api/accounting/drafts?source_database=${encodeURIComponent(currentDatabase)}`);$('#accountingDraftRows').innerHTML=rows.map(x=>`<tr><td>${esc(x.draft_no)}</td><td>${esc(displayDateOf(x.draft_date))}</td><td>${esc(x.source_document_no||x.source_kind||'')}</td><td>${esc(x.line_count||0)}</td><td>${esc(x.debit_total||0)}</td><td>${esc(x.credit_total||0)}</td><td>${esc(statusName[x.status]||x.status)}</td><td>${Number(x.source_locked)?'是':'否'}</td><td><button class="btn small" data-draft-open="${x.id}">查看／維護</button></td></tr>`).join('')||'<tr><td colspan="9" class="empty-hint">尚無會計分錄底稿。</td></tr>';document.querySelectorAll('[data-draft-open]').forEach(b=>b.onclick=()=>openDetail(b.dataset.draftOpen));await loadSources();}catch(e){toast(e.message,true);}};
   $('#draftGenerateForm').onsubmit=async e=>{e.preventDefault();const selected=[...document.querySelectorAll('[data-draft-source]:checked')].map(x=>Number(x.value));if(!selected.length){toast('請至少選擇一筆來源帳款',true);return;}const form=e.currentTarget;try{const result=await api('/api/accounting/drafts/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_database:currentDatabase,source_refs:selected,draft_date:form.elements.draft_date.value,memo:form.elements.memo.value})});toast(`底稿 ${result.draft_no} 已產生並鎖定來源`);form.reset();form.elements.draft_date.value=procurementToday();await load();await openDetail(result.id);}catch(x){toast(x.message,true);}};$('#accountingDraftReload').onclick=load;load();
 }
-const confirmedNextPhaseRoadmap=[
-  ['N15','登入帳號／公司／部門範圍權限','目前已完成登入工作階段固定公司上下文與公司別存取檢核；下一階段補齊帳號可用公司別、部門範圍、角色與作業權限的管理、權限異動歷程及跨公司／跨部門稽核。','planned']
-];
+const confirmedNextPhaseRoadmap=[];
 function renderConfirmedNextPhaseRoadmap(items=confirmedNextPhaseRoadmap){
   return items.length?items.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${esc(no)}</span><div><strong>${esc(title)}</strong><p>${esc(desc)}</p></div></div>`).join(''):'<div class="desc">目前沒有其他已確認的開發項目。</div>';
 }
@@ -912,7 +970,8 @@ function renderArchitectureScreen(){
     ['R11','採購計價／付款量與費用閉環','已完成：到貨量、驗收合格量、驗退／退回量、計價量與付款量分開保存；計價作業納入運費、保險及其他費用並依計價量分攤。多筆進貨與退貨可核對正／負向應付、已付／未付與合併應付，付款過帳會回寫進貨付款量；暫入／暫入歸還維持原單關聯與未歸還量卡控。','done'],
     ['R12','SC 2025 只讀財報預覽','已完成：以 SC 原始 ACTMA／ACTMB／ACTTA／ACTTB 查詢 2025 總帳，整年與完整會計月份優先使用 ACTMB 期初 00／月份摘要，產出損益表、資產負債表與現金流量管理預覽；可依公司別、日期／會計期間與幣別查詢，保留來源表／來源鍵，顯示借貸平衡、期初期末、現金流分類與現金勾稽檢核。原始 SC 資料庫只讀，不回寫；自訂非整月日期仍保留來源檢核結果並標示其傳票彙總依據。','done'],
     ['R13','立沖／預收預付／溢收溢付與對沖','已完成：預收／預付與溢收／溢付可建立、核准、分批轉抵與退款／退回；每筆異動保留原額、已用、已退款、剩餘、原幣／本位幣／匯差、關聯帳款與分錄底稿。客戶兼廠商對沖分為應收／應付帳款或預收／預付兩類，限制同公司、同來源、有效對象關係與同幣別。','done'],
-    ['R14','逾期與跨模組異常稽核','已完成：可依公司別、日期起訖與截至日，彙整銷售／採購／庫存／應收應付的逾期、未轉、未交、已交未立帳、已立帳未收／未付、帳齡與資金影響；每筆顯示異常原因、來源與下一階段，並可產生不直接改來源資料的待核准更正建議。建議可由系統管理員／財務核准或駁回，完整保留事件歷程。','done']
+    ['R14','逾期與跨模組異常稽核','已完成：可依公司別、日期起訖與截至日，彙整銷售／採購／庫存／應收應付的逾期、未轉、未交、已交未立帳、已立帳未收／未付、帳齡與資金影響；每筆顯示異常原因、來源與下一階段，並可產生不直接改來源資料的待核准更正建議。建議可由系統管理員／財務核准或駁回，完整保留事件歷程。','done'],
+    ['N15','登入帳號／公司／部門範圍權限','已完成：獨立 /admin 可管理登入帳號、角色與作業權限、帳號可用公司別，以及每家公司全部／指定部門範圍；登入工作階段持續固定公司上下文，API 會攔截跨公司／跨部門請求，權限變更、公司切換與拒絕事件均保留稽核歷程。主畫面可選擇目前授權部門，已完成內容移至折疊區。','done']
   ];
   // 使用者已確認的項目進入開發順序；完成後即移到下方「已完成內容」折疊區。
   const roadmap=confirmedNextPhaseRoadmap;
@@ -1296,17 +1355,26 @@ document.addEventListener('click', event => {
   if (event.target.closest('#companyButton')) {
     $('#companyPopover').hidden = !$('#companyPopover').hidden;
     $('#databasePopover').hidden = true;
+    $('#departmentPopover').hidden = true;
     if (!companyContexts.length) loadCompanyOptions();
+  }
+  if (event.target.closest('#departmentButton')) {
+    $('#departmentPopover').hidden = !$('#departmentPopover').hidden;
+    $('#companyPopover').hidden = true;
+    $('#databasePopover').hidden = true;
+    if (!$('#departmentPopover').hidden) { renderDepartmentOptions(); loadDepartmentOptions(); }
   }
   if (event.target.closest('#databaseButton')) {
     $('#databasePopover').hidden = !$('#databasePopover').hidden;
     $('#companyPopover').hidden = true;
+    $('#departmentPopover').hidden = true;
     if (!$('#databasePopover').hidden) loadDatabaseOptions();
   }
   if (event.target.closest('#themeButton')) {
     $('#themePopover').hidden = !$('#themePopover').hidden;
     $('#companyPopover').hidden = true;
     $('#databasePopover').hidden = true;
+    $('#departmentPopover').hidden = true;
   }
 });
 const emptyTableObserver = new MutationObserver(() => {

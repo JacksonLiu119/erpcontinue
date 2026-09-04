@@ -23,18 +23,23 @@
       <div class="admin-brand"><b>◆ ERP 後台</b><small>System Administration</small></div>
       <button class="nav active" data-view="users">人員帳號管理</button>
       <button class="nav" data-view="roles">角色與功能權限</button>
+      <button class="nav" data-view="audit">權限異動歷程</button>
       <a class="nav link" href="/">返回 ERP 系統</a>
     </aside>
     <main>
       <header><div><h1 id="pageTitle">人員帳號管理</h1><p>帳號停用只會禁止登入，不會刪除歷史單據紀錄。</p></div><div class="admin-user"><span id="adminName"></span><button id="logoutButton">登出</button></div></header>
       <section class="view" id="usersView">
         <div class="card"><h2>新增登入帳號</h2><form id="createUserForm" class="form-grid"><label>登入帳號<input name="username" required></label><label>員工代號<input name="employee_code"></label><label>顯示姓名<input name="display_name" required></label><label>初始密碼<input name="password" type="password" minlength="8" required></label><label>角色<select name="role_id" id="newUserRole"></select></label><fieldset class="wide"><legend>可進入公司別</legend><div id="newUserCompanies" class="company-checks"></div></fieldset><button class="primary" type="submit">建立帳號</button></form></div>
-        <div class="card"><div class="card-head"><h2>現有登入帳號</h2><button id="reloadUsers">重新整理</button></div><div class="table-wrap"><table><thead><tr><th>帳號</th><th>員工代號</th><th>姓名</th><th>角色</th><th>可進入公司別</th><th>狀態</th><th>作業</th></tr></thead><tbody id="userRows"></tbody></table></div></div>
+        <div class="card"><div class="card-head"><h2>現有登入帳號</h2><button id="reloadUsers">重新整理</button></div><div class="table-wrap"><table><thead><tr><th>帳號</th><th>員工代號</th><th>姓名</th><th>角色</th><th>可進入公司別</th><th>部門範圍</th><th>狀態</th><th>作業</th></tr></thead><tbody id="userRows"></tbody></table></div></div>
+        <div class="card"><h2>帳號的公司／部門範圍</h2><div class="desc">先在帳號列勾選可進入的公司，再在這裡逐家公司設定部門。選擇「全部部門」代表該帳號在該公司不限制部門；選擇「指定部門」後，主畫面會要求先選擇授權部門，跨部門查詢／作業會被拒絕並留下稽核紀錄。</div><form id="departmentScopeForm" class="form-grid"><label>登入帳號<select id="scopeUser" required></select></label><label>公司別<select id="scopeCompany" required></select></label><label>部門模式<select id="scopeMode"><option value="all">全部部門</option><option value="selected">指定部門</option></select></label><div class="wide"><span class="field-label">可指定部門</span><div id="scopeDepartments" class="department-checks"><span class="hint">請先選擇帳號與公司別</span></div></div><label class="wide">設定原因<input id="scopeReason" placeholder="例如：採購人員只負責 A01、A02 部門"></label><button class="primary" type="submit">儲存部門範圍</button></form></div>
         <div class="card"><h2>重設密碼</h2><form id="resetPasswordForm" class="form-grid"><label>帳號<select name="user_id" id="resetUser"></select></label><label>新密碼<input name="new_password" type="password" minlength="8" required></label><label>確認密碼<input name="confirm_password" type="password" minlength="8" required></label><button class="primary" type="submit">重設密碼</button></form></div>
       </section>
       <section class="view" id="rolesView" hidden>
         <div class="card"><h2>新增角色</h2><form id="createRoleForm" class="form-grid"><label>角色代號<input name="role_code" placeholder="例如 SALES_MANAGER" required></label><label>角色名稱<input name="role_name" required></label><label class="wide">說明<input name="description"></label><button class="primary" type="submit">建立角色</button></form></div>
         <div class="card"><div class="role-picker"><label>目前角色<select id="permissionRole"></select></label><div id="roleDescription"></div></div><div class="table-wrap"><table><thead><tr><th>功能</th><th>顯示／查詢</th><th>新增</th><th>修改</th><th>停用／作廢</th><th>核準／過帳</th></tr></thead><tbody id="permissionRows"></tbody></table></div><button class="primary save-permissions" id="savePermissions">儲存角色權限</button></div>
+      </section>
+      <section class="view" id="auditView" hidden>
+        <div class="card"><div class="card-head"><h2>權限異動／跨公司跨部門稽核</h2><button id="reloadAudit">重新整理</button></div><form id="auditFilterForm" class="form-grid"><label>目標帳號<select id="auditUser"><option value="">全部帳號</option></select></label><label>公司別<select id="auditCompany"><option value="">全部公司</option></select></label><label>事件類型<input id="auditAction" placeholder="例如：CROSS_DEPARTMENT_REQUEST_REJECTED"></label><label>起日<input id="auditFrom" type="date"></label><label>迄日<input id="auditTo" type="date"></label><button class="primary" type="submit">查詢歷程</button></form><div class="table-wrap"><table><thead><tr><th>時間</th><th>操作者</th><th>目標帳號</th><th>事件</th><th>公司／部門</th><th>對象</th><th>原因</th><th>前後值</th></tr></thead><tbody id="auditRows"></tbody></table></div></div>
       </section>
       <div class="toast" id="toast" hidden></div>
     </main>
