@@ -170,7 +170,7 @@ const routeCapability = [
   [/^\/flow-audit\/recommendations(?:\/|$)/, 'flow-audit-recommendations'],
   [/^\/inventory-opening/, 'inventory-opening'],
   [/^\/sales-workflow\/document-types/, 'sales-document-types'],
-  [/^\/sales-workflow\/customer-items/, 'sales-customer-items'],
+  [/^\/sales-workflow\/customer-item(?:s|-mappings)(?:\/|$)/, 'sales-customer-items'],
   [/^\/sales-workflow\/order-changes/, 'sales-order-changes'],
   [/^\/sales-workflow\/orders-for-reopen/, 'sales-order-changes'],
   [/^\/sales-workflow\/orders\/\d+\/reopen/, 'sales-order-changes'],

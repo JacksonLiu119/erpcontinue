@@ -1533,6 +1533,67 @@ export async function ensureTargetSalesWorkflowSchema() {
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
 }
 
+// The legacy COPMB table stores the customer and the ERP item code used for
+// customer pricing, but it does not provide an independent customer-facing
+// item number.  This target-only structure is therefore deliberately separate
+// from the source mirror: the original SH/SC databases remain read-only, while
+// the new ERP can maintain an external customer item number, validity period,
+// soft-disable history, and an audit trail in the selected company database.
+export async function ensureTargetSalesCustomerItemSchema() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_customer_item_mappings (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL,
+    company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL,
+    customer_id BIGINT UNSIGNED NULL,
+    customer_code VARCHAR(30) NOT NULL,
+    customer_name VARCHAR(160) NOT NULL,
+    external_item_code VARCHAR(80) NOT NULL,
+    external_item_name VARCHAR(160) NULL,
+    external_specification VARCHAR(160) NULL,
+    item_id BIGINT UNSIGNED NULL,
+    item_code VARCHAR(40) NOT NULL,
+    item_name VARCHAR(160) NOT NULL,
+    specification VARCHAR(160) NULL,
+    unit VARCHAR(20) NULL,
+    effective_from DATE NOT NULL,
+    effective_to DATE NULL,
+    is_active TINYINT(1) NOT NULL DEFAULT 1,
+    note VARCHAR(255) NULL,
+    source_table VARCHAR(60) NOT NULL DEFAULT 'manual',
+    source_key VARCHAR(160) NULL,
+    created_by BIGINT UNSIGNED NULL,
+    updated_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_customer_item_mapping_version
+      (tenant_id,company_id,source_system,source_database,customer_code,external_item_code,effective_from),
+    KEY ix_erp_customer_item_mapping_lookup
+      (tenant_id,company_id,source_system,source_database,customer_code,external_item_code,is_active),
+    KEY ix_erp_customer_item_mapping_item
+      (tenant_id,company_id,source_system,source_database,item_code)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_customer_item_mapping_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    mapping_id BIGINT UNSIGNED NOT NULL,
+    tenant_id VARCHAR(60) NOT NULL,
+    company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL,
+    event_kind VARCHAR(30) NOT NULL,
+    before_json JSON NULL,
+    after_json JSON NULL,
+    reason VARCHAR(500) NOT NULL,
+    changed_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_erp_customer_item_mapping_event_lookup
+      (tenant_id,company_id,source_system,source_database,mapping_id,created_at),
+    CONSTRAINT fk_erp_customer_item_mapping_event
+      FOREIGN KEY (mapping_id) REFERENCES erp_customer_item_mappings(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+}
+
 // Unified document nature configuration.  This is the target ERP control
 // table; legacy CMSMQ/ACR/ACP/ACT data is only used as a source reference and
 // is never updated.  The source_database key is intentional because one

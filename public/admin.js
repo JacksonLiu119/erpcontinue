@@ -20,6 +20,7 @@ const featureNames = {
   'open-purchase-orders':'未交採購','purchase-receipts':'進貨明細','sales-document-types':'銷售單據性質',
   'sales-quotations':'報價','sales-orders':'訂單','sales-order-changes':'訂單變更','sales-shipments':'銷貨',
   'sales-returns':'銷退／折讓','sales-progress':'銷售進度','sales-open-orders':'未交訂單',
+  'sales-customer-items':'客戶品號（外部料號對照）',
   'finance-workflow':'應收／應付','finance-bookkeeping':'財務管帳（銀行明細）','finance-cash':'財務管錢（存提款／票據）',
   'finance-reconcile':'銀行逐筆對帳','accounting-general-ledger':'會計傳票／總帳','operations-health':'營運健康度',
   'sales-flow-audit':'銷售流程稽核','purchase-flow-audit':'採購流程稽核','architecture-flow':'系統架構與流程圖'

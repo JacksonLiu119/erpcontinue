@@ -1,4 +1,4 @@
-import { pool, getSourcePool, sourceDatabases, reloadSourceDatabases, runWithTargetDatabase, tx, ensureProcurementSchema, ensureTargetProcurementTypeSchema, ensureTargetReceiptWorkflowSchema, ensureTargetReversalSchema, ensureTargetSalesWorkflowSchema, ensureTargetDocumentNatureSchema, ensureTargetFinanceWorkflowSchema, validateOperationalSource } from './db.js';
+import { pool, getSourcePool, sourceDatabases, reloadSourceDatabases, runWithTargetDatabase, tx, ensureProcurementSchema, ensureTargetProcurementTypeSchema, ensureTargetReceiptWorkflowSchema, ensureTargetReversalSchema, ensureTargetSalesWorkflowSchema, ensureTargetSalesCustomerItemSchema, ensureTargetDocumentNatureSchema, ensureTargetFinanceWorkflowSchema, validateOperationalSource } from './db.js';
 import { hashPassword, getDepartmentScope, recordAccessAudit } from './auth.js';
 import { registerImportQualityRoutes } from './import-quality.js';
 import { registerReportingRoutes } from './reports.js';
@@ -3156,6 +3156,139 @@ async function syncPendingSalesReturnAdjustmentsForOpenItem(conn, openItemId, us
 }
 
 function registerSalesCustomerItemRoutes(app) {
+  const contextForRequest = req => {
+    const sourceName = sourceDbFromRequest(req);
+    const source = sourceDatabases[sourceName];
+    if (source?.adapter_code !== 'ism-sh') throw badRequest('目前客戶品號作業只適用 iSM 銷售來源');
+    return {
+      sourceName,
+      source,
+      context: {
+        tenant_id: source.tenant_id || 'default',
+        company_id: source.company_id || sourceName,
+        source_system: source.source_system || 'iSM',
+        source_database: sourceName
+      }
+    };
+  };
+  const hasOwn = (body, key) => Object.prototype.hasOwnProperty.call(body, key);
+  const textValue = (body, key, current = null, fallback = null) => {
+    if (hasOwn(body, key)) return trim(body[key]) || null;
+    if (current && current[key] !== undefined) return trim(current[key]) || null;
+    return fallback;
+  };
+  const bounded = (value, label, max, required = false) => {
+    const text = trim(value);
+    if (required && !text) throw badRequest(`${label}為必填`);
+    if (text.length > max) throw badRequest(`${label}不可超過 ${max} 個字元`);
+    return text || null;
+  };
+  const activeValue = (value, fallback = 1) => {
+    if (value === undefined || value === null || value === '') return fallback;
+    if ([1, true, '1', 'true', 'TRUE', 'yes', 'on'].includes(value)) return 1;
+    if ([0, false, '0', 'false', 'FALSE', 'no', 'off'].includes(value)) return 0;
+    throw badRequest('啟用狀態只能是 0 或 1');
+  };
+  const normalizedDate = value => value == null || value === '' ? null : validDate(value);
+  const rowDate = value => dateText(value) || null;
+  const mappingSnapshot = row => ({
+    id: Number(row.id),
+    customer_code: trim(row.customer_code),
+    customer_name: trim(row.customer_name),
+    external_item_code: trim(row.external_item_code),
+    external_item_name: trim(row.external_item_name) || null,
+    external_specification: trim(row.external_specification) || null,
+    item_code: trim(row.item_code),
+    item_name: trim(row.item_name),
+    specification: trim(row.specification) || null,
+    unit: trim(row.unit) || null,
+    effective_from: rowDate(row.effective_from),
+    effective_to: rowDate(row.effective_to),
+    is_active: Number(row.is_active) ? 1 : 0,
+    note: trim(row.note) || null,
+    source_table: trim(row.source_table) || 'manual',
+    source_key: trim(row.source_key) || null
+  });
+  const insertMappingEvent = async (conn, mappingId, context, eventKind, before, after, reason, userId) => {
+    await conn.query(`INSERT INTO erp_customer_item_mapping_events
+      (mapping_id,tenant_id,company_id,source_system,source_database,event_kind,before_json,after_json,reason,changed_by)
+      VALUES(?,?,?,?,?,?,?,?,?,?)`, [
+      mappingId, context.tenant_id, context.company_id, context.source_system, context.source_database,
+      eventKind, before == null ? null : JSON.stringify(before), after == null ? null : JSON.stringify(after),
+      String(reason || eventKind).slice(0, 500), Number.isInteger(Number(userId)) ? Number(userId) : null
+    ]);
+  };
+  const ensureTargetContextMaster = async (conn, context, customerCode, itemCode) => {
+    const [[customer]] = await conn.query(`SELECT id,customer_code,customer_name
+      FROM erp_customers
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND customer_code=?
+      LIMIT 1`, [context.tenant_id, context.company_id, context.source_system, context.source_database, customerCode]);
+    if (!customer) throw badRequest(`找不到目前公司別的客戶主檔：${customerCode}`);
+    const [[item]] = await conn.query(`SELECT id,item_code,item_name,specification,unit
+      FROM erp_items
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND item_code=?
+      LIMIT 1`, [context.tenant_id, context.company_id, context.source_system, context.source_database, itemCode]);
+    if (!item) throw badRequest(`找不到目前公司別的品號主檔：${itemCode}`);
+    return { customer, item };
+  };
+  const mappingInput = async (conn, context, body, current = null) => {
+    const customerCode = bounded(hasOwn(body, 'customer_code') ? body.customer_code : current?.customer_code, '客戶代號', 30, true);
+    const externalItemCode = bounded(hasOwn(body, 'external_item_code') ? body.external_item_code : current?.external_item_code, '外部客戶料號', 80, true);
+    const itemCode = bounded(hasOwn(body, 'item_code') ? body.item_code : current?.item_code, 'ERP 品號', 40, true);
+    const effectiveFrom = normalizedDate(hasOwn(body, 'effective_from') ? body.effective_from : rowDate(current?.effective_from));
+    if (!effectiveFrom) throw badRequest('生效日為必填');
+    const effectiveTo = normalizedDate(hasOwn(body, 'effective_to') ? body.effective_to : rowDate(current?.effective_to));
+    if (effectiveTo && effectiveTo < effectiveFrom) throw badRequest('失效日不可早於生效日');
+    const isActive = activeValue(hasOwn(body, 'is_active') ? body.is_active : undefined, Number(current?.is_active ?? 1));
+    const note = bounded(hasOwn(body, 'note') ? body.note : current?.note, '備註', 255);
+    const { customer, item } = await ensureTargetContextMaster(conn, context, customerCode, itemCode);
+    const externalItemName = bounded(
+      hasOwn(body, 'external_item_name') ? body.external_item_name : current?.external_item_name,
+      '客戶品名', 160
+    ) || item.item_name;
+    const externalSpecification = bounded(
+      hasOwn(body, 'external_specification') ? body.external_specification : current?.external_specification,
+      '客戶規格', 160
+    );
+    return {
+      customer, item, customerCode, externalItemCode, itemCode, effectiveFrom, effectiveTo,
+      isActive, note, externalItemName, externalSpecification
+    };
+  };
+  const assertNoActiveOverlap = async (conn, context, input, excludeId = null) => {
+    if (!input.isActive) return;
+    const params = [
+      context.tenant_id, context.company_id, context.source_system, context.source_database,
+      input.customerCode, input.externalItemCode, input.effectiveTo, input.effectiveFrom
+    ];
+    let exclude = '';
+    if (excludeId) { exclude = ' AND id<>?'; params.push(excludeId); }
+    const [[overlap]] = await conn.query(`SELECT id,effective_from,effective_to
+      FROM erp_customer_item_mappings
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+        AND customer_code=? AND external_item_code=? AND is_active=1
+        AND effective_from<=COALESCE(?, '9999-12-31')
+        AND COALESCE(effective_to,'9999-12-31')>=?${exclude}
+      ORDER BY effective_from,id LIMIT 1 FOR UPDATE`, params);
+    if (overlap) throw badRequest(`同一客戶的外部客戶料號有效期間重疊（${rowDate(overlap.effective_from)}～${rowDate(overlap.effective_to) || '永久'}），請先調整期間或停用原版本`);
+  };
+  const effectiveStatus = (row, asOfDate) => {
+    if (!Number(row.is_active)) return '已停用';
+    if (!asOfDate) return '未套用基準日';
+    const from = rowDate(row.effective_from), to = rowDate(row.effective_to);
+    if (from && asOfDate < from) return '尚未生效';
+    if (to && asOfDate > to) return '已失效';
+    return '有效';
+  };
+  const auditMapping = async (req, sourceName, actionCode, id, before, after, reason) => {
+    await recordAccessAudit({
+      actorUserId: req.auth?.id, targetUserId: req.auth?.id, actionCode,
+      entityType: 'erp_customer_item_mapping', entityId: id == null ? null : String(id),
+      sourceKey: sourceName, before, after, reason,
+      ipAddress: req.ip, userAgent: req.get('user-agent')
+    });
+  };
+
   app.get('/api/sales-workflow/customer-items', async (req, res, next) => {
     try {
       const sourceName = sourceDbFromRequest(req);
@@ -3249,6 +3382,181 @@ function registerSalesCustomerItemRoutes(app) {
         company_id: source.company_id
       }));
       res.json({ ok:true, data, source:sourceName + '.COPMB', source_read_only:Boolean(source.read_only) });
+    } catch (error) { next(error); }
+  });
+
+  app.get('/api/sales-workflow/customer-item-mappings', async (req, res, next) => {
+    try {
+      await ensureTargetSalesCustomerItemSchema();
+      const { sourceName, source, context } = contextForRequest(req);
+      const customerCode = trim(req.query.customer_code);
+      const externalItemCode = trim(req.query.external_item_code);
+      const itemCode = trim(req.query.item_code);
+      const keyword = trim(req.query.keyword);
+      const asOfDate = trim(req.query.as_of_date) ? validDate(req.query.as_of_date) : null;
+      const activeOnly = String(req.query.active_only ?? '1') !== '0';
+      const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
+      const where = [
+        'm.tenant_id=?', 'm.company_id=?', 'm.source_system=?', 'm.source_database=?'
+      ];
+      const params = [context.tenant_id, context.company_id, context.source_system, context.source_database];
+      if (customerCode) { where.push('m.customer_code LIKE ?'); params.push(`%${customerCode}%`); }
+      if (externalItemCode) { where.push('m.external_item_code LIKE ?'); params.push(`%${externalItemCode}%`); }
+      if (itemCode) { where.push('m.item_code LIKE ?'); params.push(`%${itemCode}%`); }
+      if (keyword) {
+        where.push(`CONCAT_WS(' ',m.customer_code,m.customer_name,m.external_item_code,m.external_item_name,
+          m.external_specification,m.item_code,m.item_name,m.specification) LIKE ?`);
+        params.push(`%${keyword}%`);
+      }
+      if (activeOnly) where.push('m.is_active=1');
+      if (asOfDate) {
+        where.push("m.effective_from<=? AND (m.effective_to IS NULL OR m.effective_to>=?)");
+        params.push(asOfDate, asOfDate);
+      }
+      const [rows] = await pool.query(`SELECT m.*,
+        c.customer_name AS current_customer_name,
+        i.item_name AS current_item_name, i.specification AS current_specification, i.unit AS current_unit,
+        (SELECT COUNT(*) FROM erp_customer_item_mapping_events e WHERE e.mapping_id=m.id
+          AND e.tenant_id=m.tenant_id AND e.company_id=m.company_id AND e.source_system=m.source_system
+          AND e.source_database=m.source_database) AS event_count
+        FROM erp_customer_item_mappings m
+        LEFT JOIN erp_customers c ON c.tenant_id=m.tenant_id AND c.company_id=m.company_id
+          AND c.source_system=m.source_system AND c.source_database=m.source_database AND c.customer_code=m.customer_code
+        LEFT JOIN erp_items i ON i.tenant_id=m.tenant_id AND i.company_id=m.company_id
+          AND i.source_system=m.source_system AND i.source_database=m.source_database AND i.item_code=m.item_code
+        WHERE ${where.join(' AND ')}
+        ORDER BY m.customer_code,m.external_item_code,m.effective_from DESC,m.id DESC LIMIT ?`, [...params, limit]);
+      const data = rows.map(row => ({
+        ...row,
+        customer_name: trim(row.current_customer_name) || trim(row.customer_name),
+        item_name: trim(row.current_item_name) || trim(row.item_name),
+        specification: row.current_specification ?? row.specification,
+        unit: row.current_unit ?? row.unit,
+        effective_from: rowDate(row.effective_from),
+        effective_to: rowDate(row.effective_to),
+        effective_status: effectiveStatus(row, asOfDate),
+        source_database: sourceName,
+        source_label: source.label,
+        target_database: source.target_database,
+        company_id: source.company_id,
+        record_type: 'managed',
+        source_read_only: Boolean(source.read_only)
+      }));
+      res.json({ ok:true, data });
+    } catch (error) { next(error); }
+  });
+
+  app.get('/api/sales-workflow/customer-item-mappings/:id/events', async (req, res, next) => {
+    try {
+      await ensureTargetSalesCustomerItemSchema();
+      const { context } = contextForRequest(req);
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id < 1) throw badRequest('客戶品號資料編號錯誤');
+      const [[mapping]] = await pool.query(`SELECT id FROM erp_customer_item_mappings
+        WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`,
+        [id, context.tenant_id, context.company_id, context.source_system, context.source_database]);
+      if (!mapping) throw notFound('找不到目前公司別的客戶品號資料');
+      const [events] = await pool.query(`SELECT id,mapping_id,event_kind,before_json,after_json,reason,changed_by,created_at
+        FROM erp_customer_item_mapping_events
+        WHERE mapping_id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+        ORDER BY id DESC`, [id, context.tenant_id, context.company_id, context.source_system, context.source_database]);
+      res.json({ ok:true, data:events });
+    } catch (error) { next(error); }
+  });
+
+  app.post('/api/sales-workflow/customer-item-mappings', async (req, res, next) => {
+    try {
+      await ensureTargetSalesCustomerItemSchema();
+      const { sourceName, source, context } = contextForRequest(req);
+      const body = req.body || {};
+      const reason = bounded(body.reason, '異動原因', 500) || '建立客戶品號對照';
+      const out = await tx(async conn => {
+        const input = await mappingInput(conn, context, body);
+        await assertNoActiveOverlap(conn, context, input);
+        const [result] = await conn.query(`INSERT INTO erp_customer_item_mappings
+          (tenant_id,company_id,source_system,source_database,customer_id,customer_code,customer_name,
+           external_item_code,external_item_name,external_specification,item_id,item_code,item_name,specification,unit,
+           effective_from,effective_to,is_active,note,source_table,source_key,created_by,updated_by)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+          context.tenant_id, context.company_id, context.source_system, context.source_database,
+          input.customer.id, input.customerCode, input.customer.customer_name,
+          input.externalItemCode, input.externalItemName, input.externalSpecification,
+          input.item.id, input.itemCode, input.item.item_name, input.item.specification || null, input.item.unit || null,
+          input.effectiveFrom, input.effectiveTo, input.isActive, input.note, 'manual', null,
+          req.auth?.id || null, req.auth?.id || null
+        ]);
+        const id = Number(result.insertId);
+        await conn.query('UPDATE erp_customer_item_mappings SET source_key=? WHERE id=?', [`MANUAL:${id}`, id]);
+        const [[after]] = await conn.query('SELECT * FROM erp_customer_item_mappings WHERE id=? FOR UPDATE', [id]);
+        await insertMappingEvent(conn, id, context, 'created', null, mappingSnapshot(after), reason, req.auth?.id);
+        return { id, mapping: mappingSnapshot(after) };
+      });
+      await auditMapping(req, sourceName, 'CUSTOMER_ITEM_MAPPING_CREATED', out.id, null, out.mapping, reason);
+      res.status(201).json({ ok:true, data:{ ...out, target_database:source.target_database, company_id:source.company_id } });
+    } catch (error) { next(error); }
+  });
+
+  app.put('/api/sales-workflow/customer-item-mappings/:id', async (req, res, next) => {
+    try {
+      await ensureTargetSalesCustomerItemSchema();
+      const { sourceName, source, context } = contextForRequest(req);
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id < 1) throw badRequest('客戶品號資料編號錯誤');
+      const body = req.body || {};
+      const reason = bounded(body.reason, '異動原因', 500) || '修改客戶品號對照';
+      const out = await tx(async conn => {
+        const [[beforeRow]] = await conn.query(`SELECT * FROM erp_customer_item_mappings
+          WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? FOR UPDATE`,
+          [id, context.tenant_id, context.company_id, context.source_system, context.source_database]);
+        if (!beforeRow) throw notFound('找不到目前公司別的客戶品號資料');
+        const before = mappingSnapshot(beforeRow);
+        const input = await mappingInput(conn, context, body, beforeRow);
+        await assertNoActiveOverlap(conn, context, input, id);
+        await conn.query(`UPDATE erp_customer_item_mappings SET
+          customer_id=?,customer_code=?,customer_name=?,external_item_code=?,external_item_name=?,external_specification=?,
+          item_id=?,item_code=?,item_name=?,specification=?,unit=?,effective_from=?,effective_to=?,is_active=?,note=?,updated_by=?
+          WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`, [
+          input.customer.id, input.customerCode, input.customer.customer_name,
+          input.externalItemCode, input.externalItemName, input.externalSpecification,
+          input.item.id, input.itemCode, input.item.item_name, input.item.specification || null, input.item.unit || null,
+          input.effectiveFrom, input.effectiveTo, input.isActive, input.note, req.auth?.id || null,
+          id, context.tenant_id, context.company_id, context.source_system, context.source_database
+        ]);
+        const [[afterRow]] = await conn.query('SELECT * FROM erp_customer_item_mappings WHERE id=? FOR UPDATE', [id]);
+        const after = mappingSnapshot(afterRow);
+        await insertMappingEvent(conn, id, context, 'updated', before, after, reason, req.auth?.id);
+        return { id, before, mapping:after };
+      });
+      await auditMapping(req, sourceName, 'CUSTOMER_ITEM_MAPPING_UPDATED', out.id, out.before, out.mapping, reason);
+      res.json({ ok:true, data:{ ...out, target_database:source.target_database, company_id:source.company_id } });
+    } catch (error) { next(error); }
+  });
+
+  app.delete('/api/sales-workflow/customer-item-mappings/:id', async (req, res, next) => {
+    try {
+      await ensureTargetSalesCustomerItemSchema();
+      const { sourceName, source, context } = contextForRequest(req);
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id < 1) throw badRequest('客戶品號資料編號錯誤');
+      const reason = bounded(req.body?.reason, '停用原因', 500) || '停用客戶品號對照';
+      const out = await tx(async conn => {
+        const [[beforeRow]] = await conn.query(`SELECT * FROM erp_customer_item_mappings
+          WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? FOR UPDATE`,
+          [id, context.tenant_id, context.company_id, context.source_system, context.source_database]);
+        if (!beforeRow) throw notFound('找不到目前公司別的客戶品號資料');
+        const before = mappingSnapshot(beforeRow);
+        if (!before.is_active) return { id, before, mapping:before, alreadyInactive:true };
+        await conn.query(`UPDATE erp_customer_item_mappings SET is_active=0,updated_by=?
+          WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`, [
+          req.auth?.id || null, id, context.tenant_id, context.company_id, context.source_system, context.source_database
+        ]);
+        const [[afterRow]] = await conn.query('SELECT * FROM erp_customer_item_mappings WHERE id=? FOR UPDATE', [id]);
+        const after = mappingSnapshot(afterRow);
+        await insertMappingEvent(conn, id, context, 'deactivated', before, after, reason, req.auth?.id);
+        return { id, before, mapping:after, alreadyInactive:false };
+      });
+      if (!out.alreadyInactive) await auditMapping(req, sourceName, 'CUSTOMER_ITEM_MAPPING_DEACTIVATED', out.id, out.before, out.mapping, reason);
+      res.json({ ok:true, data:{ ...out, target_database:source.target_database, company_id:source.company_id, message:out.alreadyInactive?'資料原已停用，未重複建立事件':'資料已停用；保留歷程，不執行實體刪除' } });
     } catch (error) { next(error); }
   });
 }

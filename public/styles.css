@@ -127,8 +127,10 @@ body.architecture-mode .workspace{grid-column:2}
 .sales-pipe-downstream-label{display:flex;align-items:center;justify-content:center;padding:8px;color:var(--muted);font-size:11px;font-weight:800;text-align:center}
 .sales-reference-card{display:grid;gap:12px;padding:18px;border:2px solid;border-radius:16px;background:var(--panel)}
 .sales-reference-card.partial{border-color:#d98b09;background:color-mix(in srgb,#e6a329 8%,var(--panel))}
+.sales-reference-card.done{border-color:#28a66f;background:color-mix(in srgb,#28a66f 8%,var(--panel))}
 .sales-reference-card.planned{border-color:#d9534f;border-style:dashed;background:color-mix(in srgb,#d9534f 5%,var(--panel))}
 .sales-reference-status{width:max-content;padding:5px 10px;border-radius:999px;color:#fff;background:var(--brand);font-size:11px;font-weight:800}
+.sales-reference-card.done .sales-reference-status{color:#176b4d;background:#ccebd8}
 .sales-reference-card.partial .sales-reference-status{color:#7a4b00;background:#f7d98e}
 .sales-reference-card.planned .sales-reference-status{color:#9f2f2a;background:#f6cfcc}
 .sales-reference-card h3{margin:0;color:var(--brand);font-size:16px}
@@ -140,6 +142,9 @@ body.architecture-mode .workspace{grid-column:2}
 .sales-customer-item-screen table.grid th{white-space:nowrap}
 .sales-customer-item-screen table.grid td{vertical-align:top;white-space:nowrap}
 .sales-customer-item-screen table.grid td small{line-height:1.55}
+.sales-customer-item-screen .panel-head{gap:10px;justify-content:space-between;flex-wrap:wrap}
+.sales-customer-item-screen .panel-head .code{margin-left:auto}
+.sales-customer-item-screen table.grid td pre{max-width:260px;max-height:150px;margin:0;overflow:auto;white-space:pre-wrap;color:var(--muted);font:10px/1.45 Consolas,"Microsoft JhengHei",monospace}
 .architecture-pipe-entry{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid color-mix(in srgb,var(--accent) 55%,var(--border));border-radius:13px;background:color-mix(in srgb,var(--accent) 8%,var(--panel))}
 .architecture-pipe-entry strong{display:block;color:var(--brand);font-size:12px}
 .architecture-pipe-entry small{display:block;margin-top:3px;color:var(--muted);font-size:10px}
