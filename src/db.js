@@ -360,11 +360,12 @@ export function ensureProcurementSchema() {
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         tenant_id VARCHAR(60) NOT NULL DEFAULT 'SH', company_id VARCHAR(60) NOT NULL DEFAULT 'SH', source_system VARCHAR(60) NOT NULL DEFAULT 'iSM',
         item_code VARCHAR(40) NOT NULL, item_name VARCHAR(160) NOT NULL, specification VARCHAR(160) NULL, unit VARCHAR(20) NULL,
-        category_1 VARCHAR(30) NULL, category_2 VARCHAR(30) NULL, category_3 VARCHAR(30) NULL,
+        category_1 VARCHAR(30) NULL, category_2 VARCHAR(30) NULL, category_3 VARCHAR(30) NULL, category_4 VARCHAR(30) NULL,
         source_database VARCHAR(60) NOT NULL, source_table VARCHAR(60) NULL, source_key VARCHAR(160) NULL, raw_json JSON NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_erp_item_context (tenant_id, company_id, source_system, item_code)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await addColumnIfMissing('erp_items', 'category_4', 'VARCHAR(30) NULL');
       await pool.query(`CREATE TABLE IF NOT EXISTS erp_job_categories (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
@@ -1514,7 +1515,9 @@ export async function ensureTargetSalesWorkflowSchema() {
     ['price_source_no', 'VARCHAR(80) NULL'],
     ['price_source_date', 'DATE NULL'],
     ['price_rule_id', 'BIGINT UNSIGNED NULL'],
-    ['price_tier_id', 'BIGINT UNSIGNED NULL']
+    ['price_tier_id', 'BIGINT UNSIGNED NULL'],
+    ['forecast_item_id', 'BIGINT UNSIGNED NULL'],
+    ['forecast_no', 'VARCHAR(60) NULL']
   ]) await addColumnIfMissing('sales_document_items', column, definition);
   for (const [column, definition] of [
     ['version_no', 'INT UNSIGNED NULL'],
@@ -1538,6 +1541,104 @@ export async function ensureTargetSalesWorkflowSchema() {
     UNIQUE KEY uq_sales_order_version(tenant_id,company_id,source_system,order_id,version_no),
     KEY ix_sales_order_version_lookup(source_database,order_id,order_item_id,created_at),
     KEY ix_sales_order_version_source(source_database,source_kind,source_document_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+}
+
+// COPI04／COPI13／COPR06 銷售預測。預測是目標 ERP 的可核准業務資料，
+// 不把空的或歷史 COPME／COPMF 寫回來源庫；每個預測標頭、明細與訂單
+// 受訂量都帶完整公司／來源上下文，避免 SH／SC 混用。
+export async function ensureTargetSalesForecastSchema() {
+  await ensureTargetSalesWorkflowSchema();
+  await ensureTargetSalesCustomerItemSchema();
+  // Category-based forecasts use all four iSM classification levels.  Older
+  // target databases may have been created before category_4 was introduced,
+  // so upgrade the active target database idempotently for SH and SC alike.
+  await addColumnIfMissing('erp_items', 'category_4', 'VARCHAR(30) NULL');
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_forecasts (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL,
+    company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL,
+    forecast_no VARCHAR(60) NOT NULL,
+    forecast_version VARCHAR(40) NULL,
+    forecast_basis ENUM('item','category') NOT NULL,
+    period_from DATE NOT NULL,
+    period_to DATE NOT NULL,
+    customer_code VARCHAR(30) NULL,
+    department_code VARCHAR(30) NULL,
+    salesperson_code VARCHAR(30) NULL,
+    channel_code VARCHAR(30) NULL,
+    customer_type VARCHAR(30) NULL,
+    include_production_plan TINYINT(1) NOT NULL DEFAULT 0,
+    customer_description VARCHAR(500) NULL,
+    status ENUM('draft','approved','closed','voided') NOT NULL DEFAULT 'draft',
+    close_mode ENUM('open','auto','manual') NOT NULL DEFAULT 'open',
+    source_kind VARCHAR(30) NOT NULL DEFAULT 'manual',
+    source_table VARCHAR(60) NOT NULL DEFAULT 'manual',
+    source_key VARCHAR(160) NULL,
+    note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL,
+    updated_by BIGINT UNSIGNED NULL,
+    approved_by BIGINT UNSIGNED NULL,
+    approved_at DATETIME NULL,
+    closed_by BIGINT UNSIGNED NULL,
+    closed_at DATETIME NULL,
+    voided_by BIGINT UNSIGNED NULL,
+    voided_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_sales_forecast_no (tenant_id,company_id,source_system,forecast_no),
+    KEY ix_erp_sales_forecast_filter (tenant_id,company_id,source_system,source_database,forecast_basis,status,period_from,period_to),
+    KEY ix_erp_sales_forecast_customer (tenant_id,company_id,source_database,customer_code)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_forecast_items (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    forecast_id BIGINT UNSIGNED NOT NULL,
+    line_no INT UNSIGNED NOT NULL,
+    item_code VARCHAR(40) NULL,
+    item_name VARCHAR(160) NULL,
+    specification VARCHAR(160) NULL,
+    category_1 VARCHAR(30) NULL,
+    category_2 VARCHAR(30) NULL,
+    category_3 VARCHAR(30) NULL,
+    category_4 VARCHAR(30) NULL,
+    forecast_date DATE NOT NULL,
+    warehouse_code VARCHAR(30) NULL,
+    forecast_quantity DECIMAL(24,3) NOT NULL DEFAULT 0,
+    ordered_quantity DECIMAL(24,3) NOT NULL DEFAULT 0,
+    unit VARCHAR(20) NOT NULL,
+    currency_code VARCHAR(10) NOT NULL,
+    unit_price DECIMAL(24,6) NOT NULL DEFAULT 0,
+    forecast_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    ordered_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    close_mode ENUM('open','auto','manual') NOT NULL DEFAULT 'open',
+    status ENUM('open','closed') NOT NULL DEFAULT 'open',
+    source_table VARCHAR(60) NOT NULL DEFAULT 'manual',
+    source_key VARCHAR(160) NULL,
+    note VARCHAR(500) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_sales_forecast_line (forecast_id,line_no),
+    KEY ix_erp_sales_forecast_line_item (forecast_id,item_code,forecast_date),
+    KEY ix_erp_sales_forecast_line_category (forecast_id,category_1,category_2,category_3,category_4),
+    CONSTRAINT fk_erp_sales_forecast_line_header FOREIGN KEY (forecast_id) REFERENCES erp_sales_forecasts(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_forecast_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    forecast_id BIGINT UNSIGNED NOT NULL,
+    tenant_id VARCHAR(60) NOT NULL,
+    company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL,
+    event_kind VARCHAR(40) NOT NULL,
+    before_json JSON NULL,
+    after_json JSON NULL,
+    reason VARCHAR(500) NOT NULL,
+    changed_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_erp_sales_forecast_event (tenant_id,company_id,source_system,source_database,forecast_id,created_at),
+    CONSTRAINT fk_erp_sales_forecast_event_header FOREIGN KEY (forecast_id) REFERENCES erp_sales_forecasts(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
 }
 

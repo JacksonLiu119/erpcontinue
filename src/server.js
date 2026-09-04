@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { pool, ensureProcurementSchema, sourceDatabases, runWithTargetDatabase, ensureTargetFinanceWorkflowSchema, ensureTargetReceiptWorkflowSchema, ensureTargetSalesCustomerItemSchema, ensureTargetSalesPricingSchema } from './db.js';
+import { pool, ensureProcurementSchema, sourceDatabases, runWithTargetDatabase, ensureTargetFinanceWorkflowSchema, ensureTargetReceiptWorkflowSchema, ensureTargetSalesCustomerItemSchema, ensureTargetSalesPricingSchema, ensureTargetSalesForecastSchema } from './db.js';
 import { registerApi } from './routes.js';
 import { authMiddleware, authorizationMiddleware, registerAuthRoutes } from './auth.js';
 import { registerN8nRoutes } from './n8n.js';
@@ -49,6 +49,7 @@ async function start() {
     await runWithTargetDatabase(sourceName, ensureTargetReceiptWorkflowSchema);
     await runWithTargetDatabase(sourceName, ensureTargetSalesCustomerItemSchema);
     await runWithTargetDatabase(sourceName, ensureTargetSalesPricingSchema);
+    await runWithTargetDatabase(sourceName, ensureTargetSalesForecastSchema);
   }
   app.listen(port, () => {
     console.log(`Inventory ERP running on http://127.0.0.1:${port}`);

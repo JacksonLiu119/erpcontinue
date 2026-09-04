@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS erp_items (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   tenant_id VARCHAR(60) NOT NULL DEFAULT 'SH', company_id VARCHAR(60) NOT NULL DEFAULT 'SH', source_system VARCHAR(60) NOT NULL DEFAULT 'iSM',
   item_code VARCHAR(40) NOT NULL, item_name VARCHAR(160) NOT NULL, specification VARCHAR(160) NULL, unit VARCHAR(20) NULL,
-  category_1 VARCHAR(30) NULL, category_2 VARCHAR(30) NULL, category_3 VARCHAR(30) NULL,
+  category_1 VARCHAR(30) NULL, category_2 VARCHAR(30) NULL, category_3 VARCHAR(30) NULL, category_4 VARCHAR(30) NULL,
   source_database VARCHAR(60) NOT NULL, source_table VARCHAR(60) NULL, source_key VARCHAR(160) NULL, raw_json JSON NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_erp_item_context (tenant_id, company_id, source_system, item_code)

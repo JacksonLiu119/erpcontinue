@@ -173,6 +173,7 @@ const routeCapability = [
   [/^\/sales-workflow\/document-types/, 'sales-document-types'],
   [/^\/sales-workflow\/customer-item(?:s|-mappings)(?:\/|$)/, 'sales-customer-items'],
   [/^\/sales-workflow\/customer-pricing(?:\/|$)/, 'sales-customer-pricing'],
+  [/^\/sales-workflow\/forecasts(?:\/|$)/, 'sales-forecast'],
   [/^\/sales-workflow\/order-changes/, 'sales-order-changes'],
   [/^\/sales-workflow\/orders-for-reopen/, 'sales-order-changes'],
   [/^\/sales-workflow\/orders\/\d+\/reopen/, 'sales-order-changes'],

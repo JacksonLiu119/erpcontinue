@@ -1,8 +1,9 @@
-import { pool, getSourcePool, sourceDatabases, reloadSourceDatabases, runWithTargetDatabase, tx, ensureProcurementSchema, ensureTargetProcurementTypeSchema, ensureTargetReceiptWorkflowSchema, ensureTargetReversalSchema, ensureTargetSalesWorkflowSchema, ensureTargetSalesCustomerItemSchema, ensureTargetSalesPricingSchema, ensureTargetDocumentNatureSchema, ensureTargetFinanceWorkflowSchema, validateOperationalSource } from './db.js';
+import { pool, getSourcePool, sourceDatabases, reloadSourceDatabases, runWithTargetDatabase, tx, ensureProcurementSchema, ensureTargetProcurementTypeSchema, ensureTargetReceiptWorkflowSchema, ensureTargetReversalSchema, ensureTargetSalesWorkflowSchema, ensureTargetSalesCustomerItemSchema, ensureTargetSalesPricingSchema, ensureTargetSalesForecastSchema, ensureTargetDocumentNatureSchema, ensureTargetFinanceWorkflowSchema, validateOperationalSource } from './db.js';
 import { hashPassword, getDepartmentScope, recordAccessAudit } from './auth.js';
 import { registerImportQualityRoutes } from './import-quality.js';
 import { registerReportingRoutes } from './reports.js';
 import { registerSourceFinancialPreviewRoutes } from './source-financial-preview.js';
+import { registerSalesForecastRoutes, resolveSalesForecastOrderLink, refreshSalesForecastMetrics } from './sales-forecast.js';
 
 const listTables = {
   customers: ['id', 'code', 'name', 'tax_id', 'contact_name', 'phone', 'email', 'address', 'credit_limit', 'is_active'],
@@ -1042,6 +1043,7 @@ export function registerApi(app) {
   registerSalesWorkflowRoutes(app);
   registerSalesCustomerItemRoutes(app);
   registerSalesCustomerPricingRoutes(app);
+  registerSalesForecastRoutes(app);
   registerFlowAuditRoutes(app);
   registerFinanceWorkflowRoutes(app);
   registerAccountingWorkflowRoutes(app);
@@ -1371,9 +1373,9 @@ const canonicalMasterConfigs = {
   },
   items: {
     table: 'erp_items', code: 'item_code', name: 'item_name', sourceTable: 'invmb', allowNameBlank: true,
-    fields: ['item_code', 'item_name', 'specification', 'unit', 'category_1', 'category_2', 'category_3'],
-    select: 'item_code, item_name, specification, unit, category_1, category_2, category_3',
-    sourceSelect: 'MB001 AS item_code, MB002 AS item_name, MB003 AS specification, MB004 AS unit, MB005 AS category_1, MB006 AS category_2, MB007 AS category_3', trackImport: true
+    fields: ['item_code', 'item_name', 'specification', 'unit', 'category_1', 'category_2', 'category_3', 'category_4'],
+    select: 'item_code, item_name, specification, unit, category_1, category_2, category_3, category_4',
+    sourceSelect: 'MB001 AS item_code, MB002 AS item_name, MB003 AS specification, MB004 AS unit, MB005 AS category_1, MB006 AS category_2, MB007 AS category_3, NULL AS category_4', trackImport: true
   },
   'job-categories': {
     table: 'erp_job_categories', code: 'job_code', name: 'job_name', sourceTable: 'cmsmj', allowNameBlank: true,
@@ -4273,11 +4275,12 @@ function registerSalesWorkflowRoutes(app){
   });
   app.get('/api/sales-workflow/document-types',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const db=String(req.query.source_database||'SH').toUpperCase(),c=await ensure(db),sp=getSourcePool(db);await pool.query("UPDATE sales_document_types SET source_database=? WHERE tenant_id=? AND company_id=? AND source_system=? AND (source_database IS NULL OR source_database='')",[db,c.tenant_id,c.company_id,c.source_system]);for(const [kind,table,column] of [['sales_order','copta','TA001'],['shipment','coptg','TG001'],['sales_return','copti','TI001']]){try{const[types]=await sp.query(`SELECT DISTINCT t.${column} type_code,COALESCE(NULLIF(q.MQ002,''),t.${column}) type_name,q.MQ034 type_full_name,q.MQ003 nature_code,q.MQ004 numbering_method,q.MQ005 year_digits,q.MQ006 serial_digits,q.MQ024 item_input_method,q.MQ015 auto_confirm,q.MQ061 auto_confirm_on_edit,q.MQ018 update_customer_price,q.MQ019 require_sales_order,q.MQ020 settlement_mode,q.MQ021 ar_document_type,q.MQ060 is_default,q.MQ022 note FROM ${table} t LEFT JOIN cmsmq q ON q.COMPANY=t.COMPANY AND q.MQ001=t.${column} WHERE t.COMPANY=? AND t.${column}<>''`,[db]);for(const x of types){const yes=v=>['Y','y','1','true'].includes(String(v??'').trim()),map={'1':'daily','2':'monthly','3':'sequence','4':'manual'},settlement={'Y':'whole','y':'per_document','N':'batch'};await pool.query(`INSERT INTO sales_document_types(tenant_id,company_id,source_system,document_kind,type_code,type_name,type_full_name,nature_code,number_prefix,numbering_method,year_digits,serial_digits,requires_approval,auto_confirm,auto_confirm_on_edit,update_customer_price,require_sales_order,settlement_mode,ar_document_type,is_default,is_active,note,source_database,source_table) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE type_name=VALUES(type_name),type_full_name=VALUES(type_full_name),nature_code=VALUES(nature_code),numbering_method=VALUES(numbering_method),year_digits=VALUES(year_digits),serial_digits=VALUES(serial_digits),requires_approval=VALUES(requires_approval),auto_confirm=VALUES(auto_confirm),auto_confirm_on_edit=VALUES(auto_confirm_on_edit),update_customer_price=VALUES(update_customer_price),require_sales_order=VALUES(require_sales_order),settlement_mode=VALUES(settlement_mode),ar_document_type=VALUES(ar_document_type),is_default=VALUES(is_default),note=VALUES(note),source_database=VALUES(source_database),source_table=VALUES(source_table)`,[c.tenant_id,c.company_id,c.source_system,kind,String(x.type_code).trim(),String(x.type_name||x.type_code).trim(),String(x.type_full_name||'').trim()||null,String(x.nature_code||'').trim()||null,String(x.type_code).trim(),map[String(x.numbering_method||'').trim()]||'daily',Number(x.year_digits)||4,Number(x.serial_digits)||4,yes(x.auto_confirm)?0:1,yes(x.auto_confirm),yes(x.auto_confirm_on_edit),yes(x.update_customer_price),yes(x.require_sales_order),settlement[String(x.settlement_mode||'').trim()]||'batch',String(x.ar_document_type||'').trim()||null,yes(x.is_default),1,String(x.note||'').trim()||'由客戶舊 ERP CMSMQ 匯入',db,'cmsmq']);}}catch(_){}}const[rows]=await pool.query('SELECT * FROM sales_document_types WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? ORDER BY document_kind,type_code',[c.tenant_id,c.company_id,c.source_system,db]);res.json({ok:true,data:rows});}catch(e){next(e);}});
    app.post('/api/sales-workflow/document-types',async(req,res,next)=>{try{const b=req.body||{},db=sourceDbFromRequest(req),c=ctx(db);if(!defs.some(x=>x[0]===b.document_kind)||!trim(b.type_code)||!trim(b.type_name))throw badRequest('請輸入有效的銷售單據性質');const[r]=await pool.query('INSERT INTO sales_document_types(tenant_id,company_id,source_system,document_kind,type_code,type_name,number_prefix,requires_approval,note,source_database) VALUES(?,?,?,?,?,?,?,?,?,?)',[c.tenant_id,c.company_id,c.source_system,b.document_kind,trim(b.type_code),trim(b.type_name),trim(b.number_prefix)||trim(b.type_code),Number(b.requires_approval??1),trim(b.note),db]);res.status(201).json({ok:true,data:{id:r.insertId}});}catch(e){next(e);}});
-   app.get('/api/sales-workflow/documents',async(req,res,next)=>{try{const db=String(req.query.source_database||'SH').toUpperCase(),kind=trim(req.query.document_kind),limit=Math.min(Math.max(Number(req.query.limit)||10,1),100),p=[db];let f='d.source_database=?';if(kind){f+=' AND d.document_kind=?';p.push(kind);}const[rows]=await pool.query(`SELECT d.*,i.id item_id,i.source_item_id,i.item_code,i.item_name,i.unit,i.warehouse_code,i.quantity,i.related_quantity,i.unit_price,i.unit_cost,i.expected_date,i.allowance_amount,i.price_source_kind,i.price_source_id,i.price_source_no,i.price_source_date,i.price_rule_id,i.price_tier_id FROM sales_documents d JOIN sales_document_items i ON i.document_id=d.id WHERE ${f} ORDER BY d.document_date DESC,d.id DESC LIMIT ?`,[...p,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
+   app.get('/api/sales-workflow/documents',async(req,res,next)=>{try{const db=String(req.query.source_database||'SH').toUpperCase(),kind=trim(req.query.document_kind),limit=Math.min(Math.max(Number(req.query.limit)||10,1),100),p=[db];let f='d.source_database=?';if(kind){f+=' AND d.document_kind=?';p.push(kind);}const[rows]=await pool.query(`SELECT d.*,i.id item_id,i.source_item_id,i.forecast_item_id,i.forecast_no,i.item_code,i.item_name,i.unit,i.warehouse_code,i.quantity,i.related_quantity,i.unit_price,i.unit_cost,i.expected_date,i.allowance_amount,i.price_source_kind,i.price_source_id,i.price_source_no,i.price_source_date,i.price_rule_id,i.price_tier_id FROM sales_documents d JOIN sales_document_items i ON i.document_id=d.id WHERE ${f} ORDER BY d.document_date DESC,d.id DESC LIMIT ?`,[...p,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
   app.use('/api/sales-workflow/documents',async(req,res,next)=>{try{if(req.method!=='POST'||trim(req.body?.document_kind)!=='sales_return'||Number(req.body?.source_item_id||0)||!trim(req.body?.source_document_no))return next();const db=String(req.body.source_database||req.get('X-Source-Database')||'SH').toUpperCase(),documentNo=trim(req.body.source_document_no),customer=trim(req.body.customer_code),item=trim(req.body.item_code);const[[source]]=await pool.query(`SELECT i.id source_item_id,i.document_id,d.customer_code,d.status,d.document_kind FROM sales_document_items i JOIN sales_documents d ON d.id=i.document_id WHERE d.source_database=? AND d.document_kind='shipment' AND d.document_no=? AND d.customer_code=? AND i.item_code=? LIMIT 1`,[db,documentNo,customer,item]);if(!source)throw badRequest('找不到指定的原銷貨單，請確認公司別、客戶與品號');req.body={...req.body,source_item_id:source.source_item_id,source_document_id:source.document_id};next();}catch(e){next(e);}});
   app.post('/api/sales-workflow/documents',async(req,res,next)=>{
     try{
       await ensureTargetSalesPricingSchema();
+      await ensureTargetSalesForecastSchema();
        const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),c=await ensure(db),kind=trim(b.document_kind),date=validDate(b.document_date),type=trim(b.document_type);
        await syncCanonicalMaster(db, 'currencies');
        const [[dt]]=await pool.query(`SELECT * FROM sales_document_types
@@ -4324,18 +4327,21 @@ function registerSalesWorkflowRoutes(app){
         assertConfiguredSource(dt,source?.document_kind,Boolean(source),'銷售單據');
         const no=trim(b.document_no)||await nextConfiguredDocumentNumber(conn,'sales_documents','document_no',dt,date),inventory=['shipment','sales_return'].includes(kind)?'pending':'not_applicable',status=documentTypeNeedsApproval(dt)?'draft':'approved';
         const document={document_kind:kind,document_type:type,document_no:no,document_date:date,customer_code:customerCode,currency_code:trim(b.currency_code)||source?.currency_code||null};
-        const price=await resolveSalesDocumentPrice(conn,c,document,{item_code:itemCode,item_name:trim(b.item_name)||source?.item_name,specification:trim(b.specification)||source?.specification,unit:trim(b.unit)||source?.unit||'PCS',quantity:qty,unit_price:b.unit_price},source);
-        const [h]=await conn.query(`INSERT INTO sales_documents(tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,customer_code,currency_code,warehouse_code,salesperson_code,source_document_id,return_type,status,inventory_status,note,created_by,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,db,kind,type,no,date,customerCode,price.currencyCode,trim(b.warehouse_code)||source?.warehouse_code,trim(b.salesperson_code),source?.document_id||Number(b.source_document_id||0)||null,returnType,status,inventory,trim(b.note),req.auth.id,documentTypeNeedsApproval(dt)?null:req.auth.id,documentTypeNeedsApproval(dt)?null:new Date()]);
+         const price=await resolveSalesDocumentPrice(conn,c,document,{item_code:itemCode,item_name:trim(b.item_name)||source?.item_name,specification:trim(b.specification)||source?.specification,unit:trim(b.unit)||source?.unit||'PCS',quantity:qty,unit_price:b.unit_price},source);
+         const forecastLink=kind==='sales_order'?await resolveSalesForecastOrderLink(conn,c,{forecast_item_id:b.forecast_item_id,forecast_no:b.forecast_no,document_date:date,customer_code:customerCode,item_code:itemCode,warehouse_code:trim(b.warehouse_code)||source?.warehouse_code,quantity:qty}):null;
+         const warehouseCode=forecastLink?.warehouse_code||trim(b.warehouse_code)||source?.warehouse_code||null;
+         const [h]=await conn.query(`INSERT INTO sales_documents(tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,customer_code,currency_code,warehouse_code,salesperson_code,source_document_id,return_type,status,inventory_status,note,created_by,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,db,kind,type,no,date,customerCode,price.currencyCode,warehouseCode,trim(b.salesperson_code),source?.document_id||Number(b.source_document_id||0)||null,returnType,status,inventory,trim(b.note),req.auth.id,documentTypeNeedsApproval(dt)?null:req.auth.id,documentTypeNeedsApproval(dt)?null:new Date()]);
         const [i]=await conn.query(`INSERT INTO sales_document_items(
-          document_id,line_no,source_item_id,item_code,item_name,specification,unit,warehouse_code,
+           document_id,line_no,source_item_id,forecast_item_id,forecast_no,item_code,item_name,specification,unit,warehouse_code,
           quantity,unit_price,unit_cost,expected_date,allowance_amount,
           price_source_kind,price_source_id,price_source_no,price_source_date,price_rule_id,price_tier_id,note)
-          VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[h.insertId,sourceItemId,price.itemCode,trim(b.item_name)||source?.item_name,trim(b.specification)||source?.specification,price.pricingUnit,trim(b.warehouse_code)||source?.warehouse_code,qty,price.unitPrice,Number(b.unit_cost??source?.unit_cost??0),nullableDate(b.expected_date),allowance,price.price_source_kind,price.price_source_id,price.price_source_no,price.price_source_date,price.price_rule_id,price.price_tier_id,trim(b.item_note)]);
+           VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[h.insertId,sourceItemId,forecastLink?.forecast_item_id||Number(b.forecast_item_id||0)||null,forecastLink?.forecast_no||trim(b.forecast_no)||null,price.itemCode,trim(b.item_name)||source?.item_name,trim(b.specification)||source?.specification,price.pricingUnit,warehouseCode,qty,price.unitPrice,Number(b.unit_cost??source?.unit_cost??0),nullableDate(b.expected_date),allowance,price.price_source_kind,price.price_source_id,price.price_source_no,price.price_source_date,price.price_rule_id,price.price_tier_id,trim(b.item_note)]);
         let priceUpdate=null;
         if(status==='approved'&&Number(dt.update_customer_price)) {
           priceUpdate=await upsertSalesPriceFromDocument(conn,c,{...document,id:h.insertId,currency_code:price.currencyCode},{...price,unit:price.pricingUnit,item_code:price.itemCode,unit_price:price.unitPrice},req.auth.id);
         }
-        return{id:h.insertId,item_id:i.insertId,document_no:no,status,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
+         if(status==='approved'&&forecastLink) await refreshSalesForecastMetrics(conn,c,forecastLink.forecast_id);
+         return{id:h.insertId,item_id:i.insertId,document_no:no,status,forecast_item_id:forecastLink?.forecast_item_id||null,forecast_no:forecastLink?.forecast_no||null,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
       });
       res.status(201).json({ok:true,data:out});
     }catch(e){next(e);}
@@ -4343,6 +4349,7 @@ function registerSalesWorkflowRoutes(app){
   app.post('/api/sales-workflow/documents/:id/approve',async(req,res,next)=>{
     try{
       await ensureTargetSalesPricingSchema();
+      await ensureTargetSalesForecastSchema();
       const id=Number(req.params.id),sourceDatabase=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase();
        const c=ctx(sourceDatabase);
        await syncCanonicalMaster(sourceDatabase, 'currencies');
@@ -4358,17 +4365,26 @@ function registerSalesWorkflowRoutes(app){
           c.tenant_id,c.company_id,c.source_system,document.document_kind,document.document_type,sourceDatabase
         ]);
         if(!documentType)throw badRequest('找不到目前公司別啟用中的單據性質');
-        const [items]=await conn.query('SELECT * FROM sales_document_items WHERE document_id=? ORDER BY line_no FOR UPDATE',[id]);
-        if(!items.length)throw badRequest('單據沒有明細，無法核准');
-        await conn.query(`UPDATE sales_documents SET status='approved',approved_by=?,approved_at=NOW()
+         const [items]=await conn.query('SELECT * FROM sales_document_items WHERE document_id=? ORDER BY line_no FOR UPDATE',[id]);
+         if(!items.length)throw badRequest('單據沒有明細，無法核准');
+         const forecastIds=new Set();
+         if(document.document_kind==='sales_order') {
+           for(const item of items) {
+             if(!item.forecast_item_id&&!item.forecast_no) continue;
+             const link=await resolveSalesForecastOrderLink(conn,c,{forecast_item_id:item.forecast_item_id,forecast_no:item.forecast_no,document_id:id,document_date:document.document_date,customer_code:document.customer_code,item_code:item.item_code,warehouse_code:item.warehouse_code||document.warehouse_code,quantity:item.quantity});
+             if(link) forecastIds.add(Number(link.forecast_id));
+           }
+         }
+         await conn.query(`UPDATE sales_documents SET status='approved',approved_by=?,approved_at=NOW()
           WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`,[
           req.auth.id,id,c.tenant_id,c.company_id,c.source_system,sourceDatabase
         ]);
         const priceUpdates=[];
-        if(Number(documentType.update_customer_price)) {
-          for(const item of items) priceUpdates.push(await upsertSalesPriceFromDocument(conn,c,document,item,req.auth.id));
-        }
-        return {id,source_database:sourceDatabase,status:'approved',price_updates:priceUpdates};
+         if(Number(documentType.update_customer_price)) {
+           for(const item of items) priceUpdates.push(await upsertSalesPriceFromDocument(conn,c,document,item,req.auth.id));
+         }
+         for(const forecastId of forecastIds) await refreshSalesForecastMetrics(conn,c,forecastId);
+         return {id,source_database:sourceDatabase,status:'approved',price_updates:priceUpdates};
       });
       res.json({ok:true,data:out});
     }catch(e){next(e);}
@@ -4387,12 +4403,14 @@ function registerSalesWorkflowRoutes(app){
       req.body={...b,source_database:db,document_kind:target,document_type:documentType,document_date:b.document_date,
         customer_code:s.customer_code,source_item_id:id,item_code:s.item_code,item_name:s.item_name,unit:s.unit,
         currency_code:trim(b.currency_code)||s.currency_code,warehouse_code:b.warehouse_code||s.warehouse_code,
-        quantity:b.quantity||Number(s.quantity)-Number(s.related_quantity),unit_price:String(b.unit_price??'').trim()};
+        quantity:b.quantity||Number(s.quantity)-Number(s.related_quantity),unit_price:String(b.unit_price??'').trim(),
+        forecast_item_id:b.forecast_item_id||s.forecast_item_id||null,forecast_no:b.forecast_no||s.forecast_no||null};
       next();
     } catch(e){next(e);}
   }, async (req,res,next) => {
     try {
        await ensureTargetSalesPricingSchema();
+       await ensureTargetSalesForecastSchema();
        const b=req.body,db=sourceDbFromRequest(req),c=await ensure(db),date=validDate(b.document_date),kind=b.document_kind;
        await syncCanonicalMaster(db, 'currencies');
       const [[dt]]=await pool.query(`SELECT * FROM sales_document_types
@@ -4411,26 +4429,29 @@ function registerSalesWorkflowRoutes(app){
         const no=await nextConfiguredDocumentNumber(conn,'sales_documents','document_no',dt,date),status=documentTypeNeedsApproval(dt)?'draft':'approved';
         const document={document_kind:kind,document_type:b.document_type,document_no:no,document_date:date,customer_code:s.customer_code,currency_code:b.currency_code||s.currency_code};
         const price=await resolveSalesDocumentPrice(conn,c,document,{item_code:s.item_code,item_name:s.item_name,specification:s.specification,unit:s.unit,quantity:qty,unit_price:b.unit_price},s);
+        const forecastLink=kind==='sales_order'?await resolveSalesForecastOrderLink(conn,c,{forecast_item_id:b.forecast_item_id,forecast_no:b.forecast_no,document_date:date,customer_code:s.customer_code,item_code:s.item_code,warehouse_code:b.warehouse_code||s.warehouse_code,quantity:qty}):null;
+        const warehouseCode=forecastLink?.warehouse_code||b.warehouse_code||s.warehouse_code||null;
         const [h]=await conn.query(`INSERT INTO sales_documents(
           tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,
           customer_code,currency_code,warehouse_code,status,inventory_status,created_by,approved_by,approved_at)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
           c.tenant_id,c.company_id,c.source_system,db,kind,b.document_type,no,date,s.customer_code,price.currencyCode,
-          b.warehouse_code||s.warehouse_code,status,kind==='shipment'?'pending':'not_applicable',req.auth.id,
+          warehouseCode,status,kind==='shipment'?'pending':'not_applicable',req.auth.id,
           documentTypeNeedsApproval(dt)?null:req.auth.id,documentTypeNeedsApproval(dt)?null:new Date()
         ]);
         const [i]=await conn.query(`INSERT INTO sales_document_items(
-          document_id,line_no,source_item_id,item_code,item_name,specification,unit,warehouse_code,quantity,unit_price,
-          unit_cost,expected_date,price_source_kind,price_source_id,price_source_no,price_source_date,price_rule_id,price_tier_id)
-          VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
-          h.insertId,b.source_item_id,price.itemCode,s.item_name,s.specification,price.pricingUnit,b.warehouse_code||s.warehouse_code,
+           document_id,line_no,source_item_id,forecast_item_id,forecast_no,item_code,item_name,specification,unit,warehouse_code,quantity,unit_price,
+           unit_cost,expected_date,price_source_kind,price_source_id,price_source_no,price_source_date,price_rule_id,price_tier_id)
+           VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
+           h.insertId,b.source_item_id,forecastLink?.forecast_item_id||s.forecast_item_id||null,forecastLink?.forecast_no||s.forecast_no||null,price.itemCode,s.item_name,s.specification,price.pricingUnit,warehouseCode,
           qty,price.unitPrice,Number(b.unit_cost??s.unit_cost??0),nullableDate(b.expected_date),price.price_source_kind,
           price.price_source_id,price.price_source_no,price.price_source_date,price.price_rule_id,price.price_tier_id
         ]);
         await conn.query('UPDATE sales_document_items SET related_quantity=related_quantity+? WHERE id=?',[qty,b.source_item_id]);
         let priceUpdate=null;
         if(status==='approved'&&Number(dt.update_customer_price)) priceUpdate=await upsertSalesPriceFromDocument(conn,c,{...document,id:h.insertId},{...price,unit:price.pricingUnit},req.auth.id);
-        return{id:h.insertId,item_id:i.insertId,document_no:no,status,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
+         if(status==='approved'&&forecastLink) await refreshSalesForecastMetrics(conn,c,forecastLink.forecast_id);
+         return{id:h.insertId,item_id:i.insertId,document_no:no,status,forecast_item_id:forecastLink?.forecast_item_id||null,forecast_no:forecastLink?.forecast_no||null,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
       });
       res.status(201).json({ok:true,data:out});
     }catch(e){next(e);}
@@ -4514,6 +4535,7 @@ function registerSalesWorkflowRoutes(app){
   app.post('/api/sales-workflow/create',async(req,res,next)=>{
     try{
       await ensureTargetSalesPricingSchema();
+      await ensureTargetSalesForecastSchema();
        const b=req.body||{},db=sourceDbFromRequest(req),c=await ensure(db),date=validDate(b.document_date),kind=trim(b.document_kind),customerCode=trim(b.customer_code),itemCode=trim(b.item_code);
        await syncCanonicalMaster(db, 'currencies');
       const [[dt]]=await pool.query(`SELECT * FROM sales_document_types
@@ -4527,26 +4549,29 @@ function registerSalesWorkflowRoutes(app){
       const out=await tx(async conn=>{
         const no=trim(b.document_no)||await nextConfiguredDocumentNumber(conn,'sales_documents','document_no',dt,date),inv=['shipment','sales_return'].includes(kind)?'pending':'not_applicable',status=documentTypeNeedsApproval(dt)?'draft':'approved';
         const document={document_kind:kind,document_type:dt.type_code,document_no:no,document_date:date,customer_code:customerCode,currency_code:trim(b.currency_code)||null};
-        const price=await resolveSalesDocumentPrice(conn,c,document,{item_code:itemCode,item_name:trim(b.item_name),specification:trim(b.specification),unit:trim(b.unit)||'PCS',quantity:qty,unit_price:b.unit_price});
-        const [h]=await conn.query(`INSERT INTO sales_documents(
+         const price=await resolveSalesDocumentPrice(conn,c,document,{item_code:itemCode,item_name:trim(b.item_name),specification:trim(b.specification),unit:trim(b.unit)||'PCS',quantity:qty,unit_price:b.unit_price});
+         const forecastLink=kind==='sales_order'?await resolveSalesForecastOrderLink(conn,c,{forecast_item_id:b.forecast_item_id,forecast_no:b.forecast_no,document_date:date,customer_code:customerCode,item_code:itemCode,warehouse_code:trim(b.warehouse_code),quantity:qty}):null;
+         const warehouseCode=forecastLink?.warehouse_code||trim(b.warehouse_code)||null;
+         const [h]=await conn.query(`INSERT INTO sales_documents(
           tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,
           customer_code,currency_code,warehouse_code,return_type,status,inventory_status,note,created_by,approved_by,approved_at)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
-          c.tenant_id,c.company_id,c.source_system,db,kind,dt.type_code,no,date,customerCode,price.currencyCode,trim(b.warehouse_code),
+          c.tenant_id,c.company_id,c.source_system,db,kind,dt.type_code,no,date,customerCode,price.currencyCode,warehouseCode,
           kind==='sales_return'?(trim(b.return_type)||'return'):null,status,inv,trim(b.note),req.auth.id,
           documentTypeNeedsApproval(dt)?null:req.auth.id,documentTypeNeedsApproval(dt)?null:new Date()
         ]);
         const [i]=await conn.query(`INSERT INTO sales_document_items(
-          document_id,line_no,item_code,item_name,specification,unit,warehouse_code,quantity,unit_price,unit_cost,
-          expected_date,allowance_amount,price_source_kind,price_source_id,price_source_no,price_source_date,price_rule_id,price_tier_id)
-          VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
-          h.insertId,price.itemCode,trim(b.item_name),trim(b.specification),price.pricingUnit,trim(b.warehouse_code),qty,price.unitPrice,
+           document_id,line_no,forecast_item_id,forecast_no,item_code,item_name,specification,unit,warehouse_code,quantity,unit_price,unit_cost,
+           expected_date,allowance_amount,price_source_kind,price_source_id,price_source_no,price_source_date,price_rule_id,price_tier_id)
+           VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
+           h.insertId,forecastLink?.forecast_item_id||Number(b.forecast_item_id||0)||null,forecastLink?.forecast_no||trim(b.forecast_no)||null,price.itemCode,trim(b.item_name),trim(b.specification),price.pricingUnit,warehouseCode,qty,price.unitPrice,
           Number(b.unit_cost||0),nullableDate(b.expected_date),Number(b.allowance_amount||0),price.price_source_kind,price.price_source_id,
           price.price_source_no,price.price_source_date,price.price_rule_id,price.price_tier_id
         ]);
         let priceUpdate=null;
         if(status==='approved'&&Number(dt.update_customer_price)) priceUpdate=await upsertSalesPriceFromDocument(conn,c,{...document,id:h.insertId},{...price,unit:price.pricingUnit},req.auth.id);
-        return{id:h.insertId,item_id:i.insertId,document_no:no,status,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
+         if(status==='approved'&&forecastLink) await refreshSalesForecastMetrics(conn,c,forecastLink.forecast_id);
+         return{id:h.insertId,item_id:i.insertId,document_no:no,status,forecast_item_id:forecastLink?.forecast_item_id||null,forecast_no:forecastLink?.forecast_no||null,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
       });
       res.status(201).json({ok:true,data:out});
     }catch(e){next(e);}
