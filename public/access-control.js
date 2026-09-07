@@ -65,6 +65,16 @@ function canViewFeature(screen) {
       'operations-health','operations-reports','ar-notes','ap-notes'
     ].includes(row.feature_code) && Number(row.can_view));
   }
+  // 會計總帳水管圖是底稿、傳票、期間與報表的導覽頁；具備任一會計、財務或報表
+  // 查詢權限即可看到，進入節點後仍依目標 SHEET 的權限再次攔截。
+  if (screen === 'ledger-pipe') {
+    return accessState.permissions.some(row => [
+      'finance-workflow','finance-bookkeeping','accounting-drafts',
+      'accounting-general-ledger','accounting-periods','accounting-year-close',
+      'accounting-opening-balances','accounting-auto-rules',
+      'operations-health','operations-reports'
+    ].includes(row.feature_code) && Number(row.can_view));
+  }
   const code = featureAliases[screen] || screen;
   return accessState.permissions.some(row => row.feature_code === code && Number(row.can_view));
 }
