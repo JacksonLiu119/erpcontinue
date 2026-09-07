@@ -1099,8 +1099,8 @@ export function ensureProcurementSchema() {
         REQUESTER: ['basicdata', 'requisition-entry', 'architecture-flow'],
         PURCHASER: ['basicdata', 'procurement-document-types', 'requisition-entry', 'requisition-maintenance', 'purchase-order-entry', 'purchase-order-changes', 'receipt-arrival', 'receipt-posting', 'purchase-returns', 'receipt-rejected-return', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts', 'purchase-flow-audit', 'flow-audit-recommendations', 'operations-reports', 'architecture-flow'],
         WAREHOUSE: ['inventory-opening', 'inventory-document-types', 'inventory-transactions', 'inventory-transfers', 'inventory-temporary', 'inventory-stocktake', 'inventory-posting', 'inventory-reversals', 'inventory-new-ledger', 'inventory-new-balance', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'receipt-arrival', 'receipt-entry', 'receipt-inspection', 'receipt-rejected-return', 'receipt-posting', 'purchase-returns', 'purchase-progress', 'open-purchase-orders', 'purchase-receipts', 'operations-reports'],
-        FINANCE: ['basicdata', 'purchase-receipts', 'accounting-drafts', 'accounting-periods', 'accounting-auto-rules', 'accounting-general-ledger', 'accounting-financial-preview', 'accounting-clearing', 'accounting-opening-balances', 'accounting-year-close', 'bank-ledger', 'finance-bookkeeping', 'finance-cash', 'finance-reconcile', 'operations-health', 'operations-reports', 'sales-flow-audit', 'purchase-flow-audit', 'flow-audit-recommendations', 'architecture-flow'],
-        VIEWER: ['basicdata', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'purchase-receipts', 'operations-health', 'operations-reports', 'sales-flow-audit', 'purchase-flow-audit', 'flow-audit-recommendations', 'architecture-flow']
+        FINANCE: ['basicdata', 'purchase-receipts', 'accounting-drafts', 'accounting-periods', 'accounting-auto-rules', 'accounting-general-ledger', 'accounting-financial-preview', 'accounting-clearing', 'accounting-opening-balances', 'accounting-year-close', 'bank-ledger', 'finance-bookkeeping', 'finance-cash', 'finance-reconcile', 'operations-health', 'operations-reports', 'sales-flow-audit', 'sales-statistics', 'purchase-flow-audit', 'flow-audit-recommendations', 'architecture-flow'],
+        VIEWER: ['basicdata', 'inventory-detail', 'inventory-ledger', 'inventory-balance', 'purchase-receipts', 'operations-health', 'operations-reports', 'sales-flow-audit', 'sales-statistics', 'purchase-flow-audit', 'flow-audit-recommendations', 'architecture-flow']
       };
       for (const [roleCode, features] of Object.entries(initialRoleFeatures)) {
         const [[role]] = await pool.query('SELECT id FROM access_roles WHERE role_code=?', [roleCode]);
@@ -1118,6 +1118,15 @@ export function ensureProcurementSchema() {
           VALUES(?,'flow-audit-recommendations',1,1,1,0,?)
           ON DUPLICATE KEY UPDATE can_view=1,can_create=1,can_update=1,can_approve=VALUES(can_approve)`,
           [role.id, roleCode === 'FINANCE' ? 1 : 0]);
+      }
+      // 銷售統計是唯讀報表；既有財務／查詢角色也要能看到正式 COPR20，
+      // 但不授予任何建立、修改、刪除或核准權限。
+      for (const roleCode of ['FINANCE', 'VIEWER']) {
+        const [[role]] = await pool.query('SELECT id FROM access_roles WHERE role_code=?', [roleCode]);
+        if (role) await pool.query(`INSERT INTO access_role_permissions
+          (role_id,feature_code,can_view,can_create,can_update,can_delete,can_approve)
+          VALUES(?,'sales-statistics',1,0,0,0,0)
+          ON DUPLICATE KEY UPDATE can_view=1`, [role.id]);
       }
       const elevatedRoleFeatures = {
         PURCHASER: ['procurement-document-types', 'requisition-maintenance', 'purchase-order-changes', 'purchase-returns', 'receipt-rejected-return'],

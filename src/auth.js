@@ -177,6 +177,7 @@ const routeCapability = [
   [/^\/sales-workflow\/order-changes/, 'sales-order-changes'],
   [/^\/sales-workflow\/orders-for-reopen/, 'sales-order-changes'],
   [/^\/sales-workflow\/orders\/\d+\/reopen/, 'sales-order-changes'],
+  [/^\/sales-workflow\/statistics(?:\/|$)/, 'sales-statistics'],
   [/^\/sales-workflow\/progress/, 'sales-progress'],
   [/^\/sales-workflow\/documents/, 'sales-orders'], [/^\/sales-workflow\/items/, 'sales-orders'],
   [/^\/finance-workflow\/banks\/reconciliations(?:\/|$)/, 'finance-reconcile'],
@@ -252,8 +253,8 @@ export async function authorizationMiddleware(req, _res, next) {
       if (!permission || !Number(permission.allowed)) throw forbidden();
       return next();
     }
-    // 銷售統計／預測／分析占位頁共用訂單進度資料；具備其中一項查詢權限即可讀取。
-    if (req.method === 'GET' && req.path === '/sales-workflow/progress') {
+    // 銷售統計正式報表與接單／跟催畫面共用訂單查詢權限；具備其中一項查詢權限即可讀取。
+    if (req.method === 'GET' && (req.path === '/sales-workflow/progress' || req.path === '/sales-workflow/statistics')) {
       const [[permission]] = await pool.query("SELECT MAX(can_view) AS allowed FROM access_role_permissions WHERE role_id=? AND feature_code IN ('sales-progress','sales-open-orders','sales-statistics','sales-forecast','sales-analysis')", [req.auth.role_id]);
       if (!permission || !Number(permission.allowed)) throw forbidden();
       return next();

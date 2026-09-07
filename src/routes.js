@@ -4514,6 +4514,89 @@ function registerSalesWorkflowRoutes(app){
       res.json({ok:true,data:{id,status:'posted',order_results:orderResults}});
     }catch(e){next(e);}
   });
+  app.get('/api/sales-workflow/statistics',async(req,res,next)=>{
+    try{
+      await ensureTargetSalesWorkflowSchema();
+      const db=sourceDbFromRequest(req),context=ctx(db);
+      const groupBy=trim(req.query.group_by||'customer_item').toLowerCase();
+      const groupDefinitions={
+        customer:{label:'依客戶',select:['d.customer_code AS customer_code','NULL AS item_code','NULL AS item_name','NULL AS salesperson_code','NULL AS period_code','NULL AS document_type','NULL AS document_no','NULL AS document_date'],group:['d.customer_code'],order:['d.customer_code']},
+        item:{label:'依品號',select:['NULL AS customer_code','i.item_code AS item_code','i.item_name AS item_name','NULL AS salesperson_code','NULL AS period_code','NULL AS document_type','NULL AS document_no','NULL AS document_date'],group:['i.item_code','i.item_name'],order:['i.item_code']},
+        salesperson:{label:'依業務員',select:['NULL AS customer_code','NULL AS item_code','NULL AS item_name','d.salesperson_code AS salesperson_code','NULL AS period_code','NULL AS document_type','NULL AS document_no','NULL AS document_date'],group:['d.salesperson_code'],order:['d.salesperson_code']},
+        period:{label:'依期間（月）',select:["DATE_FORMAT(d.document_date,'%Y-%m') AS period_code",'NULL AS customer_code','NULL AS item_code','NULL AS item_name','NULL AS salesperson_code','NULL AS document_type','NULL AS document_no','NULL AS document_date'],group:["DATE_FORMAT(d.document_date,'%Y-%m')"],order:["DATE_FORMAT(d.document_date,'%Y-%m')"]},
+        customer_item:{label:'依客戶／品號',select:['d.customer_code AS customer_code','i.item_code AS item_code','i.item_name AS item_name','NULL AS salesperson_code','NULL AS period_code','NULL AS document_type','NULL AS document_no','NULL AS document_date'],group:['d.customer_code','i.item_code','i.item_name'],order:['d.customer_code','i.item_code']},
+        customer_salesperson:{label:'依客戶／業務員',select:['d.customer_code AS customer_code','NULL AS item_code','NULL AS item_name','d.salesperson_code AS salesperson_code','NULL AS period_code','NULL AS document_type','NULL AS document_no','NULL AS document_date'],group:['d.customer_code','d.salesperson_code'],order:['d.customer_code','d.salesperson_code']},
+        item_salesperson:{label:'依品號／業務員',select:['NULL AS customer_code','i.item_code AS item_code','i.item_name AS item_name','d.salesperson_code AS salesperson_code','NULL AS period_code','NULL AS document_type','NULL AS document_no','NULL AS document_date'],group:['i.item_code','i.item_name','d.salesperson_code'],order:['i.item_code','d.salesperson_code']},
+        period_customer:{label:'依期間／客戶',select:["DATE_FORMAT(d.document_date,'%Y-%m') AS period_code",'d.customer_code AS customer_code','NULL AS item_code','NULL AS item_name','NULL AS salesperson_code','NULL AS document_type','NULL AS document_no','NULL AS document_date'],group:["DATE_FORMAT(d.document_date,'%Y-%m')",'d.customer_code'],order:["DATE_FORMAT(d.document_date,'%Y-%m')",'d.customer_code']},
+        period_item:{label:'依期間／品號',select:["DATE_FORMAT(d.document_date,'%Y-%m') AS period_code",'NULL AS customer_code','i.item_code AS item_code','i.item_name AS item_name','NULL AS salesperson_code','NULL AS document_type','NULL AS document_no','NULL AS document_date'],group:["DATE_FORMAT(d.document_date,'%Y-%m')",'i.item_code','i.item_name'],order:["DATE_FORMAT(d.document_date,'%Y-%m')",'i.item_code']},
+        period_salesperson:{label:'依期間／業務員',select:["DATE_FORMAT(d.document_date,'%Y-%m') AS period_code",'NULL AS customer_code','NULL AS item_code','NULL AS item_name','d.salesperson_code AS salesperson_code','NULL AS document_type','NULL AS document_no','NULL AS document_date'],group:["DATE_FORMAT(d.document_date,'%Y-%m')",'d.salesperson_code'],order:["DATE_FORMAT(d.document_date,'%Y-%m')",'d.salesperson_code']},
+        detail:{label:'明細（逐筆）',select:['d.customer_code AS customer_code','i.item_code AS item_code','i.item_name AS item_name','d.salesperson_code AS salesperson_code',"DATE_FORMAT(d.document_date,'%Y-%m') AS period_code",'d.document_type AS document_type','d.document_no AS document_no',"DATE_FORMAT(d.document_date,'%Y-%m-%d') AS document_date"],group:['d.id','i.id','d.customer_code','i.item_code','i.item_name','d.salesperson_code','d.document_date','d.document_type','d.document_no'],order:['d.document_date DESC','d.document_no','i.line_no']}
+      };
+      const definition=groupDefinitions[groupBy];
+      if(!definition)throw badRequest('不支援的銷售統計彙總方式');
+      const closure=trim(req.query.closure||'all').toLowerCase();
+      if(!['open','closed','all'].includes(closure))throw badRequest('不支援的銷售統計結案篩選');
+      const readDate=value=>{const text=trim(value);return text?validDate(text):null;};
+      const fromDate=readDate(req.query.from_date||req.query.date_from),toDate=readDate(req.query.to_date||req.query.date_to);
+      if(fromDate&&toDate&&fromDate>toDate)throw badRequest('銷售統計日期起日不可晚於迄日');
+      const limit=Math.min(Math.max(Number(req.query.limit)||2000,1),5000);
+      const where=['d.tenant_id=?','d.company_id=?','d.source_system=?','d.source_database=?',"d.document_kind='sales_order'"];
+      const params=[context.tenant_id,context.company_id,context.source_system,db];
+      if(closure==='open')where.push("d.status IN ('approved','partial')");
+      else if(closure==='closed')where.push("d.status IN ('completed','closed')");
+      else where.push("d.status NOT IN ('draft','voided')");
+      if(fromDate){where.push('d.document_date>=?');params.push(fromDate);}
+      if(toDate){where.push('d.document_date<=?');params.push(toDate);}
+      const addEqual=(value,expression)=>{const text=trim(value);if(text){where.push(`${expression}=?`);params.push(text);}};
+      const addRange=(from,to,expression)=>{const start=trim(from),end=trim(to);if(start){where.push(`${expression}>=?`);params.push(start);}if(end){where.push(`${expression}<=?`);params.push(end);}};
+      addEqual(req.query.document_type||req.query.order_type,'d.document_type');
+      addEqual(req.query.customer_code,'d.customer_code');
+      addRange(req.query.customer_from,req.query.customer_to,'d.customer_code');
+      addEqual(req.query.item_code,'i.item_code');
+      addRange(req.query.item_from,req.query.item_to,'i.item_code');
+      addEqual(req.query.salesperson_code,'d.salesperson_code');
+      addRange(req.query.salesperson_from,req.query.salesperson_to,'d.salesperson_code');
+      addEqual(req.query.warehouse_code,'COALESCE(i.warehouse_code,d.warehouse_code)');
+      const quantityExpr='GREATEST(COALESCE(i.quantity,0),0)';
+      const deliveredExpr=`LEAST(GREATEST(COALESCE(i.related_quantity,0),0),${quantityExpr})`;
+      const remainingExpr=`GREATEST(${quantityExpr}-${deliveredExpr},0)`;
+      const orderAmountExpr=`GREATEST((${quantityExpr}*COALESCE(i.unit_price,0))-COALESCE(i.allowance_amount,0),0)`;
+      const deliveredAmountExpr=`(${deliveredExpr}*COALESCE(i.unit_price,0))`;
+      const remainingAmountExpr=`GREATEST(${orderAmountExpr}-${deliveredAmountExpr},0)`;
+      const metrics=[
+        'COUNT(DISTINCT d.id) AS document_count','COUNT(*) AS line_count',
+        `SUM(${quantityExpr}) AS order_quantity`,
+        `SUM(${deliveredExpr}) AS delivered_quantity`,
+        `SUM(${remainingExpr}) AS remaining_quantity`,
+        `SUM(${orderAmountExpr}) AS order_amount`,
+        `SUM(${deliveredAmountExpr}) AS delivered_amount`,
+        `SUM(${remainingAmountExpr}) AS remaining_amount`,
+        `SUM(CASE WHEN ${remainingExpr}>${EPS} OR d.status IN ('approved','partial') THEN 1 ELSE 0 END) AS open_line_count`,
+        `SUM(CASE WHEN ${remainingExpr}<=${EPS} AND d.status IN ('completed','closed') THEN 1 ELSE 0 END) AS closed_line_count`,
+        "GROUP_CONCAT(DISTINCT d.status ORDER BY d.status SEPARATOR ',') AS status_codes",
+        `CASE WHEN SUM(CASE WHEN ${remainingExpr}>${EPS} OR d.status IN ('approved','partial') THEN 1 ELSE 0 END)>0 THEN 'open' ELSE 'closed' END AS progress_status`
+      ];
+      const fromSql='FROM sales_documents d JOIN sales_document_items i ON i.document_id=d.id';
+      const whereSql=`WHERE ${where.join(' AND ')}`;
+      const groupSql=[...definition.group,'d.currency_code'].join(',');
+      const orderSql=definition===groupDefinitions.detail?definition.order.join(','):['remaining_amount DESC',...definition.order,'d.currency_code'].join(',');
+      const [rows]=await pool.query(`SELECT ${definition.select.join(',')},d.currency_code AS currency_code,${metrics.join(',')} ${fromSql} ${whereSql} GROUP BY ${groupSql} ORDER BY ${orderSql} LIMIT ?`,[...params,limit]);
+      const [[summaryRow]]=await pool.query(`SELECT COUNT(DISTINCT d.id) AS document_count,COUNT(*) AS line_count,
+        COALESCE(SUM(${quantityExpr}),0) AS order_quantity,
+        COALESCE(SUM(${deliveredExpr}),0) AS delivered_quantity,
+        COALESCE(SUM(${remainingExpr}),0) AS remaining_quantity,
+        COALESCE(SUM(${orderAmountExpr}),0) AS order_amount,
+        COALESCE(SUM(${deliveredAmountExpr}),0) AS delivered_amount,
+        COALESCE(SUM(${remainingAmountExpr}),0) AS remaining_amount,
+        COALESCE(SUM(CASE WHEN ${remainingExpr}>${EPS} OR d.status IN ('approved','partial') THEN 1 ELSE 0 END),0) AS open_line_count,
+        COALESCE(SUM(CASE WHEN ${remainingExpr}<=${EPS} AND d.status IN ('completed','closed') THEN 1 ELSE 0 END),0) AS closed_line_count
+        ${fromSql} ${whereSql}` ,params);
+      const numericKeys=['document_count','line_count','order_quantity','delivered_quantity','remaining_quantity','order_amount','delivered_amount','remaining_amount','open_line_count','closed_line_count'];
+      const summary=Object.fromEntries(numericKeys.map(key=>[key,summaryRow?.[key]??0]));
+      const outputRows=rows.map(row=>({...row,group_by:groupBy,group_label:definition.label}));
+      res.json({ok:true,data:{report_code:'COPR20',report_name:'客戶接單／銷售統計彙總',source_database:db,company_id:context.company_id,target_database:sourceDatabases[db]?.target_database||null,from_date:fromDate,to_date:toDate,group_by:groupBy,group_label:definition.label,closure,limit,rows:outputRows,summary,excluded_statuses:['draft','voided'],reconciliation:'依目前公司別目標 ERP 的已核准／已完成訂單進度彙總；已交量沿用訂單明細已關聯量，草稿與作廢不列入；不同幣別分開彙總，接單／跟催仍可獨立查詢。'}});
+    }catch(e){next(e);}
+  });
   app.get('/api/sales-workflow/progress',async(req,res,next)=>{try{const db=String(req.query.source_database||'SH').toUpperCase(),limit=Math.min(Math.max(Number(req.query.limit)||10,1),100);const[rows]=await pool.query(`SELECT d.document_no,d.document_date,d.customer_code,d.status,i.item_code,i.item_name,i.quantity,i.related_quantity,i.quantity-i.related_quantity remaining_quantity,i.unit_price,(i.quantity-i.related_quantity)*i.unit_price remaining_amount,i.expected_date FROM sales_documents d JOIN sales_document_items i ON i.document_id=d.id WHERE d.source_database=? AND d.document_kind='sales_order' ORDER BY d.document_date DESC,d.id DESC LIMIT ?`,[db,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
   app.get('/api/sales-workflow/orders-for-reopen',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const db=String(req.query.source_database||'SH').toUpperCase(),limit=Math.min(Math.max(Number(req.query.limit)||100,1),500);const[rows]=await pool.query(`SELECT d.id order_id,d.document_no,d.document_date,d.customer_code,d.status order_status,
       i.id order_item_id,i.item_code,i.item_name,i.quantity,i.related_quantity,

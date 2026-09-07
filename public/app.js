@@ -34,7 +34,7 @@ const salesPipeNodes = {
   followup: { label:'接單統計／跟催報表', note:'含訂單進度與未交訂單查詢', status:'done', screen:'sales-progress' },
   shipment: { label:'銷貨單建立作業', note:'銷貨確認／過帳後才扣庫存', status:'done', screen:'sales-shipments' },
   return: { label:'銷退單建立作業', note:'驗收合格回庫；折讓不動庫存', status:'done', screen:'sales-returns' },
-  statistics: { label:'銷售統計彙總報表', note:'客戶／品號／歷史交易彙總', status:'partial', screen:'sales-statistics' },
+  statistics: { label:'銷售統計彙總報表', note:'COPR20 客戶／品號／業務員／期間彙總訂單量、已交量、未交量與金額', status:'done', screen:'sales-statistics' },
   analysis: { label:'銷售分析系統', note:'獨立分析維度與圖表尚待建立', status:'planned', screen:'sales-analysis' },
   inventory: { label:'庫存管理系統', note:'銷貨出庫與銷退回庫的中央控制', status:'done', screen:'inventory-new-ledger' },
   receivable: { label:'帳款管理系統', note:'應收立帳、收款與總帳聯動', status:'done', screen:'finance-flow' }
@@ -649,21 +649,23 @@ function renderSalesPipe(){
 }
 function renderSalesStatistics(){
   const start='2000-01-01',end=procurementToday();
-  salesShell('銷售統計彙總報表','<div class="desc">依文件中的客戶／品號／歷史交易彙總方向，先使用目前已驗證的訂單進度資料產生可核對的統計。此報表不新增資料表；正式銷售分析維度與更多報表列入下一階段。</div><form id="salesStatisticsFilter" class="form"><div class="row c3"><div class="field"><label>日期起日</label><input name="from_date" type="date" value="'+start+'"></div><div class="field"><label>日期迄日</label><input name="to_date" type="date" value="'+end+'"></div><div class="field"><label>彙總方式</label><select name="group_by"><option value="customer">依客戶</option><option value="item">依品號</option></select></div></div><button class="btn primary" type="submit">查詢銷售統計</button></form>'+panelTable('銷售統計彙總',['彙總類別','明細','訂單張數','訂單量','已交量','未交量','訂單金額','未交金額','狀態'],'salesStatisticsRows','salesStatisticsReload'));
-  const form=$('#salesStatisticsFilter'),load=async()=>{
-    try{
-      const from=form.elements.from_date.value,to=form.elements.to_date.value,group=form.elements.group_by.value;
-      const rows=await api('/api/sales-workflow/progress?source_database='+encodeURIComponent(currentDatabase)+'&limit=100');
-      const grouped=new Map();
-      (rows||[]).filter(row=>{const date=String(row.document_date||'').slice(0,10);return(!from||date>=from)&&(!to||date<=to);}).forEach(row=>{
-        const key=group==='item'?String(row.item_code||'未指定品號'):String(row.customer_code||'未指定客戶');
-        const current=grouped.get(key)||{key,detail:group==='item'?String(row.item_name||''):String(row.item_code||''),orders:0,ordered:0,delivered:0,remaining:0,orderedAmount:0,remainingAmount:0};
-        const quantity=Number(row.quantity||0),delivered=Number(row.related_quantity||0),unitPrice=Number(row.unit_price||0);
-        current.orders+=1;current.ordered+=quantity;current.delivered+=delivered;current.remaining+=Number(row.remaining_quantity||0);current.orderedAmount+=quantity*unitPrice;current.remainingAmount+=Number(row.remaining_amount||0);grouped.set(key,current);
-      });
-      $('#salesStatisticsRows').innerHTML=[...grouped.values()].sort((a,b)=>b.remainingAmount-a.remainingAmount||String(a.key).localeCompare(String(b.key))).map(row=>'<tr><td>'+esc(group==='item'?'品號':'客戶')+'</td><td><strong>'+esc(row.key)+'</strong><br><small>'+esc(row.detail)+'</small></td><td>'+flowAuditNumber(row.orders)+'</td><td>'+flowAuditNumber(row.ordered)+'</td><td>'+flowAuditNumber(row.delivered)+'</td><td>'+flowAuditNumber(row.remaining)+'</td><td>'+flowAuditNumber(row.orderedAmount)+'</td><td>'+flowAuditNumber(row.remainingAmount)+'</td><td>'+esc(row.remaining>0.000001?'未完成／待跟催':'已完成')+'</td></tr>').join('')||'<tr><td colspan="9" class="empty-hint">查無符合日期的銷售資料</td></tr>';
-    }catch(error){toast(error.message,true);}
-  };
+  const groups=[
+    ['customer','依客戶'],['item','依品號'],['salesperson','依業務員'],['period','依期間（月）'],
+    ['customer_item','依客戶／品號'],['customer_salesperson','依客戶／業務員'],['item_salesperson','依品號／業務員'],
+    ['period_customer','依期間／客戶'],['period_item','依期間／品號'],['period_salesperson','依期間／業務員'],['detail','明細（逐筆）']
+  ];
+  const groupOptions=groups.map(item=>'<option value="'+item[0]+'"'+(item[0]==='customer_item'?' selected':'')+'>'+item[1]+'</option>').join('');
+  const body='<div class="sales-reference-card done"><div class="sales-reference-status">已完成</div><h3>COPR20 客戶接單／銷售統計彙總</h3><p>已依《iSM-訂單管理系統》客戶接單統計表的規則，從目前公司別目標 ERP 直接彙總訂單量、已交量、未交量與金額。正式報表支援客戶、品號、業務員、月份及交叉維度；已交量沿用訂單明細已關聯量，草稿與作廢訂單不列入。</p><div class="sales-reference-grid"><div><strong>資料隔離</strong><br>公司別與來源由登入工作階段固定；"+esc(currentDatabase)+" 原始資料只讀，查詢寫入的目標資料庫為 "+esc(targetDatabaseLabel())+"。</div><div><strong>金額與結案</strong><br>不同幣別分開列示；可依未結案／已結案／全部篩選，摘要不受畫面明細上限影響。</div></div></div><form id="salesStatisticsFilter" class="form"><div class="row c4">'+field('from_date','日期起日','date','value="'+start+'"')+field('to_date','日期迄日','date','value="'+end+'"')+selectField('group_by','統計維度',groupOptions)+selectField('closure','結案狀態','<option value="all" selected>全部（不含草稿／作廢）</option><option value="open">未結案</option><option value="closed">已結案</option>')+'</div><div class="row c4">'+field('document_type','訂單單別')+field('customer_from','客戶起')+field('customer_to','客戶迄')+field('warehouse_code','庫別')+'</div><div class="row c4">'+field('item_from','品號起')+field('item_to','品號迄')+field('salesperson_from','業務員起')+field('salesperson_to','業務員迄')+'</div><button class="btn primary" type="submit">查詢 COPR20 銷售統計</button></form><div class="report-meta" id="salesStatisticsMeta"><span>報表載入中…</span></div><div id="salesStatisticsSummary"></div><div class="panel"><div class="panel-head"><span>COPR20 銷售統計彙總明細</span><button class="btn small" type="button" id="salesStatisticsReload">重新整理</button></div><div class="panel-body"><div class="table-wrap"><table class="grid sales-statistics-grid"><thead><tr><th>彙總維度</th><th>期間</th><th>客戶</th><th>品號</th><th>業務員</th><th>幣別</th><th>單據／日期</th><th>訂單張數</th><th>明細數</th><th>訂單量</th><th>已交量</th><th>未交量</th><th>訂單金額</th><th>已交金額</th><th>未交金額</th><th>狀態</th></tr></thead><tbody id="salesStatisticsRows"><tr><td colspan="16" class="empty-hint">載入中…</td></tr></tbody></table></div></div></div>';
+  salesShell('銷售統計彙總報表',body);
+  $('#canvas .screen')?.classList.add('sales-statistics-screen');
+  const form=$('#salesStatisticsFilter'),summaryElement=$('#salesStatisticsSummary'),metaElement=$('#salesStatisticsMeta'),rowsElement=$('#salesStatisticsRows');
+  const number=value=>{const n=Number(value||0);return Number.isFinite(n)?n.toLocaleString('zh-TW',{maximumFractionDigits:6}):'0';};
+  const text=value=>value===null||value===undefined||value===''?'—':esc(value);
+  const summaryCard=(label,value)=>'<div class="report-summary-card"><span>'+label+'</span><strong>'+number(value)+'</strong></div>';
+  const queryFromForm=()=>{const values=Object.fromEntries(new FormData(form)),query=new URLSearchParams({source_database:currentDatabase,limit:'2000'});['from_date','to_date','group_by','closure','document_type','customer_from','customer_to','item_from','item_to','salesperson_from','salesperson_to','warehouse_code'].forEach(key=>query.set(key,values[key]||''));return query;};
+  const status=row=>{const pill=row.progress_status==='open'?'<span class="pill warn">未結案</span>':'<span class="pill ok">已結案</span>';return pill+(row.status_codes?'<br><small>'+esc(row.status_codes)+'</small>':'');};
+  const rowHtml=(row,result)=>{const item=row.item_code?text(row.item_code)+(row.item_name?'<br><small>'+text(row.item_name)+'</small>':''):'—';const document=row.document_no?text((row.document_type?row.document_type+'｜':'')+row.document_no)+(row.document_date?'<br><small>'+text(row.document_date)+'</small>':''):'—';return '<tr><td>'+text(row.group_label||result.group_label)+'</td><td>'+text(row.period_code)+'</td><td>'+text(row.customer_code)+'</td><td>'+item+'</td><td>'+text(row.salesperson_code)+'</td><td>'+text(row.currency_code)+'</td><td>'+document+'</td><td class="num">'+number(row.document_count)+'</td><td class="num">'+number(row.line_count)+'</td><td class="num">'+number(row.order_quantity)+'</td><td class="num">'+number(row.delivered_quantity)+'</td><td class="num"><strong>'+number(row.remaining_quantity)+'</strong></td><td class="num">'+number(row.order_amount)+'</td><td class="num">'+number(row.delivered_amount)+'</td><td class="num">'+number(row.remaining_amount)+'</td><td>'+status(row)+'</td></tr>';};
+  const load=async()=>{try{const result=await api('/api/sales-workflow/statistics?'+queryFromForm().toString()),summary=result.summary||{},rows=result.rows||[];summaryElement.innerHTML='<div class="report-summary-grid">'+summaryCard('訂單張數',summary.document_count)+summaryCard('明細數',summary.line_count)+summaryCard('訂單量',summary.order_quantity)+summaryCard('已交量',summary.delivered_quantity)+summaryCard('未交量',summary.remaining_quantity)+summaryCard('訂單金額',summary.order_amount)+summaryCard('已交金額',summary.delivered_amount)+summaryCard('未交金額',summary.remaining_amount)+'</div>';metaElement.innerHTML='<span>報表：'+esc(result.report_code||'COPR20')+'／'+esc(result.report_name||'客戶接單／銷售統計彙總')+'</span><span>公司別／來源：'+esc(result.company_id||currentDatabase)+'／'+esc(result.source_database||currentDatabase)+'</span><span>目標資料庫：'+esc(result.target_database||targetDatabaseLabel())+'</span><span>期間：'+text(result.from_date)+'～'+text(result.to_date)+'</span><span>維度：'+esc(result.group_label||'—')+'</span><span>顯示 '+number(rows.length)+' 組；摘要為完整範圍</span>';rowsElement.innerHTML=rows.map(row=>rowHtml(row,result)).join('')||'<tr><td colspan="16" class="empty-hint">查無符合日期、公司別與篩選條件的銷售資料</td></tr>';}catch(error){summaryElement.innerHTML='';metaElement.innerHTML='<span>報表載入失敗：'+esc(error.message)+'</span>';rowsElement.innerHTML='<tr><td colspan="16" class="empty-hint">請確認目前公司別、日期與查詢權限</td></tr>';toast(error.message,true);}};
   form.onsubmit=event=>{event.preventDefault();load();};$('#salesStatisticsReload')?.addEventListener('click',load);load();
 }
 function renderSalesCustomerItems(){
@@ -748,7 +750,7 @@ function renderSalesReferenceScreen(screen){
     'sales-customer-items':{title:'客戶品號資料建立作業',code:'COP-ITEM',status:'done',summary:'已依 SH／SC 原始 COPMA、COPMB、INVMB 結構確認：COPMB.MB002 是 ERP 品號，原始資料沒有獨立外部客戶料號；經同意後已在目標 ERP 建立公司隔離的客戶品號主檔。',next:'正式維護已完成：可新增、修改、停用／重新啟用，檢核同公司客戶與品號、有效期間不可重疊，並保留事件與權限稽核；原始 COPMB 仍只讀。',link:'items',linkText:'前往品號主檔建立作業'},
     'sales-customer-pricing':{title:'客戶產品計價建立作業',code:'COP-PRICE',status:'done',summary:'已依 iSM COPI02／COPMB／COPMC 規則建立公司隔離的客戶產品計價主檔，支援價格、折扣、幣別、計價單位、含稅、分量計價、生效期間、交易條件、核准與事件稽核。',next:'已完成：報價／訂單會依目前登入公司的核准計價自動帶入，並保留計價規則、版本與來源；SH／SC 原始計價資料仍維持唯讀。',link:'sales-orders',linkText:'前往訂單建立作業（驗證帶價）'},
     'sales-forecast':{title:'銷售預測建立作業',code:'COP-FORECAST',status:'done',summary:'已依 iSM COPI04／COPI13 建立依品號／依類別的銷售預測版本、期間、明細與預測明細報表，並與接單／跟催資料分開核對。',next:'已完成：可建立草稿、維護既有明細、核准、手動／自動結案與受控重開；只有明確指定預測版本、明細與庫別的訂單才回寫已受訂量。',link:'sales-forecast',linkText:'重新整理銷售預測作業'},
-    'sales-analysis':{title:'銷售分析系統',code:'COP-ANALYSIS',status:'planned',summary:'文件將銷售統計／管理報表與銷售分析列為銷售管理的後續聯動。目前已提供可核對的銷售統計彙總，尚未建立獨立分析維度與圖表。',next:'待補客戶、品號、部門、業務員、期間與毛利等分析維度；製造與成本暫不納入。',link:'sales-statistics',linkText:'前往銷售統計彙總報表'}
+    'sales-analysis':{title:'銷售分析系統',code:'COP-ANALYSIS',status:'planned',summary:'文件將銷售統計／管理報表與銷售分析列為銷售管理的後續聯動。COPR20 銷售統計彙總已完成；獨立分析維度與圖表仍待建立。',next:'待補客戶、品號、部門、業務員、期間及毛利等分析維度，並與庫存及應收資料建立可追溯的分析來源；製造與成本暫不納入。',link:'sales-statistics',linkText:'前往銷售統計彙總報表'}
   };
   const item=definitions[screen];if(!item)return;
   salesShell(item.title,'<div class="sales-reference-card '+item.status+'"><div class="sales-reference-status">'+esc(salesPipeStatusLabels[item.status]||item.status)+'</div><h3>'+esc(item.title)+'</h3><p>'+esc(item.summary)+'</p><div class="sales-reference-grid"><div><strong>目前狀態</strong><br>'+esc(item.status==='partial'?'已有相關主檔或欄位，尚缺完整獨立作業。':'目前僅保留流程位置，尚未形成正式資料作業。')+'</div><div><strong>下一步</strong><br>'+esc(item.next)+'</div></div><div class="desc">本頁不會自行建立資料表；完成規格確認後，才依原 ERP 文件與既有資料結構接續開發。</div><button class="btn primary" type="button" data-sales-screen="'+esc(item.link)+'">'+esc(item.linkText)+'</button></div>');
@@ -929,8 +931,7 @@ function renderAccountingDrafts(){
   $('#draftGenerateForm').onsubmit=async e=>{e.preventDefault();const selected=[...document.querySelectorAll('[data-draft-source]:checked')].map(x=>Number(x.value));if(!selected.length){toast('請至少選擇一筆來源帳款',true);return;}const form=e.currentTarget;try{const result=await api('/api/accounting/drafts/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_database:currentDatabase,source_refs:selected,draft_date:form.elements.draft_date.value,memo:form.elements.memo.value})});toast(`底稿 ${result.draft_no} 已產生並鎖定來源`);form.reset();form.elements.draft_date.value=procurementToday();await load();await openDetail(result.id);}catch(x){toast(x.message,true);}};$('#accountingDraftReload').onclick=load;load();
 }
 const confirmedNextPhaseRoadmap=[
-  ['N16','第一階段：銷售管理水管圖／SHEET排序與節點連結（總覽）','已完成銷售主流程圖與現有 SHEET 排序，節點可點選導向作業；客戶品號、客戶產品計價與銷售預測已完成，清單只保留統計與分析等尚未完成或部分完成節點。','partial'],
-  ['N16-4','銷售管理：銷售統計彙總報表','水管圖標示為部分完成；目前可依訂單進度資料按客戶／品號彙總訂單量、已交量、未交量與金額，仍待補齊文件中的客戶／品號／業務／期間等統計維度與正式報表。','partial'],
+  ['N16','第一階段：銷售管理水管圖／SHEET排序與節點連結（總覽）','已完成銷售主流程圖與現有 SHEET 排序，節點可點選導向作業；客戶品號、客戶產品計價、銷售預測與銷售統計彙總已完成，清單只保留銷售分析等尚未完成節點。','partial'],
   ['N16-5','銷售管理：銷售分析系統','水管圖標示為尚未完成；待補客戶、品號、部門、業務員、期間及後續分析維度，並與銷售統計、庫存及應收資料建立可追溯的分析來源；製造與成本暫不納入。','planned'],
   ['N17','採購管理水管圖／SHEET排序與節點連結','依 iSM 採購管理文件整理請購→採購→到貨→驗收→進貨→退貨→應付，並將每個節點連到對應 SHEET；現有採購流程先保留，水管圖尚未完成。','planned'],
   ['N18','庫存管理水管圖／SHEET排序與節點連結','整理庫存開帳→異動→驗收／過帳→可用量→異動台帳→反過帳／更正，並呈現銷售與採購對庫存的聯動；尚未完成獨立水管圖。','planned'],
@@ -1101,6 +1102,7 @@ function renderArchitectureScreen(){
     ${statusNode(70,105,220,62,'報價單','報價／合約／獨立起點','done')}
     ${statusNode(70,205,220,70,'訂單／訂單變更','公司別單別／合約／獨立／1 對多銷貨','done')}
     ${statusNode(70,325,220,70,'銷貨確認／過帳','確認後庫存減少','done')}
+    ${statusNode(70,425,120,64,'銷售統計','COPR20 客戶／品號／業務員／期間','done')}
     ${statusNode(205,425,135,64,'銷退驗收','合格後才可回庫','done')}
     ${statusNode(70,520,220,70,'銷退／折讓','庫存回庫／訂單解結；應收沖帳／待抵／退款已完成','done')}
     ${statusNode(70,655,220,70,'結帳單／應收憑單','直接／手動／自動、發票、多幣別已完成','done')}
@@ -1126,7 +1128,7 @@ function renderArchitectureScreen(){
     ${statusNode(870,850,220,70,'付款／沖銷','部分付款／多筆沖銷','done')}
     ${statusNode(870,950,220,64,'應付票據','託收／兌現／退票／註銷／歷程已完成','done')}
     ${line(180,167,180,205,'轉訂單')}${line(180,275,180,325,'分批銷貨')}
-    ${path('M180 395 L180 552','銷退／折讓',145,475)}${line(272,489,272,520,'驗收後回庫')}
+    ${line(180,395,180,425,'統計')}${path('M290 395 L350 395 L350 552 L290 552','銷退／折讓',325,475)}${line(272,489,272,520,'驗收後回庫')}
     ${line(180,590,180,655,'立帳')}${line(180,725,180,765,'收款')}${line(180,835,180,875,'票據')}
     ${line(980,167,980,205,'轉採購')}${line(980,275,980,320,'分批交貨')}${line(980,384,980,420,'送驗')}${line(980,490,980,530,'合格量')}
     ${path('M980 600 L980 662 L970 662','退貨／驗退',930,620)}${line(1065,694,1065,740,'應付減少')}
@@ -1166,14 +1168,15 @@ function renderArchitectureScreen(){
      ['N16-1','銷售管理：客戶品號資料建立作業','已完成並收納於本區：已再次確認 SH／SC 原始 COPMA、COPMB、INVMB 沒有獨立外部客戶料號欄位；依使用者同意在目標 ERP 建立公司隔離的客戶品號主檔，支援外部客戶料號、客戶品名／規格、ERP 品號、有效期間、新增／修改／停用／重新啟用、有效期間重疊卡控與事件／權限稽核。原始 COPMB 保持唯讀。','done'],
     ['N16-2','銷售管理：客戶產品計價建立作業','已完成並收納於本區：依 iSM COPI02／COPMB／COPMC 規則建立目標端客戶／品號計價主檔，支援單價、折扣、幣別、計價單位、含稅、分量價格、生效／失效日、交易條件、草稿→核准→作廢與事件稽核；報價／訂單依目前登入公司別自動帶入核准價格，並在明細保留價格規則來源。SH／SC 原始資料僅供唯讀參考。','done'],
     ['N16-3','銷售管理：銷售預測建立作業','已完成並收納於本區：依 iSM COPI04／COPI13／COPR06 規則建立公司隔離的銷售預測，支援依品號／依類別、預測版本、起訖期間、客戶／部門／業務員／通路／客戶型態、納入生產計畫、明細日期／庫別／數量／單位／幣別／單價／金額、手動／自動結案、受控重開、預測明細報表與事件歷程。只有明確連結預測版本、明細與庫別的訂單才回寫已受訂量；SH／SC COPME／COPMF 僅唯讀參考。','done'],
-    ['N16-C','銷售管理水管圖：已完成節點','已完成並收納於本區：單據性質設定、客戶資料、客戶品號、客戶產品計價、銷售預測、報價單、客戶訂單、訂單變更／解結、接單統計／跟催、銷貨單、銷退單，以及庫存管理／帳款管理下游聯動。這些節點仍保留在水管圖中供點選操作；下一階段清單只保留部分完成與尚未完成項目。','done']
+    ['N16-4','銷售管理：銷售統計彙總報表','已完成並收納於本區：依 iSM COPR20 客戶接單統計規則，正式從目前公司別目標 ERP 彙總客戶／品號／業務員／月份與交叉維度的訂單張數、明細數、訂單量、已交量、未交量、訂單／已交／未交金額及結案狀態；支援日期起訖、單別、客戶／品號／業務員範圍、庫別、結案狀態與明細模式，不同幣別分開彙總，草稿與作廢不列入。','done'],
+    ['N16-C','銷售管理水管圖：已完成節點','已完成並收納於本區：單據性質設定、客戶資料、客戶品號、客戶產品計價、銷售預測、報價單、客戶訂單、訂單變更／解結、接單統計／跟催、銷售統計彙總、銷貨單、銷退單，以及庫存管理／帳款管理下游聯動。這些節點仍保留在水管圖中供點選操作；下一階段清單只保留部分完成與尚未完成項目。','done']
    ];
   // 使用者已確認的項目進入開發順序；完成後即移到下方「已完成內容」折疊區。
   const roadmap=confirmedNextPhaseRoadmap;
   const recommendations=[];
   const compactColumn=(title,subtitle,steps)=>`<div class="compact-flow-column"><div class="compact-flow-title">${title}<small>${subtitle}</small></div>${steps.map(([name,note,status,impact],index)=>`${index?'<div class="compact-arrow">↓</div>':''}<div class="compact-node ${status}"><strong>${name}</strong><small>${note}</small>${impact?`<em>${impact}</em>`:''}</div>`).join('')}</div>`;
   const compactFlow=`<div class="architecture-compact">${compactColumn('訂單／銷售','COP → ACR',[
-     ['銷售預測','依品號／依類別；版本／期間／明細／結案','done','接單量分開核對'],['報價／合約／獨立起點','公司別單別／核准／轉訂單','done',''],['訂單／變更','公司別單別／分批銷貨','done','查可用量'],['銷貨確認','公司別單別／過帳後出庫','done','庫存－'],['銷貨沖回／訂單解結','沖回後受控重開再作','done','已完成'],['銷退驗收','合格才可回庫','done','驗收卡控'],['銷退／折讓','庫存回庫／折讓不動庫存；應收沖帳／待抵／退款同步','done','已完成'],['應收憑單','結帳日、發票與多幣別已完成','done',''],['收款／票據','匯差／託收／兌現／退票／註銷已完成','done','銀行餘額＋歷程']
+     ['銷售預測','依品號／依類別；版本／期間／明細／結案','done','接單量分開核對'],['報價／合約／獨立起點','公司別單別／核准／轉訂單','done',''],['訂單／變更','公司別單別／分批銷貨','done','查可用量'],['銷貨確認','公司別單別／過帳後出庫','done','庫存－'],['銷售統計彙總','COPR20 客戶／品號／業務員／期間；訂單／已交／未交量額','done','正式彙總'],['銷貨沖回／訂單解結','沖回後受控重開再作','done','已完成'],['銷退驗收','合格才可回庫','done','驗收卡控'],['銷退／折讓','庫存回庫／折讓不動庫存；應收沖帳／待抵／退款同步','done','已完成'],['應收憑單','結帳日、發票與多幣別已完成','done',''],['收款／票據','匯差／託收／兌現／退票／註銷已完成','done','銀行餘額＋歷程']
   ])}${compactColumn('庫存管理','INV 中央控制',[
     ['完整可用量','現有＋待進貨－待出貨－安全庫存','done',''],['庫存餘額','公司／品號／庫別','done',''],['異動台帳','進貨＋／銷貨－／退回／暫出入','done',''],['反過帳','原單保留／沖回再作','done',''],['流程稽核','合法起點／孤兒／逾期／未轉未交／帳齡資金／更正建議','done','已完成'],['匯入品質','來源鍵／異常／更正案件','done','SH／SC 唯讀'],['合法補充／暫出入','獨立起點／轉撥／調整','done','已完成'],['會計分錄底稿','產生／維護／核准／拋轉／還原','done','已完成'],['立沖／預收預付／對沖','期初批次、可用／已用／剩餘、分批轉抵／退款／對沖已完成','done','已完成'],['月底／年度結轉','12 個月快照／關帳攔截／跨年度已完成','done','已完成'],['傳票／總帳','試算表／科目餘額／明細／期初期末核對','done','已完成'],['報表中心／公司回歸','預計進料／未交／帳齡／資金／票況／SC 財報預覽','done','SH／SC 同套稽核']
    ])}${compactColumn('請購／採購','PUR → ACP',[
