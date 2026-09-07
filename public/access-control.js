@@ -46,6 +46,16 @@ function canViewFeature(screen) {
       'sales-statistics','sales-analysis'
     ].includes(row.feature_code) && Number(row.can_view));
   }
+  // 應付水管圖是導覽頁；具備任一採購、應付、資金或財務報表權限即可看到，
+  // 每個節點點入後仍會依目標 SHEET 的權限再次攔截。
+  if (screen === 'payable-pipe') {
+    return accessState.permissions.some(row => [
+      'finance-workflow','finance-bookkeeping','finance-cash','finance-reconcile',
+      'accounting-drafts','accounting-general-ledger','bank-ledger',
+      'operations-health','operations-reports','receipt-entry','receipt-posting',
+      'receipt-pricing','purchase-returns','purchase-receipts','purchase-flow-audit'
+    ].includes(row.feature_code) && Number(row.can_view));
+  }
   const code = featureAliases[screen] || screen;
   return accessState.permissions.some(row => row.feature_code === code && Number(row.can_view));
 }
