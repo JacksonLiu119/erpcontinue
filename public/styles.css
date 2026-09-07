@@ -170,6 +170,27 @@ body.architecture-mode .workspace{grid-column:2}
 @media(max-width:900px){.sales-pipe-board{padding:12px}.sales-pipe-prereq-grid{min-width:650px}.sales-pipe-mainline{min-width:920px}.sales-pipe-downstream{min-width:760px}.architecture-pipe-entry{align-items:flex-start;flex-direction:column}.sales-reference-grid{grid-template-columns:1fr}}
 @media(max-width:760px){.pricing-tier-head{display:none}.pricing-tier-row{grid-template-columns:1fr 1fr;gap:7px;padding:8px;border:1px solid var(--border);border-radius:10px;background:var(--soft)}.pricing-tier-row .btn{grid-column:1/-1}.sales-customer-pricing-screen table.grid{min-width:1250px}}
 
+/* 第一階段採購管理水管圖：依 iSM 採購文件排序，支線與報表集中呈現。 */
+.procurement-pipe-screen .screen-body{gap:16px}
+.purchase-pipe-intro{display:grid;gap:10px}
+.purchase-pipe-board{display:grid;gap:14px;padding:18px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(145deg,color-mix(in srgb,var(--soft) 92%,#fff),var(--panel));overflow-x:auto}
+.purchase-pipe-main{display:grid;gap:12px;width:min(100%,900px);margin:0 auto}
+.purchase-pipe-arrow{height:18px;color:var(--muted);text-align:center;font-size:18px;line-height:18px}
+.purchase-pipe-stage{display:grid;gap:10px;align-items:center}
+.purchase-pipe-stage--three{grid-template-columns:minmax(0,1fr) 28px minmax(0,1fr) 28px minmax(0,1fr)}
+.purchase-pipe-stage--finance{grid-template-columns:minmax(0,1fr) 28px minmax(0,1fr) 28px minmax(0,1fr)}
+.purchase-pipe-stage-arrow{display:grid;place-items:center;color:var(--muted);font-size:22px;font-weight:700}
+.purchase-pipe-node{min-height:72px}
+.purchase-pipe-branch{display:grid;gap:7px;margin:0 auto;padding:10px 12px;border-left:3px dashed color-mix(in srgb,var(--accent) 65%,var(--border));border-radius:0 12px 12px 0;background:color-mix(in srgb,var(--soft) 78%,var(--panel))}
+.purchase-pipe-branch>span,.purchase-pipe-branch-card>span{color:var(--brand);font-size:10px;font-weight:800;text-align:left}
+.purchase-pipe-stage--inspection,.purchase-pipe-stage--posting{grid-template-columns:minmax(0,1fr) minmax(230px,.8fr)}
+.purchase-pipe-branch-card{display:grid;gap:7px;padding:10px 12px;border-left:3px dashed color-mix(in srgb,#d98b09 70%,var(--border));border-radius:0 12px 12px 0;background:color-mix(in srgb,#e6a329 10%,var(--panel))}
+.purchase-pipe-branch-card .purchase-pipe-node{min-height:66px}
+.purchase-pipe-reports{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;width:min(100%,900px);margin:0 auto;padding-top:4px;border-top:1px solid var(--border)}
+.purchase-pipe-reports-title{grid-column:1/-1;color:var(--brand);font-size:11px;font-weight:800;text-align:center}
+.purchase-pipe-reports .purchase-pipe-node{min-height:66px}
+@media(max-width:760px){.purchase-pipe-board{padding:12px}.purchase-pipe-main,.purchase-pipe-reports{width:100%}.purchase-pipe-stage--three,.purchase-pipe-stage--finance,.purchase-pipe-stage--inspection,.purchase-pipe-stage--posting{grid-template-columns:1fr}.purchase-pipe-stage-arrow{height:18px}.purchase-pipe-reports{grid-template-columns:1fr}.purchase-pipe-reports-title{grid-column:auto}}
+
 .quality-policy-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.quality-policy-grid>div{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--soft);color:var(--muted);font-size:11px;line-height:1.6}.quality-policy-grid strong{color:var(--brand);font-size:12px}.quality-badge,.quality-status{display:inline-block;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700}.quality-badge.warning{color:#8a5a00;background:#fff0c7}.quality-badge.error{color:#a9312d;background:#fde3e1}.quality-badge.info{color:#21618c;background:#dceefa}.quality-status.open,.quality-status.correction_pending{color:#a9312d;background:#fde3e1}.quality-status.acknowledged{color:#8a5a00;background:#fff0c7}.quality-status.resolved{color:#187b55;background:#e2f4e9}.quality-status.ignored{color:var(--muted);background:var(--soft)}
 @media(max-width:900px){.quality-policy-grid{grid-template-columns:1fr}}
 

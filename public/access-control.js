@@ -15,6 +15,16 @@ const featureAliases = {
 };
 function canViewFeature(screen) {
   if (accessState.isAdmin) return true;
+  // 採購水管圖是導覽頁；只要角色具備任一採購／進貨查詢權限即可看到，
+  // 每個節點點入後仍會依各自 SHEET 權限再次攔截。
+  if (screen === 'purchase-pipe') {
+    return accessState.permissions.some(row => [
+      'procurement-document-types','requisition-entry','requisition-maintenance',
+      'purchase-order-entry','purchase-order-changes','receipt-arrival','receipt-entry',
+      'receipt-inspection','receipt-rejected-return','receipt-posting','purchase-returns',
+      'purchase-progress','open-purchase-orders','purchase-receipts','purchase-flow-audit'
+    ].includes(row.feature_code) && Number(row.can_view));
+  }
   const code = featureAliases[screen] || screen;
   return accessState.permissions.some(row => row.feature_code === code && Number(row.can_view));
 }
