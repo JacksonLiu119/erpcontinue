@@ -56,6 +56,15 @@ function canViewFeature(screen) {
       'receipt-pricing','purchase-returns','purchase-receipts','purchase-flow-audit'
     ].includes(row.feature_code) && Number(row.can_view));
   }
+  // 銀行／票據資金水管圖是跨應收、應付與銀行對帳的導覽頁；具備任一資金、票據、
+  // 會計或報表權限即可看到，進入節點後仍依目標 SHEET 的權限再次攔截。
+  if (screen === 'treasury-pipe') {
+    return accessState.permissions.some(row => [
+      'finance-workflow','finance-bookkeeping','finance-cash','finance-reconcile',
+      'accounting-drafts','accounting-general-ledger','bank-ledger',
+      'operations-health','operations-reports','ar-notes','ap-notes'
+    ].includes(row.feature_code) && Number(row.can_view));
+  }
   const code = featureAliases[screen] || screen;
   return accessState.permissions.some(row => row.feature_code === code && Number(row.can_view));
 }
