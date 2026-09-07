@@ -4,6 +4,7 @@ import { registerImportQualityRoutes } from './import-quality.js';
 import { registerReportingRoutes } from './reports.js';
 import { registerSourceFinancialPreviewRoutes } from './source-financial-preview.js';
 import { registerSalesForecastRoutes, resolveSalesForecastOrderLink, refreshSalesForecastMetrics } from './sales-forecast.js';
+import { registerSalesAnalysisRoutes } from './sales-analysis.js';
 
 const listTables = {
   customers: ['id', 'code', 'name', 'tax_id', 'contact_name', 'phone', 'email', 'address', 'credit_limit', 'is_active'],
@@ -1041,6 +1042,7 @@ export function registerApi(app) {
   registerProcurementWorkflowRoutes(app);
   registerSalesReturnInspectionRoutes(app);
   registerSalesWorkflowRoutes(app);
+  registerSalesAnalysisRoutes(app);
   registerSalesCustomerItemRoutes(app);
   registerSalesCustomerPricingRoutes(app);
   registerSalesForecastRoutes(app);

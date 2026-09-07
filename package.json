@@ -26,6 +26,7 @@
     "verify:access-scope": "node scripts/verify-access-scope.mjs",
     "verify:flow-audit-recommendations": "node scripts/verify-flow-audit-recommendations.mjs",
     "verify:sales-statistics": "node scripts/verify-sales-statistics.mjs",
+    "verify:sales-analysis": "node scripts/verify-sales-analysis.mjs",
     "backup:github": "powershell -ExecutionPolicy Bypass -File scripts/backup-github.ps1"
   },
   "dependencies": {
