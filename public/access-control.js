@@ -8,9 +8,9 @@ const featureAliases = {
   'inventory-balance':'inventory-new-balance', 'inventory-movement-stats':'inventory-new-ledger',
   'department-movement-stats':'inventory-new-ledger',
   'receipt-pricing':'receipt-entry',
-  'finance-flow':'finance-workflow', 'ar-source':'finance-workflow', 'ar-open':'finance-workflow', 'ar-receipt':'finance-workflow',
+  'finance-flow':'finance-workflow', 'ar-source':'finance-workflow', 'ar-open':'finance-workflow', 'ar-credits':'finance-workflow', 'ar-receipt':'finance-workflow',
   'ar-notes':'finance-workflow', 'ar-aging':'finance-workflow', 'ap-source':'finance-workflow',
-  'ap-open':'finance-workflow', 'ap-payment':'finance-workflow', 'ap-notes':'finance-workflow',
+  'ap-open':'finance-workflow', 'ap-payment':'finance-workflow', 'ap-notes':'finance-workflow', 'advances-offset':'finance-workflow',
   'ap-aging':'finance-workflow', 'general-ledger':'accounting-general-ledger', 'accounting-financial-preview':'accounting-general-ledger', 'operations-reports':'operations-reports'
 };
 function canViewFeature(screen) {
@@ -34,6 +34,16 @@ function canViewFeature(screen) {
       'inventory-posting','inventory-reversals','inventory-new-ledger','inventory-new-balance',
       'inventory-detail','inventory-ledger','inventory-balance','inventory-movement-stats',
       'department-movement-stats'
+    ].includes(row.feature_code) && Number(row.can_view));
+  }
+  // 應收水管圖是導覽頁；具備任一應收、資金或財務報表權限即可看到，
+  // 每個節點點入後仍會依目標 SHEET 的權限再次攔截。
+  if (screen === 'receivable-pipe') {
+    return accessState.permissions.some(row => [
+      'finance-workflow','finance-bookkeeping','finance-cash','finance-reconcile',
+      'accounting-drafts','accounting-general-ledger','bank-ledger',
+      'operations-health','operations-reports','sales-shipments','sales-returns',
+      'sales-statistics','sales-analysis'
     ].includes(row.feature_code) && Number(row.can_view));
   }
   const code = featureAliases[screen] || screen;

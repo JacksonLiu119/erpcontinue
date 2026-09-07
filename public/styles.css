@@ -214,6 +214,34 @@ body.architecture-mode .workspace{grid-column:2}
 .inventory-pipe-reports .inventory-pipe-node{min-height:70px}
 @media(max-width:760px){.inventory-pipe-board{padding:12px}.inventory-pipe-prereq,.inventory-pipe-mainline,.inventory-pipe-branch-grid,.inventory-pipe-reports{width:100%;min-width:0}.inventory-pipe-prereq,.inventory-pipe-mainline,.inventory-pipe-branch-grid,.inventory-pipe-branch-items,.inventory-pipe-branch-card--source .inventory-pipe-branch-items{grid-template-columns:1fr}.inventory-pipe-section-label{grid-column:auto}.inventory-pipe-horizontal-arrow{height:18px;font-size:0}.inventory-pipe-horizontal-arrow:after{content:'↓';font-size:18px}.inventory-pipe-node{min-height:72px}}
 
+/* 第一階段應收管理水管圖：來源集中、主流程清楚，支線分開呈現票據／資金／報表。 */
+.receivable-pipe-screen .screen-body{gap:16px}
+.receivable-pipe-intro{display:grid;gap:10px}
+.receivable-pipe-board{display:grid;gap:14px;padding:18px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(145deg,color-mix(in srgb,var(--soft) 92%,#fff),var(--panel));overflow-x:auto}
+.receivable-pipe-prereq{display:grid;grid-template-columns:repeat(3,minmax(210px,1fr));gap:10px;width:min(100%,1120px);margin:0 auto}
+.receivable-pipe-section-label{grid-column:1/-1;color:var(--brand);font-size:11px;font-weight:800;text-align:center}
+.receivable-pipe-flow-caption{width:min(100%,1180px);margin:0 auto;padding:8px 12px;border-left:3px solid var(--accent);border-radius:0 10px 10px 0;background:color-mix(in srgb,var(--accent) 8%,var(--panel));color:var(--muted);font-size:11px;font-weight:700;text-align:center}
+.receivable-pipe-mainline{display:grid;grid-template-columns:minmax(230px,1.3fr) 28px minmax(180px,1fr) 28px minmax(220px,1.2fr) 28px minmax(220px,1.2fr) 28px minmax(220px,1.2fr);gap:8px;align-items:start;width:min(100%,1240px);min-width:1200px;margin:0 auto}
+.receivable-pipe-horizontal-arrow{display:grid;place-items:center;min-height:86px;color:var(--muted);font-size:22px;font-weight:700}
+.receivable-pipe-source-group{display:grid;gap:9px;padding:12px;border-left:3px dashed color-mix(in srgb,var(--accent) 70%,var(--border));border-radius:0 14px 14px 0;background:color-mix(in srgb,var(--soft) 78%,var(--panel))}
+.receivable-pipe-source-label{color:var(--brand);font-size:11px;font-weight:800;text-align:left}
+.receivable-pipe-source-items{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.receivable-pipe-source-items .receivable-pipe-node{min-height:76px;padding:9px 22px 8px 10px;border-width:1.5px;border-radius:12px}
+.receivable-pipe-source-items .sales-pipe-node-title{font-size:11px}
+.receivable-pipe-source-items .sales-pipe-node small,.receivable-pipe-source-items .sales-pipe-node em{font-size:9px}
+.receivable-pipe-node{min-height:86px}
+.receivable-pipe-branch-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:12px;width:min(100%,1180px);margin:0 auto}
+.receivable-pipe-branch-card{display:grid;gap:9px;padding:12px;border-left:3px dashed color-mix(in srgb,var(--accent) 70%,var(--border));border-radius:0 14px 14px 0;background:color-mix(in srgb,var(--soft) 78%,var(--panel))}
+.receivable-pipe-branch-card--report{border-left-color:#d98b09;background:color-mix(in srgb,#e6a329 10%,var(--panel))}
+.receivable-pipe-branch-card>span{color:var(--brand);font-size:11px;font-weight:800;text-align:left}
+.receivable-pipe-branch-items{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.receivable-pipe-branch-card--report .receivable-pipe-branch-items{grid-template-columns:repeat(2,minmax(0,1fr))}
+.receivable-pipe-branch-items .receivable-pipe-node{min-height:72px;padding:9px 22px 8px 10px;border-width:1.5px;border-radius:12px}
+.receivable-pipe-branch-items .sales-pipe-node-title{font-size:11px}
+.receivable-pipe-branch-items .sales-pipe-node small,.receivable-pipe-branch-items .sales-pipe-node em{font-size:9px}
+@media(max-width:900px){.receivable-pipe-board{padding:12px}.receivable-pipe-prereq{min-width:650px}.receivable-pipe-mainline{min-width:1080px}.receivable-pipe-branch-grid{min-width:720px}}
+@media(max-width:760px){.receivable-pipe-board{padding:12px}.receivable-pipe-prereq,.receivable-pipe-mainline,.receivable-pipe-branch-grid{width:100%;min-width:0}.receivable-pipe-prereq,.receivable-pipe-mainline,.receivable-pipe-branch-grid,.receivable-pipe-source-items,.receivable-pipe-branch-items,.receivable-pipe-branch-card--report .receivable-pipe-branch-items{grid-template-columns:1fr}.receivable-pipe-section-label{grid-column:auto}.receivable-pipe-horizontal-arrow{height:18px;min-height:0;font-size:0}.receivable-pipe-horizontal-arrow:after{content:'↓';font-size:18px}.receivable-pipe-node{min-height:72px}}
+
 .quality-policy-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.quality-policy-grid>div{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--soft);color:var(--muted);font-size:11px;line-height:1.6}.quality-policy-grid strong{color:var(--brand);font-size:12px}.quality-badge,.quality-status{display:inline-block;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700}.quality-badge.warning{color:#8a5a00;background:#fff0c7}.quality-badge.error{color:#a9312d;background:#fde3e1}.quality-badge.info{color:#21618c;background:#dceefa}.quality-status.open,.quality-status.correction_pending{color:#a9312d;background:#fde3e1}.quality-status.acknowledged{color:#8a5a00;background:#fff0c7}.quality-status.resolved{color:#187b55;background:#e2f4e9}.quality-status.ignored{color:var(--muted);background:var(--soft)}
 @media(max-width:900px){.quality-policy-grid{grid-template-columns:1fr}}
 
