@@ -65,6 +65,29 @@ const purchasePipeNodes = {
 };
 const purchasePipeStatusLabels = { done:'已完成', partial:'部分完成', planned:'尚未完成' };
 
+// 依《iSM-庫存管理系統》整理庫存主線；節點只負責導向既有 SHEET，
+// 實際過帳、公司隔離與角色權限仍由現有作業與 API 控管。
+const inventoryPipeNodes = {
+  itemCategories: { label:'品號類別建立', note:'庫存主檔的分類前置資料', status:'done', screen:'item-categories' },
+  items: { label:'品號主檔建立', note:'品號、單位、庫存控制與公司別主檔', status:'done', screen:'items' },
+  documentTypes: { label:'庫存單據性質', note:'入／出／轉撥／暫出入／盤點的異動規則', status:'done', screen:'inventory-document-types' },
+  opening: { label:'庫存開帳', note:'期初數量／金額，核准後才正式帶入', status:'done', screen:'inventory-opening' },
+  movement: { label:'庫存異動建立', note:'領用、退料、調整、報廢與其他日常異動', status:'done', screen:'inventory-transactions' },
+  transfer: { label:'轉撥作業', note:'庫別間轉出／轉入，保留成對異動', status:'done', screen:'inventory-transfers' },
+  temporary: { label:'暫出／暫入', note:'暫出、暫入及歸還的原單關聯與未歸還量', status:'done', screen:'inventory-temporary' },
+  stocktake: { label:'庫存盤點', note:'實盤數量與帳面差異，核准後形成調整', status:'done', screen:'inventory-stocktake' },
+  posting: { label:'驗收／庫存過帳', note:'採購驗收合格入庫；銷貨確認出庫；正式過帳才影響庫存', status:'done', screen:'inventory-posting' },
+  salesShipment: { label:'銷貨確認／出庫', note:'銷貨確認後庫存減少，來源回寫庫存台帳', status:'done', screen:'sales-shipments' },
+  salesReturn: { label:'銷退驗收／回庫', note:'退回商品驗收合格後才增加庫存', status:'done', screen:'sales-returns' },
+  purchaseReceipt: { label:'採購驗收／入庫', note:'進貨驗收合格後才增加庫存', status:'done', screen:'receipt-posting' },
+  purchaseReturn: { label:'採購退貨／出庫', note:'限制已入庫可退量，確認後反向扣庫存', status:'done', screen:'purchase-returns' },
+  availability: { label:'完整可用量／庫存餘額', note:'現有＋待進貨－待出貨－安全庫存', status:'done', screen:'inventory-new-balance' },
+  ledger: { label:'庫存異動台帳', note:'進貨＋／銷貨－／退回／轉撥／暫出入／調整', status:'done', screen:'inventory-new-ledger' },
+  reversal: { label:'反過帳／更正', note:'原單保留，沖回後再重作並保留版本', status:'done', screen:'inventory-reversals' },
+  reports: { label:'庫存報表／稽核', note:'明細、進耗存、異動、部門與公司隔離檢核', status:'done', screen:'operations-reports' }
+};
+const inventoryPipeStatusLabels = { done:'已完成', partial:'部分完成', planned:'尚未完成' };
+
 const modules = [
   { id:'DB', name:'資料庫查詢', screens:[['document-natures','單據／分錄性質'],['basicdata','基本資料'],['companies','公司資料建立作業'],['common-parameters','共用參數查詢'],['code-rules','編碼原則查詢'],['job-categories','職務類別建立作業'],['currencies','幣別匯率建立作業'],['payment-terms','付款條件建立作業'],['calendars','行事曆建立作業'],['source-mappings','標準主檔對照表'],['import-monitor','匯入批次管理'],['data-quality','匯入資料品質'],['warehouses','庫別建立作業'],['departments','部門建立作業'],['employees','員工建立作業'],['customers','客戶資料建立作業'],['suppliers','廠商資料建立作業']] },
   { id:'INV', name:'庫存管理', screens:[['item-categories','品號類別建立作業'],['items','品號主檔建立作業'],['inventory-opening','庫存開帳作業'],['inventory-detail','庫存明細表'],['inventory-ledger','庫存明細帳'],['inventory-balance','進耗存統計表'],['inventory-movement-stats','庫存異動統計表'],['department-movement-stats','部門異動單據統計表']] },
@@ -90,10 +113,11 @@ modules.find(module => module.id === 'PUR').screens = [
   ['purchase-receipts','進貨入庫明細']
 ];
 modules.find(module => module.id === 'INV').screens = [
+  ['inventory-pipe','庫存管理水管圖'],
   ['item-categories','品號類別建立作業'],['items','品號主檔建立作業'],['inventory-opening','庫存開帳作業'],
   ['inventory-document-types','庫存單據性質'],['inventory-transactions','庫存異動作業'],['inventory-transfers','轉撥作業'],
-  ['inventory-temporary','暫出／暫入作業'],['inventory-stocktake','庫存盤點作業'],['inventory-posting','進貨／退貨庫存過帳'],['inventory-reversals','反過帳／更正'],['inventory-new-balance','庫存餘額'],
-  ['inventory-new-ledger','庫存異動帳']
+  ['inventory-temporary','暫出／暫入作業'],['inventory-stocktake','庫存盤點作業'],['inventory-posting','進貨／退貨庫存過帳'],
+  ['inventory-new-balance','完整可用量／庫存餘額'],['inventory-new-ledger','庫存異動台帳'],['inventory-reversals','反過帳／更正']
 ];
 modules.push({id:'SAL',name:'銷售管理',screens:[
   ['sales-pipe','銷售管理水管圖'],
@@ -216,6 +240,7 @@ function renderScreen() {
   if (state.screen === 'import-monitor') return renderImportMonitor();
   if (state.screen === 'data-quality') return renderImportDataQuality();
   if (state.screen === 'common-parameters') return renderCommonParameters();
+  if (state.screen === 'inventory-pipe') return renderInventoryPipe();
   if (state.screen === 'inventory-opening') return renderInventoryOpening();
   if (state.screen.startsWith('inventory-') && ['inventory-document-types','inventory-transactions','inventory-transfers','inventory-temporary','inventory-stocktake','inventory-posting','inventory-reversals','inventory-new-balance','inventory-new-ledger'].includes(state.screen)) return renderInventoryWorkflow(state.screen);
   if (state.module === 'PUR') return renderProcurementScreen(state.screen);
@@ -674,6 +699,21 @@ function purchasePipeNode(id){
 function bindPurchasePipeLinks(){
   document.querySelectorAll('[data-purchase-screen]').forEach(button=>button.onclick=()=>navigateToScreen(button.dataset.purchaseScreen));
 }
+function inventoryPipeNode(id){
+  const item=inventoryPipeNodes[id];
+  if(!item)return '';
+  return `<button type="button" class="sales-pipe-node inventory-pipe-node ${item.status}" data-inventory-screen="${esc(item.screen)}" title="開啟${esc(item.label)}"><span class="sales-pipe-node-title">${esc(item.label)}</span><small>${esc(item.note)}</small><em>${esc(inventoryPipeStatusLabels[item.status]||item.status)}・點選開啟</em></button>`;
+}
+function bindInventoryPipeLinks(){
+  document.querySelectorAll('[data-inventory-screen]').forEach(button=>button.onclick=()=>navigateToScreen(button.dataset.inventoryScreen));
+}
+function renderInventoryPipe(){
+  const arrow='<span class="inventory-pipe-horizontal-arrow" aria-hidden="true">→</span>';
+  const body=`<div class="inventory-pipe-intro"><div class="desc">依《iSM-庫存管理系統》整理庫存主線：庫存開帳→庫存異動→來源驗收／過帳→完整可用量→庫存異動台帳→反過帳／更正。品號、單據性質與公司別是前置條件；銷售與採購的入出庫則以聯動支線接回中央庫存。每個節點都可點選進入現有 SHEET。綠色代表目前已完成驗證，橘色代表部分完成，紅色虛線代表尚未完成。</div><div class="sales-pipe-legend"><span class="done">已完成且可操作</span><span class="partial">部分完成／待補</span><span class="planned">尚未完成／占位頁</span></div></div><div class="inventory-pipe-board"><div class="sales-pipe-system">庫存管理系統<small>INV｜開帳 → 異動 → 驗收／過帳 → 可用量 → 台帳 → 更正</small></div><div class="inventory-pipe-prereq"><div class="inventory-pipe-section-label">前置主檔與規則</div>${inventoryPipeNode('itemCategories')}${inventoryPipeNode('items')}${inventoryPipeNode('documentTypes')}</div><div class="inventory-pipe-flow-caption">主流程：只有核准且正式過帳，才更新庫存餘額與異動台帳</div><div class="inventory-pipe-mainline">${inventoryPipeNode('opening')}${arrow}${inventoryPipeNode('movement')}${arrow}${inventoryPipeNode('posting')}${arrow}${inventoryPipeNode('availability')}${arrow}${inventoryPipeNode('ledger')}${arrow}${inventoryPipeNode('reversal')}</div><div class="inventory-pipe-branch-grid"><div class="inventory-pipe-branch-card"><span>日常與補充異動支線</span><div class="inventory-pipe-branch-items">${inventoryPipeNode('transfer')}${inventoryPipeNode('temporary')}${inventoryPipeNode('stocktake')}</div></div><div class="inventory-pipe-branch-card inventory-pipe-branch-card--source"><span>銷售／採購聯動支線</span><div class="inventory-pipe-branch-items">${inventoryPipeNode('salesShipment')}${inventoryPipeNode('salesReturn')}${inventoryPipeNode('purchaseReceipt')}${inventoryPipeNode('purchaseReturn')}</div></div></div><div class="inventory-pipe-reports"><div class="inventory-pipe-reports-title">庫存文件中的查詢與稽核</div>${inventoryPipeNode('reports')}</div></div><div class="desc">文件規則對照：庫存開帳、轉撥、盤盈損、數量調整、報廢、零星領退料與暫出／暫入屬庫存異動；銷貨單確認後庫存減少、銷退驗收合格後庫存增加；進貨驗收合格並完成進貨確認後庫存增加、採購退貨確認後庫存減少。庫存餘額與完整可用量分開呈現，異動台帳保留每筆來源；已過帳單據不可直接修改，須走反過帳／更正。原始 SH／SC 仍維持唯讀，所有導向作業使用目前登入公司別。</div>`;
+  inventoryShell('庫存管理水管圖','INV-PIPE',body);
+  $('#canvas .screen')?.classList.add('inventory-pipe-screen');
+  bindInventoryPipeLinks();
+}
 function renderPurchasePipe(){
   const arrow='<div class="purchase-pipe-arrow" aria-hidden="true">↓</div>';
   const stage=(className,content)=>'<div class="purchase-pipe-stage '+className+'">'+content+'</div>';
@@ -1002,7 +1042,6 @@ function renderAccountingDrafts(){
 }
 const confirmedNextPhaseRoadmap=[
   ['N16','第一階段：銷售管理水管圖／SHEET排序與節點連結（總覽）','已完成銷售主流程圖與現有 SHEET 排序，節點可點選導向作業；客戶品號、客戶產品計價、銷售預測、銷售統計彙總與銷售分析已完成，清單只保留後續新落差。','partial'],
-  ['N18','庫存管理水管圖／SHEET排序與節點連結','整理庫存開帳→異動→驗收／過帳→可用量→異動台帳→反過帳／更正，並呈現銷售與採購對庫存的聯動；尚未完成獨立水管圖。','planned'],
   ['N19','應收管理水管圖／SHEET排序與節點連結','整理銷貨／銷退→應收→結帳／發票→收款／沖銷→待抵／退款，補多筆合併、原幣與狀態追蹤節點；尚未完成獨立水管圖。','planned'],
   ['N20','應付管理水管圖／SHEET排序與節點連結','整理進貨／退貨→應付→合併計價→付款／沖銷→待付與票據，呈現計價量、付款量與費用閉環；尚未完成獨立水管圖。','planned'],
   ['N21','銀行／票據資金水管圖／SHEET排序與節點連結','整理存提款→票據託收／兌現／退票／註銷→對帳→餘額→資金報表，並標示管帳／管錢／對帳權責；尚未完成獨立水管圖。','planned'],
@@ -1239,7 +1278,8 @@ function renderArchitectureScreen(){
     ['N16-4','銷售管理：銷售統計彙總報表','已完成並收納於本區：依 iSM COPR20 客戶接單統計規則，正式從目前公司別目標 ERP 彙總客戶／品號／業務員／月份與交叉維度的訂單張數、明細數、訂單量、已交量、未交量、訂單／已交／未交金額及結案狀態；支援日期起訖、單別、客戶／品號／業務員範圍、庫別、結案狀態與明細模式，不同幣別分開彙總，草稿與作廢不列入。','done'],
     ['N16-5','銷售管理：銷售分析系統','已完成並收納於本區：建立 COP-ANALYSIS 唯讀分析畫面與 API，依目前公司別及日期起訖支援客戶、品號、部門、業務員、期間、庫別、幣別、類別與交叉維度；銷售資料追到單據／明細及來源鍵，庫存另查餘額／異動台帳，應收另查帳款／憑單來源，並呈現轉換率、履約率、退回率、收款率與資料品質警示。製造、BOM、成本計算與毛利分析暫不納入。','done'],
     ['N16-C','銷售管理水管圖：已完成節點','已完成並收納於本區：單據性質設定、客戶資料、客戶品號、客戶產品計價、銷售預測、報價單、客戶訂單、訂單變更／解結、接單統計／跟催、銷售統計彙總、銷售分析、銷貨單、銷退單，以及庫存管理／帳款管理下游聯動。這些節點仍保留在水管圖中供點選操作；下一階段清單只保留部分完成與尚未完成項目。','done'],
-    ['N17','採購管理水管圖／SHEET排序與節點連結','已完成並收納於本區：依《iSM-採購管理系統》建立採購水管圖，主線為單據性質→請購→採購→到貨→進貨→驗收→進貨確認／庫存過帳→計價→應付→付款；驗退件退回、採購退貨／折讓、採購進度、未交採購與進貨入庫明細以分支呈現。每個節點可依登入權限導向對應 SHEET，PUR 分頁也已依文件流程排序。','done']
+    ['N17','採購管理水管圖／SHEET排序與節點連結','已完成並收納於本區：依《iSM-採購管理系統》建立採購水管圖，主線為單據性質→請購→採購→到貨→進貨→驗收→進貨確認／庫存過帳→計價→應付→付款；驗退件退回、採購退貨／折讓、採購進度、未交採購與進貨入庫明細以分支呈現。每個節點可依登入權限導向對應 SHEET，PUR 分頁也已依文件流程排序。','done'],
+    ['N18','庫存管理水管圖／SHEET排序與節點連結','已完成並收納於本區：依《iSM-庫存管理系統》建立獨立 INV 水管圖，主線為品號／規則前置→庫存開帳→庫存異動→來源驗收／過帳→完整可用量／庫存餘額→異動台帳→反過帳／更正；轉撥、暫出／暫入、盤點、銷售出庫／退回與採購入庫／退貨以支線呈現。每個節點可依登入權限導向對應 SHEET，INV 分頁已依主流程排序。','done']
    ];
   // 使用者已確認的項目進入開發順序；完成後即移到下方「已完成內容」折疊區。
   const roadmap=confirmedNextPhaseRoadmap;
@@ -1248,17 +1288,18 @@ function renderArchitectureScreen(){
   const compactFlow=`<div class="architecture-compact">${compactColumn('訂單／銷售','COP → ACR',[
      ['銷售預測','依品號／依類別；版本／期間／明細／結案','done','接單量分開核對'],['報價／合約／獨立起點','公司別單別／核准／轉訂單','done',''],['訂單／變更','公司別單別／分批銷貨','done','查可用量'],['銷貨確認','公司別單別／過帳後出庫','done','庫存－'],['銷售統計彙總','COPR20 客戶／品號／業務員／期間；訂單／已交／未交量額','done','正式彙總'],['銷售分析','客戶／品號／部門／業務員／期間；庫存／應收可追溯','done','COP-ANALYSIS'],['銷貨沖回／訂單解結','沖回後受控重開再作','done','已完成'],['銷退驗收','合格才可回庫','done','驗收卡控'],['銷退／折讓','庫存回庫／折讓不動庫存；應收沖帳／待抵／退款同步','done','已完成'],['應收憑單','結帳日、發票與多幣別已完成','done',''],['收款／票據','匯差／託收／兌現／退票／註銷已完成','done','銀行餘額＋歷程']
   ])}${compactColumn('庫存管理','INV 中央控制',[
-    ['完整可用量','現有＋待進貨－待出貨－安全庫存','done',''],['庫存餘額','公司／品號／庫別','done',''],['異動台帳','進貨＋／銷貨－／退回／暫出入','done',''],['反過帳','原單保留／沖回再作','done',''],['流程稽核','合法起點／孤兒／逾期／未轉未交／帳齡資金／更正建議','done','已完成'],['匯入品質','來源鍵／異常／更正案件','done','SH／SC 唯讀'],['合法補充／暫出入','獨立起點／轉撥／調整','done','已完成'],['會計分錄底稿','產生／維護／核准／拋轉／還原','done','已完成'],['立沖／預收預付／對沖','期初批次、可用／已用／剩餘、分批轉抵／退款／對沖已完成','done','已完成'],['月底／年度結轉','12 個月快照／關帳攔截／跨年度已完成','done','已完成'],['傳票／總帳','試算表／科目餘額／明細／期初期末核對','done','已完成'],['報表中心／公司回歸','預計進料／未交／帳齡／資金／票況／SC 財報預覽','done','SH／SC 同套稽核']
+    ['庫存開帳','期初數量／金額；核准後過帳','done','庫存＋'],['庫存異動','領用／退料／調整／報廢／轉撥','done','異動建立'],['驗收／庫存過帳','採購合格量入庫；銷貨確認出庫','done','庫存±'],['完整可用量','現有＋待進貨－待出貨－安全庫存','done',''],['異動台帳','進貨＋／銷貨－／退回／轉撥／暫出入／調整','done',''],['反過帳／更正','原單保留／沖回再作','done','已完成'],['流程稽核','合法起點／孤兒／逾期／未轉未交／帳齡資金／更正建議','done','已完成'],['匯入品質','來源鍵／異常／更正案件','done','SH／SC 唯讀'],['合法補充／暫出入','獨立起點／轉撥／調整','done','已完成'],['會計分錄底稿','產生／維護／核准／拋轉／還原','done','已完成'],['立沖／預收預付／對沖','期初批次、可用／已用／剩餘、分批轉抵／退款／對沖已完成','done','已完成'],['月底／年度結轉','12 個月快照／關帳攔截／跨年度已完成','done','已完成'],['傳票／總帳','試算表／科目餘額／明細／期初期末核對','done','已完成'],['報表中心／公司回歸','預計進料／未交／帳齡／資金／票況／SC 財報預覽','done','SH／SC 同套稽核']
    ])}${compactColumn('請購／採購','PUR → ACP',[
      ['請購／未轉單起點','公司別單別／核准／部分轉單','done',''],['採購／變更','轉單可選單別／分批進貨','done',''],['到貨／獨立進貨','公司別單別／尚未入庫','done',''],['進貨驗收','到貨／合格／驗退量核對','done','已完成'],['入庫過帳','合格量入庫','done','庫存＋'],['驗退／退貨','已入庫可退量／過帳回沖','done','庫存－'],['應付憑單','計價／付款量、費用、負向退貨與合併應付','done','已完成'],['付款／票據','付款量／託收／兌現／退票／註銷已完成','done','銀行餘額＋歷程']
   ])}<button class="compact-finance" type="button" data-finance-screen="finance-flow"><span>銷售應收</span><b>→</b><strong>會計傳票／總帳</strong><b>←</b><span>採購應付</span><small>點選展開財務流程</small></button></div>`;
   const roadmapHtml=renderConfirmedNextPhaseRoadmap(roadmap);
-  $('#canvas').innerHTML=`<section class="screen architecture-screen"><div class="screen-head"><h2>ERP 系統流程與開發狀態圖</h2><span class="code">${target}</span><button class="btn" id="refreshScreen" type="button">重新整理</button></div><div class="screen-body"><div class="desc">目前公司：${company}；資料來源：${source}。本圖依 iSM 配銷實作演練班與財務實作演練班整理；綠色代表已實際驗證完成，橘色代表部分完成，紅色虛線代表尚未完成；已確認的落差列在「下一階段開發順序」。製造、BOM 與成本計算暫不納入。下方「銷售應收／會計傳票／採購應付」可點選展開財務流程圖。</div><div class="arch-status-legend"><span class="done">已完成且已驗證</span><span class="partial">部分完成／仍需補強</span><span class="planned">尚未完成／待確認</span><span class="readonly">舊 ERP 歷史資料維持唯讀</span></div><div class="architecture-block"><h3>全流程總覽：左銷售、中庫存、右採購、下方財務總帳</h3><div class="architecture-canvas">${flowSvg}${compactFlow}</div></div><div class="architecture-block"><h3>下一階段開發順序（已確認項目）</h3><div class="architecture-roadmap">${roadmapHtml}</div><details class="architecture-completed"><summary>已完成內容（點此展開）</summary><div class="architecture-roadmap">${completed.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${no}</span><div><strong>${title}</strong><p>${desc}</p></div></div>`).join('')}</div></details></div><div class="arch-rule-grid"><div><strong>數量控制</strong><br>來源單可一對多轉單，使用已交量與剩餘量判斷結案。</div><div><strong>庫存控制</strong><br>只有核准、驗收及過帳完成後，才更新庫存餘額與異動台帳。</div><div><strong>更正控制</strong><br>已過帳原單不可直接修改；以沖回單反向過帳，保留原單並記錄重作說明。</div><div><strong>關帳控制</strong><br>12 個月月底快照、年度結轉與重新開帳攔截已建立；關帳期間禁止財務、庫存、銷售、採購與沖回過帳。</div></div></div></section>`;
-  document.querySelector('.architecture-block .architecture-canvas')?.insertAdjacentHTML('beforebegin','<div class="architecture-pipe-entry"><div><strong>第一階段：銷售管理水管圖</strong><small>依《iSM-訂單管理系統》排序；節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-sales-screen="sales-pipe">開啟銷售水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：採購管理水管圖</strong><small>依《iSM-採購管理系統》排序；請購、採購、到貨、驗收、進貨、退貨與應付節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-purchase-screen="purchase-pipe">開啟採購水管圖</button></div>');
+  $('#canvas').innerHTML=`<section class="screen architecture-screen"><div class="screen-head"><h2>ERP 系統流程與開發狀態圖</h2><span class="code">${target}</span><button class="btn" id="refreshScreen" type="button">重新整理</button></div><div class="screen-body"><div class="desc">目前公司：${company}；資料來源：${source}。本圖依 iSM 配銷實作演練班與財務實作演練班整理；綠色代表已實際驗證完成，橘色代表部分完成，紅色虛線代表尚未完成；已確認的落差列在「下一階段開發順序」。製造、BOM 與成本計算暫不納入。上方銷售／庫存／採購水管圖與下方「銷售應收／會計傳票／採購應付」均可點選展開。</div><div class="arch-status-legend"><span class="done">已完成且已驗證</span><span class="partial">部分完成／仍需補強</span><span class="planned">尚未完成／待確認</span><span class="readonly">舊 ERP 歷史資料維持唯讀</span></div><div class="architecture-block"><h3>全流程總覽：左銷售、中庫存、右採購、下方財務總帳</h3><div class="architecture-canvas">${flowSvg}${compactFlow}</div></div><div class="architecture-block"><h3>下一階段開發順序（已確認項目）</h3><div class="architecture-roadmap">${roadmapHtml}</div><details class="architecture-completed"><summary>已完成內容（點此展開）</summary><div class="architecture-roadmap">${completed.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${no}</span><div><strong>${title}</strong><p>${desc}</p></div></div>`).join('')}</div></details></div><div class="arch-rule-grid"><div><strong>數量控制</strong><br>來源單可一對多轉單，使用已交量與剩餘量判斷結案。</div><div><strong>庫存控制</strong><br>只有核准、驗收及過帳完成後，才更新庫存餘額與異動台帳。</div><div><strong>更正控制</strong><br>已過帳原單不可直接修改；以沖回單反向過帳，保留原單並記錄重作說明。</div><div><strong>關帳控制</strong><br>12 個月月底快照、年度結轉與重新開帳攔截已建立；關帳期間禁止財務、庫存、銷售、採購與沖回過帳。</div></div></div></section>`;
+  document.querySelector('.architecture-block .architecture-canvas')?.insertAdjacentHTML('beforebegin','<div class="architecture-pipe-entry"><div><strong>第一階段：銷售管理水管圖</strong><small>依《iSM-訂單管理系統》排序；節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-sales-screen="sales-pipe">開啟銷售水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：庫存管理水管圖</strong><small>依《iSM-庫存管理系統》排序；開帳、異動、驗收／過帳、可用量、台帳與更正節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-inventory-screen="inventory-pipe">開啟庫存水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：採購管理水管圖</strong><small>依《iSM-採購管理系統》排序；請購、採購、到貨、驗收、進貨、退貨與應付節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-purchase-screen="purchase-pipe">開啟採購水管圖</button></div>');
   $('#refreshScreen').onclick=renderArchitectureScreen;
   const recommendationBlock=`<div class="architecture-block"><h3>下一階段開發建議</h3><div class="desc">目前沒有尚未確認的建議；後續檢查到的新落差會先列在這裡，確認要修改後再移入上方「下一階段開發順序」。</div></div>`;
   $('#canvas .arch-rule-grid')?.insertAdjacentHTML('beforebegin',recommendationBlock);
   bindSalesPipeLinks();
+  bindInventoryPipeLinks();
   bindPurchasePipeLinks();
   document.querySelectorAll('[data-finance-screen]').forEach(button=>button.onclick=()=>{state.module='FIN';state.screen=button.dataset.financeScreen;renderAll();});
 }

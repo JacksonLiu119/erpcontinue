@@ -25,6 +25,17 @@ function canViewFeature(screen) {
       'purchase-progress','open-purchase-orders','purchase-receipts','purchase-flow-audit'
     ].includes(row.feature_code) && Number(row.can_view));
   }
+  // 庫存水管圖是導覽頁；具備任一庫存作業或庫存報表權限即可看到，
+  // 每個節點點入後仍會依目標 SHEET 的權限再次攔截。
+  if (screen === 'inventory-pipe') {
+    return accessState.permissions.some(row => [
+      'inventory-opening','inventory-document-types','inventory-transactions',
+      'inventory-transfers','inventory-temporary','inventory-stocktake',
+      'inventory-posting','inventory-reversals','inventory-new-ledger','inventory-new-balance',
+      'inventory-detail','inventory-ledger','inventory-balance','inventory-movement-stats',
+      'department-movement-stats'
+    ].includes(row.feature_code) && Number(row.can_view));
+  }
   const code = featureAliases[screen] || screen;
   return accessState.permissions.some(row => row.feature_code === code && Number(row.can_view));
 }
