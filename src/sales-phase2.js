@@ -2,6 +2,8 @@ import {
   pool,
   tx,
   ensureTargetFinanceWorkflowSchema,
+  ensureTargetProcurementTypeSchema,
+  ensureTargetReceiptWorkflowSchema,
   ensureTargetSalesPhase2Schema,
   ensureTargetSalesPricingSchema
 } from './db.js';
@@ -241,6 +243,379 @@ function exceptionRow(values) {
 function csvCell(value) {
   const result = String(value ?? '');
   return /[",\r\n]/.test(result) ? `"${result.replaceAll('"', '""')}"` : result;
+}
+
+function documentTypeNeedsApproval(documentType) {
+  return Number(documentType?.requires_approval ?? 1) !== 0;
+}
+
+async function loadProcurementDocumentType(conn, c, kind, requestedCode = null) {
+  const code = text(requestedCode, `${kind}單別`, 20);
+  const conditions = [
+    ...contextParams(c),
+    'document_kind=?',
+    'is_active=1',
+    'source_database=?'
+  ];
+  const params = [...contextValues(c), kind, c.source_database];
+  if (code) {
+    conditions.push('type_code=?');
+    params.push(code);
+  }
+  const [[row]] = await conn.query(`SELECT * FROM procurement_document_types
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY is_default DESC,id
+    LIMIT 1`, params);
+  if (!row) throw badRequest(`找不到目前公司別啟用中的${kind}單別${code ? `：${code}` : ''}`);
+  return row;
+}
+
+async function loadSupplier(conn, c, supplierCode) {
+  const code = text(supplierCode, '供應商代號', 30, true);
+  const [[row]] = await conn.query(`SELECT supplier_code,supplier_name,currency_code
+    FROM erp_suppliers WHERE ${contextParams(c).join(' AND ')} AND supplier_code=? LIMIT 1`,
+  [...contextValues(c), code]);
+  if (!row) throw badRequest(`找不到目前公司別的供應商：${code}`);
+  return row;
+}
+
+async function nextConfiguredProcurementNumber(conn, table, column, documentType, value, manualNumber = null) {
+  const supplied = text(manualNumber, '正式單號', 60);
+  const method = String(documentType.numbering_method || 'daily').toLowerCase();
+  if (method === 'manual') {
+    if (!supplied) throw badRequest(`單別 ${documentType.type_code} 採手動編號，請輸入正式單號`);
+    const [[exists]] = await conn.query(`SELECT 1 AS found FROM ${table} WHERE ${column}=? LIMIT 1`, [supplied]);
+    if (exists) throw badRequest(`正式單號已存在：${supplied}`);
+    return supplied;
+  }
+  const compact = String(value).replaceAll('-', '');
+  const yearDigits = Math.min(Math.max(Number(documentType.year_digits) || 4, 1), 4);
+  const serialDigits = Math.min(Math.max(Number(documentType.serial_digits) || 4, 1), 9);
+  const year = compact.slice(0, 4).slice(-yearDigits);
+  const period = method === 'daily'
+    ? `${year}${compact.slice(4, 8)}`
+    : method === 'monthly' ? `${year}${compact.slice(4, 6)}` : '';
+  const prefix = String(documentType.number_prefix || documentType.type_code || '').trim();
+  const base = `${prefix}${period}`;
+  const maxLength = table === 'procurement_requisitions' || table === 'procurement_orders' ? 30 : 60;
+  if (!base || base.length + serialDigits > maxLength) throw badRequest(`單別 ${documentType.type_code} 的編號規則超過正式單號欄位長度`);
+  for (let serial = 1; serial < 100000000; serial += 1) {
+    const candidate = `${base}${String(serial).padStart(serialDigits, '0')}`;
+    const [[exists]] = await conn.query(`SELECT 1 AS found FROM ${table} WHERE ${column}=? LIMIT 1`, [candidate]);
+    if (!exists) return candidate;
+  }
+  throw badRequest(`無法依單別 ${documentType.type_code} 產生正式單號`);
+}
+
+async function loadSalesDemand(conn, c, id, lock = false) {
+  const suffix = lock ? ' FOR UPDATE' : '';
+  const [[row]] = await conn.query(`SELECT d.*,o.document_no order_no,o.document_date order_date,o.customer_code,
+      o.currency_code order_currency_code,o.status order_status,oi.item_name,oi.specification,oi.unit,
+      oi.warehouse_code order_warehouse_code,oi.quantity order_quantity,oi.related_quantity order_delivered_quantity,
+      GREATEST(oi.quantity-oi.related_quantity,0) order_remaining_quantity
+    FROM erp_sales_procurement_demands d
+    JOIN sales_documents o ON o.id=d.order_id AND o.document_kind='sales_order'
+      AND ${contextParams(c, 'o').join(' AND ')}
+    JOIN sales_document_items oi ON oi.id=d.order_item_id AND oi.document_id=o.id
+    WHERE d.id=? AND ${contextParams(c, 'd').join(' AND ')}${suffix}`,
+  [...contextValues(c), id, ...contextValues(c)]);
+  if (!row) throw notFound('找不到目前公司別的缺料採購需求');
+  return row;
+}
+
+async function demandProcurementSummary(conn, c, demand) {
+  const demandId = Number(demand.id);
+  const requisitionItemId = Number(demand.procurement_requisition_item_id || 0) || null;
+  const [requisitionRows] = await conn.query(`SELECT r.id,r.requisition_no,r.document_type,r.requisition_date,r.status,
+      ri.id requisition_item_id,ri.item_code,ri.qty_requested,ri.qty_ordered,ri.required_date,
+      ri.suggested_supplier_code,ri.suggested_unit_price,ri.purchase_locked
+    FROM procurement_requisition_items ri
+    JOIN procurement_requisitions r ON r.id=ri.requisition_id
+      AND ${contextParams(c, 'r').join(' AND ')}
+    WHERE (ri.id=? OR ri.sales_procurement_demand_id=?)
+    ORDER BY ri.id LIMIT 1`, [...contextValues(c), requisitionItemId, demandId]);
+  const requisition = requisitionRows[0] || null;
+  const [purchaseOrders] = await conn.query(`SELECT po.id,po.purchase_order_no,po.document_type,po.order_date,
+      po.expected_date,po.supplier_code,po.currency_code,po.status,
+      poi.id purchase_order_item_id,poi.qty_ordered,poi.qty_received,poi.qty_cancelled,poi.unit_price,
+      poi.warehouse_code,poi.expected_date item_expected_date
+    FROM procurement_order_items poi
+    JOIN procurement_orders po ON po.id=poi.purchase_order_id
+      AND ${contextParams(c, 'po').join(' AND ')}
+    WHERE (poi.sales_procurement_demand_id=? OR (? IS NOT NULL AND poi.requisition_item_id=?))
+      AND po.status<>'cancelled'
+    ORDER BY po.order_date,po.id,poi.line_no`, [...contextValues(c), demandId, requisitionItemId, requisitionItemId]);
+  const [receiptRows] = await conn.query(`SELECT
+      COALESCE(SUM(ri.qty_received),0) received_quantity,
+      COALESCE(SUM(ri.qty_accepted),0) accepted_quantity,
+      COALESCE(SUM(ri.qty_rejected),0) rejected_quantity,
+      COALESCE(SUM(ri.qty_returned),0) returned_quantity,
+      COALESCE(SUM(ri.qty_priced),0) priced_quantity,
+      COALESCE(SUM(ri.qty_paid),0) paid_quantity
+    FROM procurement_receipt_items ri
+    JOIN procurement_receipts r ON r.id=ri.receipt_id
+      AND ${contextParams(c, 'r').join(' AND ')}
+    JOIN procurement_order_items poi ON poi.id=ri.purchase_order_item_id
+    WHERE (poi.sales_procurement_demand_id=? OR (? IS NOT NULL AND poi.requisition_item_id=?))
+      AND r.status<>'voided'`, [...contextValues(c), demandId, requisitionItemId, requisitionItemId]);
+  const receipt = receiptRows[0] || {};
+  const requested = Number(demand.quantity || 0);
+  const ordered = purchaseOrders.reduce((sum, row) => sum + Number(row.qty_ordered || 0), 0);
+  const pendingApproval = purchaseOrders
+    .filter(row => String(row.status) === 'draft')
+    .reduce((sum, row) => sum + Number(row.qty_ordered || 0), 0);
+  const confirmedOrdered = Math.max(ordered - pendingApproval, 0);
+  const cancelled = purchaseOrders.reduce((sum, row) => sum + Number(row.qty_cancelled || 0), 0);
+  const received = Number(receipt.received_quantity || 0);
+  const accepted = Number(receipt.accepted_quantity || 0);
+  const returned = Number(receipt.returned_quantity || 0) + Number(receipt.rejected_quantity || 0);
+  const priced = Number(receipt.priced_quantity || 0);
+  const paid = Number(receipt.paid_quantity || 0);
+  const orderRemaining = Math.max(Number(demand.order_remaining_quantity || 0), 0);
+  return {
+    requested_quantity: requested,
+    formal_requisition_quantity: Number(requisition?.qty_requested || 0),
+    formal_requisition_ordered_quantity: Number(requisition?.qty_ordered || 0),
+    formal_purchase_quantity: ordered,
+    confirmed_purchase_quantity: confirmedOrdered,
+    pending_purchase_approval_quantity: pendingApproval,
+    cancelled_quantity: cancelled,
+    received_quantity: received,
+    accepted_quantity: accepted,
+    returned_quantity: returned,
+    priced_quantity: priced,
+    paid_quantity: paid,
+    remaining_to_purchase: Math.max(requested - ordered, 0),
+    remaining_to_receive: Math.max(ordered - cancelled - received, 0),
+    remaining_to_accept: Math.max(received - accepted - returned, 0),
+    remaining_to_price: Math.max(accepted - returned - priced, 0),
+    remaining_to_pay: Math.max(priced - paid, 0),
+    order_delivered_quantity: Number(demand.order_delivered_quantity || 0),
+    order_remaining_quantity: orderRemaining,
+    order_status: demand.order_status,
+    requisition,
+    purchase_orders: purchaseOrders
+  };
+}
+
+function demandResponse(demand, summary) {
+  const requisitionStatus = String(summary.requisition?.status || '');
+  const pendingPurchaseApproval = Number(summary.pending_purchase_approval_quantity || 0) > EPS;
+  const nextStage = requisitionStatus === 'draft'
+    ? '等待正式請購核准'
+    : pendingPurchaseApproval
+      ? '等待正式採購核准'
+      : summary.remaining_to_purchase > EPS
+        ? '正式請購／採購仍有未轉量'
+        : summary.remaining_to_receive > EPS
+          ? '採購已建立，等待到貨／進貨'
+          : summary.remaining_to_accept > EPS
+            ? '等待進貨驗收'
+            : summary.remaining_to_price > EPS
+              ? '等待進貨計價／應付'
+              : summary.remaining_to_pay > EPS ? '等待應付付款' : '採購流程已完成';
+  return {
+    ...demand,
+    quantity: Number(demand.quantity || 0),
+    unit_price: Number(demand.unit_price || 0),
+    status: demand.status,
+    formal_requisition: summary.requisition,
+    formal_purchase_orders: summary.purchase_orders,
+    formal_purchase_order: summary.purchase_orders[0] || null,
+    quantities: summary,
+    source: {
+      order_id: Number(demand.order_id), order_no: demand.order_no,
+      order_item_id: Number(demand.order_item_id), item_code: demand.item_code,
+      order_quantity: Number(demand.order_quantity || 0),
+      delivered_quantity: Number(demand.order_delivered_quantity || 0),
+      remaining_quantity: Number(demand.order_remaining_quantity || 0)
+    },
+    next_stage: nextStage,
+    formal_requisition_status: requisitionStatus || null,
+    formal_purchase_order_status: summary.purchase_orders.find(row => String(row.status) !== 'cancelled')?.status || null
+  };
+}
+
+async function ensureTemporaryIncomeAccounts(conn, c) {
+  for (const [code, name, type] of [['1101', '應收帳款', 'asset'], ['4101', '銷貨收入', 'revenue']]) {
+    await conn.query(`INSERT IGNORE INTO accounting_accounts
+      (tenant_id,company_id,source_system,account_code,account_name,account_type)
+      VALUES(?,?,?,?,?,?)`, [...contextValues(c).slice(0, 3), code, name, type]);
+  }
+}
+
+async function createTemporaryIncomeDraft(conn, c, document, amount, partyCode, memo, actorId, accountCodes = {}) {
+  const debitCode = text(accountCodes.debit_account_code || '1101', '暫出收入認列借方科目', 30, true);
+  const creditCode = text(accountCodes.credit_account_code || '4101', '暫出收入認列貸方科目', 30, true);
+  if (debitCode === creditCode) throw badRequest('暫出收入認列借貸科目不可相同');
+  await ensureTemporaryIncomeAccounts(conn, c);
+  const [accounts] = await conn.query(`SELECT account_code,account_name FROM accounting_accounts
+    WHERE tenant_id=? AND company_id=? AND source_system=? AND is_active=1 AND account_code IN (?,?)`,
+  [c.tenant_id, c.company_id, c.source_system, debitCode, creditCode]);
+  const accountMap = new Map(accounts.map(row => [String(row.account_code), row]));
+  if (!accountMap.has(debitCode) || !accountMap.has(creditCode)) throw badRequest('暫出收入認列科目不存在或已停用');
+  const existing = await conn.query(`SELECT id,draft_no,status FROM accounting_drafts
+    WHERE ${contextParams(c).join(' AND ')} AND source_kind='inventory_temp_out_income' AND source_id=?
+    LIMIT 1 FOR UPDATE`, [...contextValues(c), document.id]);
+  if (existing[0][0]) return { ...existing[0][0], reused: true };
+  const draftNo = await nextNumber(conn, 'accounting_drafts', 'draft_no', 'AD', c, document.document_date);
+  const [header] = await conn.query(`INSERT INTO accounting_drafts(
+      tenant_id,company_id,source_system,source_database,draft_no,draft_date,source_kind,source_id,
+      source_document_no,account_type,party_code,debit_account_code,debit_account_name,
+      credit_account_code,credit_account_name,amount,status,source_locked,source_locked_at,source_locked_by,memo,created_by)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',0,NULL,NULL,?,?)`, [
+    ...contextValues(c), draftNo, dateOnly(document.document_date), 'inventory_temp_out_income', document.id,
+    document.document_no, 'AR', partyCode || null, debitCode, accountMap.get(debitCode).account_name,
+    creditCode, accountMap.get(creditCode).account_name, amount, memo || '暫出收入認列底稿', actorId
+  ]);
+  const lines = [
+    [1, debitCode, accountMap.get(debitCode).account_name, amount, 0, partyCode || null, memo || '暫出收入認列'],
+    [2, creditCode, accountMap.get(creditCode).account_name, 0, amount, partyCode || null, memo || '暫出收入認列']
+  ];
+  for (const line of lines) await conn.query(`INSERT INTO accounting_draft_lines
+    (draft_id,line_no,account_code,account_name,debit_amount,credit_amount,party_code,description)
+    VALUES(?,?,?,?,?,?,?,?)`, [header.insertId, ...line]);
+  await conn.query(`INSERT INTO accounting_draft_sources
+    (draft_id,source_kind,source_id,source_document_no,source_amount,locked_amount)
+    VALUES(?,?,?,?,?,?)`, [header.insertId, 'inventory_temp_out', document.id, document.document_no, amount, amount]);
+  await conn.query(`INSERT INTO accounting_draft_events(draft_id,event_kind,before_status,after_status,reason,user_id)
+    VALUES(?,'generated',NULL,'draft',?,?)`, [header.insertId, memo || '暫出收入認列底稿', actorId]);
+  return { id: Number(header.insertId), draft_no: draftNo, status: 'draft', reused: false };
+}
+
+async function convertDemandToProcurement(conn, c, demandId, body, actorId, { requirePending = false } = {}) {
+  let demand = await loadSalesDemand(conn, c, demandId, true);
+  if (requirePending && demand.status !== 'pending') throw badRequest('只有目前公司的待審採購需求可以核准');
+  if (!requirePending && !['converted', 'pending'].includes(demand.status)) throw badRequest('只有已核准或待核准的缺料需求可以轉正式採購');
+
+  const supplierCode = text(body.supplier_code || demand.supplier_code, '供應商代號', 30, true);
+  const supplier = await loadSupplier(conn, c, supplierCode);
+  const requisitionType = await loadProcurementDocumentType(conn, c, 'requisition', body.requisition_document_type || demand.requisition_document_type);
+  const purchaseType = await loadProcurementDocumentType(conn, c, 'purchase_order', body.purchase_document_type || demand.purchase_document_type);
+  const demandDate = date(body.demand_date || demand.created_at && dateOnly(demand.created_at) || dateOnly(demand.order_date), '需求日期', true);
+  const expectedDate = date(body.expected_date || demand.expected_date || demand.order_date, '預計到貨日');
+  const currencyCode = text(body.currency_code || demand.currency_code || demand.order_currency_code || supplier.currency_code || 'TWD', '幣別', 10, true);
+  const unitPrice = number(body.unit_price ?? demand.unit_price ?? 0, '採購單價', { min: 0 }) ?? 0;
+  const warehouseCode = text(body.warehouse_code || demand.warehouse_code || demand.order_warehouse_code, '庫別', 20);
+  const requesterCode = text(body.requester_code || demand.requester_code, '申請人員', 20);
+  const departmentCode = text(body.department_code || demand.department_code, '部門', 10);
+  const requisitionNoInput = text(body.requisition_no, '請購單號', 60);
+  const purchaseOrderNoInput = text(body.purchase_order_no, '採購單號', 60);
+
+  await conn.query(`UPDATE erp_sales_procurement_demands SET supplier_code=?,requisition_document_type=?,purchase_document_type=?,
+      currency_code=?,unit_price=?,expected_date=?,warehouse_code=?,department_code=?,requester_code=?,approved_by=?,approved_at=COALESCE(approved_at,NOW())
+    WHERE id=? AND ${contextParams(c).join(' AND ')}`, [supplierCode, requisitionType.type_code, purchaseType.type_code,
+    currencyCode, unitPrice, expectedDate, warehouseCode, departmentCode, requesterCode, actorId, demandId, ...contextValues(c)]);
+
+  let requisition = null;
+  let requisitionItem = null;
+  if (demand.procurement_requisition_item_id) {
+    [[requisitionItem]] = await conn.query(`SELECT ri.*,r.id requisition_id,r.requisition_no,r.document_type requisition_document_type,r.status requisition_status
+      FROM procurement_requisition_items ri JOIN procurement_requisitions r ON r.id=ri.requisition_id
+      WHERE ri.id=? AND ${contextParams(c, 'r').join(' AND ')} FOR UPDATE`, [demand.procurement_requisition_item_id, ...contextValues(c)]);
+    if (!requisitionItem) throw badRequest('缺料需求已記錄請購明細，但正式請購資料不存在');
+    requisition = requisitionItem;
+  } else {
+    const requisitionNo = await nextConfiguredProcurementNumber(conn, 'procurement_requisitions', 'requisition_no', requisitionType, demandDate, requisitionNoInput);
+    const requisitionStatus = documentTypeNeedsApproval(requisitionType) ? 'draft' : 'approved';
+    const [header] = await conn.query(`INSERT INTO procurement_requisitions(
+        tenant_id,company_id,source_system,document_type,requisition_no,requisition_date,requester_code,
+        department_code,warehouse_code,status,note,source_database)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, [
+      c.tenant_id, c.company_id, c.source_system, requisitionType.type_code, requisitionNo, demandDate,
+      requesterCode, departmentCode, warehouseCode, requisitionStatus,
+      `S06 缺料需求 ${demand.demand_no}／來源訂單 ${demand.order_no}：${demand.reason}`, c.source_database
+    ]);
+    const [item] = await conn.query(`INSERT INTO procurement_requisition_items(
+        requisition_id,line_no,item_code,item_name,specification,warehouse_code,unit,qty_requested,qty_ordered,
+        required_date,note,suggested_supplier_code,suggested_unit_price,purchase_locked,sales_procurement_demand_id)
+      VALUES(?,1,?,?,?,?,?,?,0,?,?,?, ?,?,?)`, [
+      header.insertId, demand.item_code, demand.item_name || '', demand.specification || '', warehouseCode,
+      demand.unit || 'PCS', Number(demand.quantity), expectedDate,
+      `來源訂單 ${demand.order_no}／需求 ${demand.demand_no}`, supplierCode, unitPrice,
+      requisitionStatus === 'approved' ? 1 : 0, demandId
+    ]);
+    requisition = { id: Number(header.insertId), requisition_no: requisitionNo, document_type: requisitionType.type_code, status: requisitionStatus };
+    requisitionItem = { id: Number(item.insertId), requisition_id: Number(header.insertId), item_code: demand.item_code,
+      item_name: demand.item_name || '', specification: demand.specification || '', warehouse_code: warehouseCode,
+      unit: demand.unit || 'PCS', qty_requested: Number(demand.quantity), qty_ordered: 0, required_date: expectedDate,
+      suggested_supplier_code: supplierCode, suggested_unit_price: unitPrice, purchase_locked: requisitionStatus === 'approved' ? 1 : 0,
+      requisition_no: requisitionNo, requisition_document_type: requisitionType.type_code, requisition_status: requisitionStatus };
+    await conn.query(`UPDATE erp_sales_procurement_demands SET procurement_document_id=?,procurement_requisition_id=?,
+        procurement_requisition_item_id=?,formal_requisition_no=?,converted_by=?,converted_at=NOW(),conversion_note=?
+      WHERE id=? AND ${contextParams(c).join(' AND ')}`, [header.insertId, header.insertId, item.insertId, requisitionNo,
+      actorId, `已依公司別單別 ${requisitionType.type_code} 建立正式請購`, demandId, ...contextValues(c)]);
+  }
+
+  let purchaseOrders = [];
+  [purchaseOrders] = await conn.query(`SELECT po.id,po.purchase_order_no,po.document_type,po.order_date,po.expected_date,
+      po.supplier_code,po.currency_code,po.status,poi.id purchase_order_item_id,poi.qty_ordered,poi.qty_received,poi.qty_cancelled,poi.unit_price
+    FROM procurement_order_items poi JOIN procurement_orders po ON po.id=poi.purchase_order_id
+      AND ${contextParams(c, 'po').join(' AND ')}
+    WHERE (poi.sales_procurement_demand_id=? OR poi.requisition_item_id=?) AND po.status<>'cancelled'
+    ORDER BY po.id FOR UPDATE`, [...contextValues(c), demandId, requisitionItem.id]);
+
+  let purchaseOrder = purchaseOrders[0] || null;
+  let purchaseOrderPendingReason = null;
+  if (!purchaseOrder) {
+    if (!['approved', 'converted'].includes(String(requisition.status || requisition.requisition_status))) {
+      purchaseOrderPendingReason = `正式請購單 ${requisition.requisition_no} 尚未核准，依單別規則暫不建立採購單`;
+    } else {
+      const expectedSource = text(purchaseType.source_document_kind, '採購單前置來源', 40);
+      if (expectedSource && expectedSource !== 'requisition') throw badRequest(`採購單別 ${purchaseType.type_code} 不接受請購單作為前置來源`);
+      const purchaseDate = demandDate;
+      const purchaseNo = await nextConfiguredProcurementNumber(conn, 'procurement_orders', 'purchase_order_no', purchaseType, purchaseDate, purchaseOrderNoInput);
+      const purchaseStatus = documentTypeNeedsApproval(purchaseType) ? 'draft' : 'confirmed';
+      const [header] = await conn.query(`INSERT INTO procurement_orders(
+          tenant_id,company_id,source_system,document_type,purchase_order_no,supplier_code,order_date,expected_date,
+          currency_code,status,note,source_database)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, [
+        c.tenant_id, c.company_id, c.source_system, purchaseType.type_code, purchaseNo, supplierCode,
+        purchaseDate, expectedDate, currencyCode, purchaseStatus,
+        `S06 由缺料需求 ${demand.demand_no} 自動建立／來源請購 ${requisition.requisition_no}`, c.source_database
+      ]);
+      await conn.query(`INSERT INTO procurement_order_items(
+          purchase_order_id,requisition_item_id,sales_procurement_demand_id,line_no,item_code,item_name,specification,
+          warehouse_code,unit,qty_ordered,qty_received,qty_cancelled,unit_price,expected_date,note)
+        VALUES(?,?,?,1,?,?,?,?,?,?,?,?,?,?,?)`, [
+        header.insertId, requisitionItem.id, demandId, demand.item_code, demand.item_name || '', demand.specification || '',
+        warehouseCode, demand.unit || 'PCS', Number(demand.quantity), 0, 0, unitPrice, expectedDate,
+        `來源訂單 ${demand.order_no}／需求 ${demand.demand_no}`
+      ]);
+      purchaseOrder = { id: Number(header.insertId), purchase_order_no: purchaseNo, document_type: purchaseType.type_code,
+        order_date: purchaseDate, expected_date: expectedDate, supplier_code: supplierCode, currency_code: currencyCode,
+        status: purchaseStatus, purchase_order_item_id: null, qty_ordered: Number(demand.quantity), qty_received: 0,
+        qty_cancelled: 0, unit_price: unitPrice };
+      if (purchaseStatus !== 'draft') {
+        await conn.query(`UPDATE procurement_requisition_items SET qty_ordered=LEAST(qty_requested,qty_ordered+?),purchase_locked=1 WHERE id=?`, [Number(demand.quantity), requisitionItem.id]);
+        const [[remainingRequisition]] = await conn.query(`SELECT COUNT(*) count
+          FROM procurement_requisition_items WHERE requisition_id=? AND qty_requested>qty_ordered`, [requisitionItem.requisition_id]);
+        await conn.query(`UPDATE procurement_requisitions SET status=? WHERE id=? AND ${contextParams(c).join(' AND ')}`,
+          [Number(remainingRequisition.count) ? 'approved' : 'converted', requisitionItem.requisition_id, ...contextValues(c)]);
+      }
+    }
+  }
+
+  const before = { status: demand.status, demand_no: demand.demand_no, procurement_requisition_id: demand.procurement_requisition_id || null };
+  await conn.query(`UPDATE erp_sales_procurement_demands SET status='converted',approved_by=?,approved_at=COALESCE(approved_at,NOW()),
+      procurement_requisition_id=?,procurement_requisition_item_id=?,formal_requisition_no=?,converted_by=?,converted_at=COALESCE(converted_at,NOW()),
+      conversion_note=? WHERE id=? AND ${contextParams(c).join(' AND ')}`,
+  [actorId, requisitionItem.requisition_id || requisition.id, requisitionItem.id, requisition.requisition_no,
+    actorId, purchaseOrderPendingReason || `已建立正式請購 ${requisition.requisition_no}${purchaseOrder ? `／正式採購 ${purchaseOrder.purchase_order_no}` : ''}`,
+    demandId, ...contextValues(c)]);
+  await recordOrderControlEvent(conn, c, demand.order_id, 'procurement_demand_converted', before,
+    { demand_id: demandId, demand_no: demand.demand_no, requisition_no: requisition.requisition_no, purchase_order_no: purchaseOrder?.purchase_order_no || null },
+    purchaseOrderPendingReason || `缺料需求已轉正式請購／採購：${requisition.requisition_no}${purchaseOrder ? `／${purchaseOrder.purchase_order_no}` : ''}`, actorId);
+  const updated = await loadSalesDemand(conn, c, demandId);
+  const summary = await demandProcurementSummary(conn, c, updated);
+  return {
+    ...demandResponse(updated, summary),
+    formal_requisition: summary.requisition || requisition,
+    formal_purchase_order: summary.purchase_orders[0] || purchaseOrder || null,
+    formal_purchase_orders: summary.purchase_orders,
+    purchase_order_pending_reason: purchaseOrderPendingReason,
+    message: purchaseOrderPendingReason || '缺料需求已核准並依目前公司別單別建立正式請購／採購單；正式單號已回寫。'
+  };
 }
 
 export function registerSalesPhase2Routes(app) {
@@ -774,11 +1149,23 @@ export function registerSalesPhase2Routes(app) {
   app.get('/api/sales-workflow/procurement-demands', async (req, res, next) => {
     try {
       await ensureTargetSalesPhase2Schema();
+      await ensureTargetProcurementTypeSchema();
+      await ensureTargetReceiptWorkflowSchema();
       const c = contextOf(req), conditions = [...contextParams(c)], params = [...contextValues(c)];
       if (req.query.order_id) { conditions.push('order_id=?'); params.push(Number(req.query.order_id)); }
       if (req.query.status) { conditions.push('status=?'); params.push(text(req.query.status, '狀態', 20)); }
-      const [rows] = await pool.query(`SELECT * FROM erp_sales_procurement_demands WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT 500`, params);
-      res.json({ ok: true, data: rows });
+      const [rows] = await pool.query(`SELECT * FROM erp_sales_procurement_demands
+        WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT 500`, params);
+      const data = [];
+      for (const row of rows) {
+        // 以目前公司上下文重新接回訂單明細；孤兒需求不在畫面中假裝成正常流程，
+        // 由流程稽核的孤兒單據報表處理。
+        try {
+          const full = await loadSalesDemand(pool, c, row.id);
+          data.push(demandResponse(full, await demandProcurementSummary(pool, c, full)));
+        } catch (_) { /* 稽核會另外列出已失去來源的需求 */ }
+      }
+      res.json({ ok: true, data, company_id: c.company_id, source_database: c.source_database });
     } catch (error) { next(error); }
   });
 
@@ -799,10 +1186,30 @@ export function registerSalesPhase2Routes(app) {
           if (!line) throw badRequest(`第 ${index + 1} 筆不是目前訂單明細`);
           const quantity = positive(input.quantity, `第 ${index + 1} 筆需求量`);
           const remaining = Math.max(Number(line.quantity) - Number(line.related_quantity), 0);
-          if (quantity > remaining + EPS) throw badRequest(`第 ${index + 1} 筆需求量超過訂單未交量 ${remaining}`);
+          const [[reserved]] = await conn.query(`SELECT COALESCE(SUM(quantity),0) quantity
+            FROM erp_sales_procurement_demands
+            WHERE order_item_id=? AND ${contextParams(c).join(' AND ')} AND status IN ('draft','pending','converted')`,
+          [line.id, ...contextValues(c)]);
+          const available = Math.max(remaining - Number(reserved.quantity || 0), 0);
+          if (quantity > available + EPS) throw badRequest(`第 ${index + 1} 筆需求量超過訂單尚未被需求占用的數量 ${available}`);
+          const supplierCode = text(input.supplier_code || body.supplier_code, '供應商代號', 30);
+          if (supplierCode) await loadSupplier(conn, c, supplierCode);
+          const currencyCode = text(input.currency_code || body.currency_code || order.currency_code || 'TWD', '幣別', 10, true);
+          await assertCurrency(conn, c, currencyCode);
+          const unitPrice = number(input.unit_price ?? body.unit_price ?? 0, `第 ${index + 1} 筆採購單價`, { min: 0 }) ?? 0;
+          const expectedDate = date(input.expected_date || body.expected_date, `第 ${index + 1} 筆預計到貨日`);
+          const warehouseCode = text(input.warehouse_code || body.warehouse_code || line.warehouse_code, '庫別', 20);
+          const departmentCode = text(input.department_code || body.department_code, '部門', 10);
+          const requesterCode = text(input.requester_code || body.requester_code, '申請人員', 20);
           const [row] = await conn.query(`INSERT INTO erp_sales_procurement_demands(
-            tenant_id,company_id,source_system,source_database,demand_no,order_id,order_item_id,item_code,quantity,status,reason,created_by)
-            VALUES(?,?,?,?,?,?,?,?,?,'draft',?,?)`, [...contextValues(c), `${demandNo}-${index + 1}`, orderId, line.id, line.item_code, quantity, text(input.reason || body.reason, '需求原因', 500, true), userId(req)]);
+            tenant_id,company_id,source_system,source_database,demand_no,order_id,order_item_id,item_code,quantity,status,reason,
+            supplier_code,requisition_document_type,purchase_document_type,currency_code,unit_price,expected_date,warehouse_code,
+            department_code,requester_code,created_by)
+            VALUES(?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,?,?,?,?,?,?,?)`, [...contextValues(c), `${demandNo}-${index + 1}`, orderId, line.id,
+            line.item_code, quantity, text(input.reason || body.reason, '需求原因', 500, true), supplierCode,
+            text(input.requisition_document_type || body.requisition_document_type, '請購單別', 20),
+            text(input.purchase_document_type || body.purchase_document_type, '採購單別', 20), currencyCode, unitPrice, expectedDate,
+            warehouseCode, departmentCode, requesterCode, userId(req)]);
           inserted.push(Number(row.insertId));
         }
         await recordOrderControlEvent(conn, c, orderId, 'procurement_demand_created', null, { demand_no: demandNo, ids: inserted }, '建立訂單缺料採購需求；待採購人員轉成請購／採購', userId(req));
@@ -826,11 +1233,99 @@ export function registerSalesPhase2Routes(app) {
   app.post('/api/sales-workflow/procurement-demands/:id/approve', async (req, res, next) => {
     try {
       await ensureTargetSalesPhase2Schema();
+      await ensureTargetProcurementTypeSchema();
+      await ensureTargetReceiptWorkflowSchema();
       const c = contextOf(req), id = Number(req.params.id);
-      const [result] = await pool.query(`UPDATE erp_sales_procurement_demands SET status='converted',approved_by=?,approved_at=NOW()
-        WHERE id=? AND ${contextParams(c).join(' AND ')} AND status='pending'`, [userId(req), id, ...contextValues(c)]);
-      if (!result.affectedRows) throw badRequest('只有目前公司的待審採購需求可以核准');
-      res.json({ ok: true, data: { id, status: 'converted', message: '需求已核准；請由採購作業建立正式請購／採購單，正式單號待回寫。' } });
+      const result = await tx(conn => convertDemandToProcurement(conn, c, id, req.body || {}, userId(req), { requirePending: true }));
+      res.json({ ok: true, data: result });
+    } catch (error) { next(error); }
+  });
+
+  // 正式請購單若依公司別單別要求另外核准，需求核准時會先建立請購並停在
+  // 「正式請購待核准」。正式請購核准後可由此重試，建立正式採購單；若採購單別
+  // 也要求核准，則留下 draft，交由既有採購核准流程接手，不繞過文件規則。
+  app.post('/api/sales-workflow/procurement-demands/:id/convert', async (req, res, next) => {
+    try {
+      await ensureTargetSalesPhase2Schema();
+      await ensureTargetProcurementTypeSchema();
+      await ensureTargetReceiptWorkflowSchema();
+      const c = contextOf(req), id = Number(req.params.id);
+      const result = await tx(conn => convertDemandToProcurement(conn, c, id, req.body || {}, userId(req)));
+      res.json({ ok: true, data: result });
+    } catch (error) { next(error); }
+  });
+
+  // 暫出不直接視為銷貨；先由 INV 暫出單完成過帳，再在此產生「暫出收入認列」
+  // 會計底稿。底稿仍須依既有產生→維護→核准→拋轉流程，正式傳票列印資料則由
+  // 下方唯讀列印 API 提供，避免把收入直接寫成不可追溯的即時分錄。
+  app.get('/api/sales-workflow/temporary-out-recognitions', async (req, res, next) => {
+    try {
+      await ensureTargetFinanceWorkflowSchema();
+      const c = contextOf(req);
+      const [rows] = await pool.query(`SELECT d.id,d.document_no,d.document_type,d.document_date,d.counterparty,d.status,
+          (SELECT COUNT(*) FROM inventory_document_items i WHERE i.document_id=d.id) item_count,
+          (SELECT COALESCE(SUM(i.quantity),0) FROM inventory_document_items i WHERE i.document_id=d.id) quantity,
+          (SELECT COALESCE(SUM(i.quantity*i.unit_cost),0) FROM inventory_document_items i WHERE i.document_id=d.id) amount,
+          ad.id draft_id,ad.draft_no,ad.status draft_status,j.id journal_id,j.journal_no
+        FROM inventory_documents d
+        LEFT JOIN accounting_drafts ad ON ad.source_kind='inventory_temp_out_income' AND ad.source_id=d.id
+          AND ${contextParams(c, 'ad').join(' AND ')}
+        LEFT JOIN accounting_journals j ON j.source_kind='accounting_draft' AND j.source_id=ad.id
+          AND ${contextParams(c, 'j').join(' AND ')} AND j.status<>'voided'
+        WHERE d.movement_kind='temp_out' AND d.status='posted' AND ${contextParams(c, 'd').join(' AND ')}
+        ORDER BY d.document_date DESC,d.id DESC LIMIT 500`, [
+        ...contextValues(c), ...contextValues(c), ...contextValues(c)
+      ]);
+      res.json({ ok: true, data: rows.map(row => ({ ...row, amount: Number(row.amount || 0), recognized: Boolean(row.draft_id),
+        source_database: c.source_database, company_id: c.company_id })) });
+    } catch (error) { next(error); }
+  });
+
+  app.post('/api/sales-workflow/temporary-out/:id/recognize', async (req, res, next) => {
+    try {
+      await ensureTargetFinanceWorkflowSchema();
+      const c = contextOf(req), id = Number(req.params.id), body = req.body || {};
+      const result = await tx(async conn => {
+        const [[document]] = await conn.query(`SELECT d.* FROM inventory_documents d
+          WHERE d.id=? AND d.movement_kind='temp_out' AND d.status='posted' AND ${contextParams(c, 'd').join(' AND ')} FOR UPDATE`,
+        [id, ...contextValues(c)]);
+        if (!document) throw notFound('找不到目前公司已過帳的暫出單');
+        const [items] = await conn.query(`SELECT * FROM inventory_document_items
+          WHERE document_id=? ORDER BY line_no,id FOR UPDATE`, [id]);
+        if (!items.length) throw badRequest('暫出單沒有可認列的明細');
+        const calculated = items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unit_cost || 0), 0);
+        const amount = body.amount === undefined || body.amount === null || String(body.amount).trim() === ''
+          ? calculated : positive(body.amount, '暫出收入認列金額');
+        if (amount <= EPS) throw badRequest('暫出收入認列金額不可為 0；請提供單價成本或輸入認列金額');
+        const draft = await createTemporaryIncomeDraft(conn, c, document, amount,
+          text(body.party_code || document.counterparty, '收入認列對象', 30),
+          text(body.memo, '底稿說明', 500) || `暫出單 ${document.document_no} 收入認列`, userId(req), body);
+        return { ...draft, source_document_id: id, source_document_no: document.document_no,
+          amount, print_path: `/api/sales-workflow/temporary-out/${id}/print` };
+      });
+      res.status(result.reused ? 200 : 201).json({ ok: true, data: result });
+    } catch (error) { next(error); }
+  });
+
+  app.get('/api/sales-workflow/temporary-out/:id/print', async (req, res, next) => {
+    try {
+      await ensureTargetFinanceWorkflowSchema();
+      const c = contextOf(req), id = Number(req.params.id);
+      const [[document]] = await pool.query(`SELECT d.* FROM inventory_documents d
+        WHERE d.id=? AND d.movement_kind='temp_out' AND ${contextParams(c).join(' AND ')}`, [id, ...contextValues(c)]);
+      if (!document) throw notFound('找不到目前公司的暫出單');
+      const [items] = await pool.query('SELECT * FROM inventory_document_items WHERE document_id=? ORDER BY line_no,id', [id]);
+      const [[draft]] = await pool.query(`SELECT * FROM accounting_drafts
+        WHERE source_kind='inventory_temp_out_income' AND source_id=? AND ${contextParams(c).join(' AND ')} LIMIT 1`, [id, ...contextValues(c)]);
+      let lines = [], journal = null;
+      if (draft) {
+        [lines] = await pool.query('SELECT * FROM accounting_draft_lines WHERE draft_id=? ORDER BY line_no', [draft.id]);
+        [[journal]] = await pool.query(`SELECT * FROM accounting_journals
+          WHERE source_kind='accounting_draft' AND source_id=? AND ${contextParams(c).join(' AND ')} AND status<>'voided' LIMIT 1`, [draft.id, ...contextValues(c)]);
+      }
+      res.json({ ok: true, data: { company_id: c.company_id, source_database: c.source_database,
+        document, items, recognition: draft ? { draft, lines, journal } : null,
+        print_title: `暫出收入認列／正式憑證 ${document.document_no}` } });
     } catch (error) { next(error); }
   });
 

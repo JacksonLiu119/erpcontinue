@@ -1827,6 +1827,29 @@ export async function ensureTargetSalesPhase2Schema() {
     UNIQUE KEY uq_erp_sales_procurement_demand_no(tenant_id,company_id,source_system,source_database,demand_no),
     KEY ix_erp_sales_procurement_demand_order(source_database,order_id,order_item_id,status)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+
+  // S06 正式轉採購閉環：缺料需求本身保存公司別的轉單規則與正式請購來源，
+  // 請購／採購明細再各自保存 demand id，讓一筆需求可追到一筆請購明細、
+  // 再由既有 requisition_item_id 展開成多筆採購單／進貨，不以單一單號欄位假設一對一。
+  for (const [column, definition] of [
+    ['supplier_code', 'VARCHAR(30) NULL'],
+    ['requisition_document_type', 'VARCHAR(20) NULL'],
+    ['purchase_document_type', 'VARCHAR(20) NULL'],
+    ['currency_code', "VARCHAR(10) NOT NULL DEFAULT 'TWD'"],
+    ['unit_price', 'DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['expected_date', 'DATE NULL'],
+    ['warehouse_code', 'VARCHAR(30) NULL'],
+    ['department_code', 'VARCHAR(30) NULL'],
+    ['requester_code', 'VARCHAR(30) NULL'],
+    ['procurement_requisition_id', 'BIGINT UNSIGNED NULL'],
+    ['procurement_requisition_item_id', 'BIGINT UNSIGNED NULL'],
+    ['formal_requisition_no', 'VARCHAR(60) NULL'],
+    ['conversion_note', 'VARCHAR(500) NULL'],
+    ['converted_by', 'BIGINT UNSIGNED NULL'],
+    ['converted_at', 'DATETIME NULL']
+  ]) await addColumnIfMissing('erp_sales_procurement_demands', column, definition);
+  await addColumnIfMissing('procurement_requisition_items', 'sales_procurement_demand_id', 'BIGINT UNSIGNED NULL');
+  await addColumnIfMissing('procurement_order_items', 'sales_procurement_demand_id', 'BIGINT UNSIGNED NULL');
 }
 
 // The legacy COPMB table stores the customer and the ERP item code used for

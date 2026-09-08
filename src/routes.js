@@ -2391,31 +2391,61 @@ function registerProcurementWorkflowRoutes(app) {
       const sourceDatabase = String(req.body?.source_database || req.query.source_database || 'SH').toUpperCase();
       const table = { requisitions:'procurement_requisitions', orders:'procurement_orders', receipts:'procurement_receipts' }[kind];
       if (!table || !Number.isInteger(id) || id < 1) throw badRequest('Invalid document for approval');
-      const [[document]] = await pool.query(`SELECT id FROM ${table} WHERE id=? AND source_database=?`, [id, sourceDatabase]);
+      const context = contextFor(sourceDatabase);
+      const [[document]] = await pool.query(`SELECT id FROM ${table}
+        WHERE id=? AND source_database=? AND tenant_id=? AND company_id=? AND source_system=?`,
+      [id, sourceDatabase, context.tenant_id, context.company_id, context.source_system]);
       if (!document) throw notFound('Document not found');
       await pool.query(`INSERT INTO procurement_document_approvals
         (document_kind, document_id, approval_status, approved_by, note)
         VALUES (?, ?, 'approved', ?, ?)
         ON DUPLICATE KEY UPDATE approval_status='approved', approved_by=VALUES(approved_by), approved_at=NOW(), note=VALUES(note)`, [kind, id, req.auth.id, trim(req.body?.note)]);
-      if (kind === 'requisitions') await pool.query("UPDATE procurement_requisitions SET status='approved' WHERE id=? AND source_database=?", [id, sourceDatabase]);
+      if (kind === 'requisitions') {
+        await tx(async conn => {
+          const [updated] = await conn.query(`UPDATE procurement_requisitions
+            SET status='approved'
+            WHERE id=? AND source_database=? AND tenant_id=? AND company_id=? AND source_system=?`,
+          [id, sourceDatabase, context.tenant_id, context.company_id, context.source_system]);
+          if (!updated.affectedRows) throw notFound('目前公司別的請購單不存在');
+          // 請購核准後才鎖定可轉採購的明細；未核准前維護不會被誤當成正式來源。
+          await conn.query(`UPDATE procurement_requisition_items ri
+            JOIN procurement_requisitions r ON r.id=ri.requisition_id
+            SET ri.purchase_locked=1
+            WHERE r.id=? AND r.source_database=? AND r.tenant_id=? AND r.company_id=? AND r.source_system=?`,
+          [id, sourceDatabase, context.tenant_id, context.company_id, context.source_system]);
+        });
+      }
       if (kind === 'orders') await tx(async conn => {
         const [[order]] = await conn.query(`SELECT o.*, t.requires_approval,t.auto_confirm
           FROM procurement_orders o JOIN procurement_document_types t
             ON t.tenant_id=o.tenant_id AND t.company_id=o.company_id AND t.source_system=o.source_system
            AND t.document_kind='purchase_order' AND t.type_code=o.document_type
-          WHERE o.id=? AND o.source_database=? FOR UPDATE`, [id, sourceDatabase]);
+           AND t.source_database=o.source_database
+          WHERE o.id=? AND o.source_database=? AND o.tenant_id=? AND o.company_id=? AND o.source_system=? FOR UPDATE`,
+        [id, sourceDatabase, context.tenant_id, context.company_id, context.source_system]);
         if (!order) throw notFound('採購單不存在');
         if (order.status !== 'draft') throw badRequest('只有草稿採購單可以核準');
         const [items] = await conn.query('SELECT * FROM procurement_order_items WHERE purchase_order_id=? FOR UPDATE', [id]);
         for (const item of items.filter(item => item.requisition_item_id)) {
           const [[source]] = await conn.query(`SELECT i.*,r.id header_id FROM procurement_requisition_items i
-            JOIN procurement_requisitions r ON r.id=i.requisition_id WHERE i.id=? FOR UPDATE`, [item.requisition_item_id]);
+            JOIN procurement_requisitions r ON r.id=i.requisition_id
+            WHERE i.id=? AND r.source_database=? AND r.tenant_id=? AND r.company_id=? AND r.source_system=? FOR UPDATE`,
+          [item.requisition_item_id, sourceDatabase, context.tenant_id, context.company_id, context.source_system]);
           if (!source || Number(source.qty_requested) - Number(source.qty_ordered) < Number(item.qty_ordered)) throw badRequest('請購未轉量不足，無法核準採購單');
-          await conn.query('UPDATE procurement_requisition_items SET qty_ordered=qty_ordered+? WHERE id=?', [item.qty_ordered, item.requisition_item_id]);
+          await conn.query(`UPDATE procurement_requisition_items i
+            JOIN procurement_requisitions r ON r.id=i.requisition_id
+            SET i.qty_ordered=i.qty_ordered+?
+            WHERE i.id=? AND r.source_database=? AND r.tenant_id=? AND r.company_id=? AND r.source_system=?`,
+          [item.qty_ordered, item.requisition_item_id, sourceDatabase, context.tenant_id, context.company_id, context.source_system]);
           const [[remaining]] = await conn.query('SELECT COUNT(*) count FROM procurement_requisition_items WHERE requisition_id=? AND qty_requested>qty_ordered', [source.header_id]);
-          await conn.query('UPDATE procurement_requisitions SET status=? WHERE id=?', [Number(remaining.count)?'approved':'converted',source.header_id]);
+          await conn.query(`UPDATE procurement_requisitions
+            SET status=?
+            WHERE id=? AND source_database=? AND tenant_id=? AND company_id=? AND source_system=?`,
+          [Number(remaining.count)?'approved':'converted', source.header_id, sourceDatabase, context.tenant_id, context.company_id, context.source_system]);
         }
-        await conn.query("UPDATE procurement_orders SET status='confirmed' WHERE id=?", [id]);
+        await conn.query(`UPDATE procurement_orders SET status='confirmed'
+          WHERE id=? AND source_database=? AND tenant_id=? AND company_id=? AND source_system=?`,
+        [id, sourceDatabase, context.tenant_id, context.company_id, context.source_system]);
       });
       res.json({ ok:true, data:{ id, kind, source_database:sourceDatabase, approval_status:'approved' } });
     } catch (error) { next(error); }

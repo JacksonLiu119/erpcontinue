@@ -174,6 +174,7 @@ const routeCapability = [
   [/^\/sales-workflow\/customer-item(?:s|-mappings)(?:\/|$)/, 'sales-customer-items'],
   [/^\/sales-workflow\/customer-pricing(?:\/|$)/, 'sales-customer-pricing'],
   [/^\/sales-workflow\/(contracts|delivery-schedules|exceptions|pick-lists|procurement-demands)(?:\/|$)/, 'sales-orders'],
+  [/^\/sales-workflow\/temporary-out(?:\/|$)/, 'sales-orders'],
   [/^\/sales-workflow\/orders\/\d+\/(recalculate|close|pick-lists|procurement-demands)/, 'sales-orders'],
   [/^\/sales-workflow\/documents\/\d+\/print(?:\/|$)/, 'sales-orders'],
   [/^\/sales-workflow\/documents\/export(?:\/|$)/, 'sales-orders'],
