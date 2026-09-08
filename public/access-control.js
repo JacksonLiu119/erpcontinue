@@ -13,7 +13,7 @@ const featureAliases = {
   'finance-flow':'finance-workflow', 'ar-source':'finance-workflow', 'ar-open':'finance-workflow', 'ar-credits':'finance-workflow', 'ar-receipt':'finance-workflow',
   'ar-notes':'finance-workflow', 'ar-aging':'finance-workflow', 'ap-source':'finance-workflow',
   'ap-open':'finance-workflow', 'ap-payment':'finance-workflow', 'ap-notes':'finance-workflow', 'advances-offset':'finance-workflow',
-  'ap-aging':'finance-workflow', 'general-ledger':'accounting-general-ledger', 'accounting-financial-preview':'accounting-general-ledger', 'operations-reports':'operations-reports'
+  'ap-aging':'finance-workflow', 'general-ledger':'accounting-general-ledger', 'accounting-financial-preview':'accounting-general-ledger', 'accounting-financial-statements':'accounting-general-ledger', 'operations-reports':'operations-reports'
 };
 function canViewFeature(screen) {
   if (accessState.isAdmin) return true;

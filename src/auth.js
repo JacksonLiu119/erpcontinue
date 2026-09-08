@@ -200,7 +200,7 @@ const routeCapability = [
   [/^\/accounting\/(opening-batches)/, 'accounting-opening-balances'],
   [/^\/accounting\/opening-balances/, 'accounting-opening-balances'],
   [/^\/accounting\/(month-closings)/, 'accounting-periods'],
-  [/^\/accounting\/(trial-balance|account-balances|ledger-details|reconciliation|source-financial-preview)/, 'accounting-general-ledger'],
+  [/^\/accounting\/(trial-balance|account-balances|ledger-details|reconciliation|source-financial-preview|financial-statements)/, 'accounting-general-ledger'],
   [/^\/accounting\/year-closings/, 'accounting-year-close'],
   [/^\/accounting\/(drafts|sources)/, 'accounting-drafts'],
   [/^\/accounting\/(accounts|ledger)/, 'accounting-general-ledger'],

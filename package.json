@@ -29,6 +29,7 @@
     "verify:sales-analysis": "node scripts/verify-sales-analysis.mjs",
     "verify:sales-customer-credit": "node scripts/verify-sales-customer-credit.mjs",
     "verify:sales-phase2": "node scripts/verify-sales-phase2.mjs",
+    "simulate:sh:august": "node scripts/simulate-sh-august-financials.mjs",
     "backup:github": "powershell -ExecutionPolicy Bypass -File scripts/backup-github.ps1"
   },
   "dependencies": {

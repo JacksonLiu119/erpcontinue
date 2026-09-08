@@ -3,6 +3,7 @@ import { hashPassword, getDepartmentScope, recordAccessAudit } from './auth.js';
 import { registerImportQualityRoutes } from './import-quality.js';
 import { registerReportingRoutes } from './reports.js';
 import { registerSourceFinancialPreviewRoutes } from './source-financial-preview.js';
+import { registerTargetFinancialStatementRoutes } from './target-financial-statements.js';
 import { registerSalesForecastRoutes, resolveSalesForecastOrderLink, refreshSalesForecastMetrics } from './sales-forecast.js';
 import { registerSalesAnalysisRoutes } from './sales-analysis.js';
 import { registerSalesPhase2Routes } from './sales-phase2.js';
@@ -1052,6 +1053,7 @@ export function registerApi(app) {
   registerFinanceWorkflowRoutes(app);
   registerAccountingWorkflowRoutes(app);
   registerSourceFinancialPreviewRoutes(app);
+  registerTargetFinancialStatementRoutes(app);
   registerInventoryWorkflowRoutes(app);
   registerReversalRoutes(app);
   registerAccessControlRoutes(app);
@@ -4541,7 +4543,7 @@ function registerSalesWorkflowRoutes(app){
         ]);
         await conn.query('UPDATE sales_document_items SET related_quantity=related_quantity+? WHERE id=?',[qty,b.source_item_id]);
         let priceUpdate=null;
-        if(status==='approved'&&Number(dt.update_customer_price)) priceUpdate=await upsertSalesPriceFromDocument(conn,c,{...document,id:h.insertId},{...price,unit:price.pricingUnit},req.auth.id);
+        if(status==='approved'&&Number(dt.update_customer_price)) priceUpdate=await upsertSalesPriceFromDocument(conn,c,{...document,id:h.insertId},{...price,unit:price.pricingUnit,item_code:price.itemCode,unit_price:price.unitPrice},req.auth.id);
          if(status==='approved'&&forecastLink) await refreshSalesForecastMetrics(conn,c,forecastLink.forecast_id);
          return{id:h.insertId,item_id:i.insertId,document_no:no,status,forecast_item_id:forecastLink?.forecast_item_id||null,forecast_no:forecastLink?.forecast_no||null,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
       });
@@ -6352,6 +6354,7 @@ function registerFinanceWorkflowRoutes(app){
   async function getFinanceSourceLine(conn, type, db, row) {
     const id=Number(row.source_document_id||0), itemId=Number(row.source_document_item_id||0);
     if (!id || !itemId) throw badRequest('財務來源必須指定單據與明細');
+    const context = ctx(db);
     let result;
     if (type==='AR') {
       [[result]]=await conn.query(`SELECT d.id source_document_id,i.id source_document_item_id,d.document_kind source_kind,d.document_type source_document_type,
@@ -6361,7 +6364,7 @@ function registerFinanceWorkflowRoutes(app){
         WHERE d.source_database=? AND d.status='posted' AND d.document_kind IN ('shipment','sales_return') AND d.id=? AND i.id=?`,[db,id,itemId]);
     } else if (String(row.source_kind)==='purchase_return') {
       [[result]]=await conn.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_return' source_kind,r.document_type source_document_type,
-        r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,
+        r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,COALESCE(s.currency_code,'TWD') currency_code,i.item_code,
         CASE WHEN r.return_type='return' THEN COALESCE(i.priced_quantity,0) ELSE 0 END quantity,i.unit_cost unit_price,
         CASE WHEN r.return_type='allowance' THEN -COALESCE(i.allowance_amount,0)
           ELSE -(COALESCE(i.priced_quantity,0)*i.unit_cost+
@@ -6369,22 +6372,25 @@ function registerFinanceWorkflowRoutes(app){
         i.return_quantity,COALESCE(i.priced_quantity,0) priced_quantity,i.allowance_amount
         FROM procurement_returns r JOIN procurement_return_items i ON i.return_id=r.id
         LEFT JOIN procurement_receipt_items ri ON ri.id=i.receipt_item_id
-        WHERE r.source_database=? AND ((r.return_type='return' AND r.status='posted' AND r.inventory_status='posted') OR (r.return_type='allowance' AND r.status='approved' AND r.inventory_status='not_applicable')) AND r.id=? AND i.id=?`,[db,id,itemId]);
+        LEFT JOIN erp_suppliers s ON s.tenant_id=? AND s.company_id=? AND s.source_system=? AND s.source_database=? AND s.supplier_code=r.supplier_code
+        WHERE r.source_database=? AND ((r.return_type='return' AND r.status='posted' AND r.inventory_status='posted') OR (r.return_type='allowance' AND r.status='approved' AND r.inventory_status='not_applicable')) AND r.id=? AND i.id=?`,[context.tenant_id,context.company_id,context.source_system,db,db,id,itemId]);
     } else {
       [[result]]=await conn.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_receipt' source_kind,r.document_type source_document_type,
-        r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,
+        r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,COALESCE(s.currency_code,'TWD') currency_code,i.item_code,
         COALESCE(i.qty_priced,0) quantity,i.unit_cost unit_price,
         (COALESCE(i.qty_priced,0)*i.unit_cost+(i.freight_amount+i.insurance_amount+i.other_expense_amount)*COALESCE(i.qty_priced,0)/NULLIF(i.qty_accepted,0)) source_amount,
         i.qty_accepted qty_received,COALESCE(i.qty_priced,0) qty_priced,
         (i.freight_amount+i.insurance_amount+i.other_expense_amount) expense_amount
         FROM procurement_receipts r JOIN procurement_receipt_items i ON i.receipt_id=r.id
-        WHERE r.source_database=? AND r.inventory_status='posted' AND r.status IN ('accepted','partially_accepted','posted') AND r.id=? AND i.id=?`,[db,id,itemId]);
+        LEFT JOIN erp_suppliers s ON s.tenant_id=? AND s.company_id=? AND s.source_system=? AND s.source_database=? AND s.supplier_code=r.supplier_code
+        WHERE r.source_database=? AND r.inventory_status='posted' AND r.status IN ('accepted','partially_accepted','posted') AND r.id=? AND i.id=?`,[context.tenant_id,context.company_id,context.source_system,db,db,id,itemId]);
     }
     if (!result) throw badRequest('來源單據不存在、尚未完成或尚未庫存過帳');
     return result;
   }
   async function listFinanceSourceCandidates(conn, type, db, options={}) {
     const partyCode=trim(options.partyCode),limit=Number(options.limit||0),hasLimit=Number.isFinite(limit)&&limit>0;
+    const context = ctx(db);
     if (type==='AR') {
       const [rows]=await conn.query(`SELECT d.id source_document_id,i.id source_document_item_id,d.document_kind source_kind,d.document_type source_document_type,
         d.document_no source_document_no,d.document_date,d.customer_code party_code,d.currency_code,i.item_code,i.item_name,i.quantity,i.unit,i.unit_price,
@@ -6396,17 +6402,18 @@ function registerFinanceWorkflowRoutes(app){
       return rows.map(x=>({...x,remaining_amount:Number(x.amount)-Number(x.allocated_amount||0)})).filter(x=>Math.abs(x.remaining_amount)>0.000001);
     }
     const [receipts]=await conn.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_receipt' source_kind,r.document_type source_document_type,
-      r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,
+      r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,COALESCE(s.currency_code,'TWD') currency_code,i.item_code,i.item_name,
       COALESCE(i.qty_priced,0) quantity,i.unit,i.unit_cost unit_price,COALESCE(i.qty_accepted,0) qty_accepted,
       COALESCE(i.qty_returned,0) qty_returned,COALESCE(i.qty_returned_priced,0) qty_returned_priced,
       (i.freight_amount+i.insurance_amount+i.other_expense_amount) expense_amount,
       (COALESCE(i.qty_priced,0)*i.unit_cost+(i.freight_amount+i.insurance_amount+i.other_expense_amount)*COALESCE(i.qty_priced,0)/NULLIF(i.qty_accepted,0)) amount,
       COALESCE((SELECT SUM(vs.allocated_amount) FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id WHERE v.status<>'voided' AND vs.source_kind='purchase_receipt' AND vs.source_document_id=r.id AND COALESCE(vs.source_document_item_id,0)=i.id),0) allocated_amount
       FROM procurement_receipts r JOIN procurement_receipt_items i ON i.receipt_id=r.id
+      LEFT JOIN erp_suppliers s ON s.tenant_id=? AND s.company_id=? AND s.source_system=? AND s.source_database=? AND s.supplier_code=r.supplier_code
       WHERE r.source_database=? AND r.inventory_status='posted' AND r.status IN ('accepted','partially_accepted','posted') AND COALESCE(i.qty_priced,0)>0 ${partyCode?'AND r.supplier_code=?':''}
-      ORDER BY r.receipt_date,r.id,i.id${hasLimit?' LIMIT ?':''}`,[...(partyCode?[db,partyCode]:[db]),...(hasLimit?[limit]:[])]);
+      ORDER BY r.receipt_date,r.id,i.id${hasLimit?' LIMIT ?':''}`,[context.tenant_id,context.company_id,context.source_system,db,...(partyCode?[db,partyCode]:[db]),...(hasLimit?[limit]:[])]);
     const [returns]=await conn.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_return' source_kind,r.document_type source_document_type,
-      r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,
+      r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,COALESCE(s.currency_code,'TWD') currency_code,i.item_code,i.item_name,
       CASE WHEN r.return_type='return' THEN COALESCE(i.priced_quantity,0) ELSE 0 END quantity,i.unit,i.unit_cost unit_price,
       CASE WHEN r.return_type='allowance' THEN -COALESCE(i.allowance_amount,0)
         ELSE -(COALESCE(i.priced_quantity,0)*i.unit_cost+(COALESCE(ri.freight_amount,0)+COALESCE(ri.insurance_amount,0)+COALESCE(ri.other_expense_amount,0))*COALESCE(i.priced_quantity,0)/NULLIF(ri.qty_accepted,0)) END amount,
@@ -6414,11 +6421,12 @@ function registerFinanceWorkflowRoutes(app){
       COALESCE((SELECT SUM(vs.allocated_amount) FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id WHERE v.status<>'voided' AND vs.source_kind='purchase_return' AND vs.source_document_id=r.id AND COALESCE(vs.source_document_item_id,0)=i.id),0) allocated_amount
       FROM procurement_returns r JOIN procurement_return_items i ON i.return_id=r.id
       LEFT JOIN procurement_receipt_items ri ON ri.id=i.receipt_item_id
+      LEFT JOIN erp_suppliers s ON s.tenant_id=? AND s.company_id=? AND s.source_system=? AND s.source_database=? AND s.supplier_code=r.supplier_code
       WHERE r.source_database=? AND ((r.return_type='return' AND r.status='posted' AND r.inventory_status='posted' AND COALESCE(i.priced_quantity,0)>0) OR (r.return_type='allowance' AND r.status='approved' AND r.inventory_status='not_applicable' AND COALESCE(i.allowance_amount,0)>0)) ${partyCode?'AND r.supplier_code=?':''}
-      ORDER BY r.return_date,r.id,i.id${hasLimit?' LIMIT ?':''}`,[...(partyCode?[db,partyCode]:[db]),...(hasLimit?[limit]:[])]);
+      ORDER BY r.return_date,r.id,i.id${hasLimit?' LIMIT ?':''}`,[context.tenant_id,context.company_id,context.source_system,db,...(partyCode?[db,partyCode]:[db]),...(hasLimit?[limit]:[])]);
     return [...receipts,...returns].map(x=>({...x,remaining_amount:Number(x.amount)-Number(x.allocated_amount||0)})).filter(x=>Math.abs(x.remaining_amount)>0.000001);
   }
-  app.get('/api/finance-workflow/source-documents',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'AR').toUpperCase(),limit=Math.min(Math.max(Number(req.query.limit)||20,1),100);if(!['AR','AP'].includes(type))throw badRequest('財務類別錯誤');let rows=[];if(type==='AR'){
+  app.get('/api/finance-workflow/source-documents',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'AR').toUpperCase(),limit=Math.min(Math.max(Number(req.query.limit)||20,1),100),context=ctx(db);if(!['AR','AP'].includes(type))throw badRequest('財務類別錯誤');let rows=[];if(type==='AR'){
       const [sales]=await pool.query(`SELECT d.id source_document_id,i.id source_document_item_id,d.document_kind source_kind,d.document_type source_document_type,d.document_no source_document_no,d.document_date,d.customer_code party_code,d.currency_code,i.item_code,i.item_name,i.quantity,i.unit,i.unit_price,i.allowance_amount,
         CASE WHEN d.document_kind='sales_return' THEN -1*CASE WHEN d.return_type='allowance' THEN COALESCE(NULLIF(i.allowance_amount,0),i.quantity*i.unit_price) ELSE (i.quantity*i.unit_price-COALESCE(i.allowance_amount,0)) END ELSE (i.quantity*i.unit_price-COALESCE(i.allowance_amount,0)) END amount,
         COALESCE((SELECT SUM(vs.allocated_amount) FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id WHERE v.status<>'voided' AND vs.source_kind=d.document_kind AND vs.source_document_id=d.id AND COALESCE(vs.source_document_item_id,0)=i.id),0) allocated_amount
@@ -6427,15 +6435,16 @@ function registerFinanceWorkflowRoutes(app){
         ORDER BY d.document_date DESC,d.id DESC,i.id DESC LIMIT ?`,[db,limit]);
       rows=sales.map(x=>({...x,remaining_amount:Number(x.amount)-Number(x.allocated_amount||0)})).filter(x=>Math.abs(x.remaining_amount)>0.000001);
     } else {
-      const [receipts]=await pool.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_receipt' source_kind,r.document_type source_document_type,r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,
+      const [receipts]=await pool.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_receipt' source_kind,r.document_type source_document_type,r.receipt_no source_document_no,r.receipt_date document_date,r.supplier_code party_code,COALESCE(s.currency_code,'TWD') currency_code,i.item_code,i.item_name,
         COALESCE(i.qty_priced,0) quantity,i.unit,i.unit_cost unit_price,COALESCE(i.qty_accepted,0) qty_accepted,COALESCE(i.qty_returned,0) qty_returned,
         COALESCE(i.qty_returned_priced,0) qty_returned_priced,i.freight_amount,i.insurance_amount,i.other_expense_amount,
         (COALESCE(i.qty_priced,0)*i.unit_cost+(i.freight_amount+i.insurance_amount+i.other_expense_amount)*COALESCE(i.qty_priced,0)/NULLIF(i.qty_accepted,0)) amount,
         COALESCE((SELECT SUM(vs.allocated_amount) FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id WHERE v.status<>'voided' AND vs.source_kind='purchase_receipt' AND vs.source_document_id=r.id AND COALESCE(vs.source_document_item_id,0)=i.id),0) allocated_amount
         FROM procurement_receipts r JOIN procurement_receipt_items i ON i.receipt_id=r.id
+        LEFT JOIN erp_suppliers s ON s.tenant_id=? AND s.company_id=? AND s.source_system=? AND s.source_database=? AND s.supplier_code=r.supplier_code
         WHERE r.source_database=? AND r.inventory_status='posted' AND r.status IN ('accepted','partially_accepted','posted') AND COALESCE(i.qty_priced,0)>0
-        ORDER BY r.receipt_date DESC,r.id DESC,i.id DESC LIMIT ?`,[db,limit]);
-      const [returns]=await pool.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_return' source_kind,r.document_type source_document_type,r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,'TWD' currency_code,i.item_code,i.item_name,
+        ORDER BY r.receipt_date DESC,r.id DESC,i.id DESC LIMIT ?`,[context.tenant_id,context.company_id,context.source_system,db,db,limit]);
+      const [returns]=await pool.query(`SELECT r.id source_document_id,i.id source_document_item_id,'purchase_return' source_kind,r.document_type source_document_type,r.return_no source_document_no,r.return_date document_date,r.supplier_code party_code,COALESCE(s.currency_code,'TWD') currency_code,i.item_code,i.item_name,
         CASE WHEN r.return_type='return' THEN COALESCE(i.priced_quantity,0) ELSE 0 END quantity,i.unit,i.unit_cost unit_price,
         CASE WHEN r.return_type='allowance' THEN -COALESCE(i.allowance_amount,0)
           ELSE -(COALESCE(i.priced_quantity,0)*i.unit_cost+(COALESCE(ri.freight_amount,0)+COALESCE(ri.insurance_amount,0)+COALESCE(ri.other_expense_amount,0))*COALESCE(i.priced_quantity,0)/NULLIF(ri.qty_accepted,0)) END amount,
@@ -6443,8 +6452,9 @@ function registerFinanceWorkflowRoutes(app){
         COALESCE((SELECT SUM(vs.allocated_amount) FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id WHERE v.status<>'voided' AND vs.source_kind='purchase_return' AND vs.source_document_id=r.id AND COALESCE(vs.source_document_item_id,0)=i.id),0) allocated_amount
         FROM procurement_returns r JOIN procurement_return_items i ON i.return_id=r.id
         LEFT JOIN procurement_receipt_items ri ON ri.id=i.receipt_item_id
+        LEFT JOIN erp_suppliers s ON s.tenant_id=? AND s.company_id=? AND s.source_system=? AND s.source_database=? AND s.supplier_code=r.supplier_code
         WHERE r.source_database=? AND ((r.return_type='return' AND r.status='posted' AND r.inventory_status='posted' AND COALESCE(i.priced_quantity,0)>0) OR (r.return_type='allowance' AND r.status='approved' AND r.inventory_status='not_applicable' AND COALESCE(i.allowance_amount,0)>0))
-        ORDER BY r.return_date DESC,r.id DESC LIMIT ?`,[db,limit]);
+        ORDER BY r.return_date DESC,r.id DESC LIMIT ?`,[context.tenant_id,context.company_id,context.source_system,db,db,limit]);
       rows=[...receipts,...returns].map(x=>({...x,remaining_amount:Number(x.amount)-Number(x.allocated_amount||0)})).filter(x=>Math.abs(x.remaining_amount)>0.000001).sort((a,b)=>String(b.document_date).localeCompare(String(a.document_date))||Number(b.source_document_id)-Number(a.source_document_id)).slice(0,limit);
     }res.json({ok:true,data:rows});}catch(e){next(e);}});
   app.get('/api/finance-workflow/vouchers',async(req,res,next)=>{try{await ensureFinance();const db=String(req.query.source_database||'SH').toUpperCase(),type=String(req.query.account_type||'AR').toUpperCase(),limit=Math.min(Math.max(Number(req.query.limit)||20,1),100);const[rows]=await pool.query(`SELECT v.*,oi.document_no open_item_no,COUNT(vs.id) source_count FROM finance_vouchers v LEFT JOIN finance_open_items oi ON oi.source_kind='finance_voucher' AND oi.source_document_id=v.id LEFT JOIN finance_voucher_sources vs ON vs.voucher_id=v.id WHERE v.source_database=? AND v.account_type=? GROUP BY v.id,oi.document_no ORDER BY v.voucher_date DESC,v.id DESC LIMIT ?`,[db,type,limit]);res.json({ok:true,data:rows});}catch(e){next(e);}});
