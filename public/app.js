@@ -158,22 +158,29 @@ const treasuryPipeStatusLabels = { done:'已完成', partial:'部分完成', pla
 // 依財務演練文件整理會計底稿到總帳與結轉流程；節點只負責導向既有 SHEET，
 // 實際來源鎖定、借貸平衡、期間攔截與過帳仍由既有作業與 API 控管。
 const ledgerPipeNodes = {
-  accounts: { label:'會計科目／自動分錄規則', note:'依公司別、模組、單據與單據性質決定借貸科目', status:'done', screen:'accounting-auto-rules' },
-  sources: { label:'應收／應付／資金來源', note:'來源單據與剩餘金額可追溯至底稿', status:'done', screen:'finance-flow' },
-  periods: { label:'會計期間／開關帳', note:'開放、關帳、受控重開與跨模組日期攔截', status:'done', screen:'accounting-periods' },
-  opening: { label:'期初未結帳款／總帳期初', note:'建立、檢核、核准、過帳並保留原始來源', status:'done', screen:'accounting-opening-balances' },
-  draft: { label:'產生分錄底稿', note:'由多筆來源產生並依科目彙總，鎖定來源單據', status:'done', screen:'accounting-drafts' },
-  maintain: { label:'底稿維護', note:'只能維護既有行次，不可任意新增／刪除來源分錄', status:'done', screen:'accounting-drafts' },
-  approve: { label:'底稿核准', note:'檢查借貸平衡、科目、立沖、權限與期間', status:'done', screen:'accounting-drafts' },
-  transfer: { label:'拋轉正式傳票', note:'核准底稿才能拋轉；保留底稿與傳票對照', status:'done', screen:'accounting-drafts' },
-  journal: { label:'會計傳票／過帳', note:'草稿→借貸檢核→正式過帳，已過帳不可直接修改', status:'done', screen:'general-ledger' },
-  ledger: { label:'總帳／科目餘額', note:'只納入已過帳傳票，依公司、期間與科目彙總', status:'done', screen:'general-ledger' },
-  closing: { label:'月底／年度結轉', note:'月底快照、損益結轉、跨年度期初與關帳檢核', status:'done', screen:'accounting-year-close' },
-  reports: { label:'試算表／總帳明細報表', note:'借貸試算、科目餘額、總帳明細與期初期末核對', status:'done', screen:'general-ledger' },
-  sourceLock: { label:'來源鎖定／底稿還原', note:'產生底稿後鎖定來源；還原保留歷程並釋放來源', status:'done', screen:'accounting-drafts' },
-  periodControl: { label:'期間控制／過帳攔截', note:'關帳期間禁止財務、庫存、銷售、採購與沖回過帳', status:'done', screen:'accounting-periods' },
-  reversal: { label:'反過帳／更正', note:'原傳票保留，以沖回與重作保留完整版本', status:'done', screen:'accounting-drafts' },
-  preview: { label:'公司別目標財務報表', note:'以目標 ERP 已過帳傳票產出損益、資產負債與現金流並檢核平衡', status:'done', screen:'accounting-financial-statements' }
+  documentNature: { label:'單據性質設定作業', note:'依公司別維護單據、核准、編號與直接結帳規則', status:'done', kind:'setup', screen:'document-natures' },
+  accounts: { label:'會計科目設定作業', note:'目前已有科目／自動分錄查詢；完整科目維護仍需補齊', status:'partial', kind:'setup', screen:'accounting-auto-rules' },
+  systemParams: { label:'會計系統參數設定作業', note:'目前以共用參數查詢為主，尚未完整形成目標端維護作業', status:'partial', kind:'setup', screen:'common-parameters' },
+  autoJournal: { label:'自動分錄系統', note:'由銷售、採購、應收、應付、票據與銀行來源產生分錄底稿', status:'done', kind:'external', screen:'accounting-auto-rules' },
+  treasury: { label:'票據資金管理系統', note:'銀行存提款、票據事件、對帳與資金餘額可追溯', status:'done', kind:'external', screen:'bank-ledger' },
+  fixedAssets: { label:'固定資產管理系統', note:'固定資產卡片、折舊、資產異動與分錄聯動尚未建立', status:'planned', kind:'external', screen:'accounting-fixed-assets' },
+  budget: { label:'預算管理', note:'預算名稱、科目／部門預算與實際比較尚未建立', status:'planned', kind:'management', screen:'accounting-budget' },
+  draft: { label:'會計傳票建立作業', note:'由來源產生底稿／傳票明細，支援多行科目與來源鍵', status:'done', kind:'operation', screen:'accounting-drafts' },
+  posting: { label:'傳票過帳管理', note:'核准後檢查借貸平衡、期間與來源鎖定，再拋轉正式傳票', status:'done', kind:'operation', screen:'accounting-drafts' },
+  closing: { label:'月底結轉作業', note:'保存月份快照、期末餘額與下一期間期初', status:'done', kind:'closing', screen:'accounting-year-close' },
+  specifiedClosing: { label:'指定關帳作業', note:'關帳、受控重開與跨模組過帳攔截', status:'done', kind:'operation', screen:'accounting-periods' },
+  reports: { label:'帳務管理報表', note:'試算表、總帳、明細、科目餘額與三大財報', status:'done', kind:'report', screen:'general-ledger' },
+  clearing: { label:'立沖帳管理', note:'立沖、預收預付、溢收溢付與對沖明細及餘額', status:'done', kind:'management', screen:'accounting-clearing' },
+  profitCenter: { label:'利潤中心管理', note:'利潤中心歸屬、分攤與部門比較報表尚未建立', status:'planned', kind:'management', screen:'accounting-profit-center' },
+  sources: { label:'來源單據／分錄底稿', note:'應收、應付、資金來源與原單號可回溯至底稿', status:'done', kind:'operation', screen:'finance-flow' },
+  opening: { label:'期初／年度期初', note:'銀行、帳款、票據與總帳期初批次導入並保留來源', status:'done', kind:'operation', screen:'accounting-opening-balances' },
+  maintain: { label:'底稿維護／核准', note:'只能維護既有行次；核准前檢查科目、立沖、權限與期間', status:'done', kind:'operation', screen:'accounting-drafts' },
+  transfer: { label:'拋轉正式傳票', note:'核准底稿才能拋轉，保留底稿與傳票對照', status:'done', kind:'operation', screen:'accounting-drafts' },
+  ledger: { label:'總帳／科目餘額', note:'只納入已過帳傳票，依公司、期間與科目彙總', status:'done', kind:'operation', screen:'general-ledger' },
+  sourceLock: { label:'來源鎖定／底稿還原', note:'產生底稿後鎖定來源；還原保留歷程並釋放來源', status:'done', kind:'operation', screen:'accounting-drafts' },
+  periodControl: { label:'期間控制／過帳攔截', note:'關帳期間禁止財務、庫存、銷售、採購與沖回過帳', status:'done', kind:'operation', screen:'accounting-periods' },
+  reversal: { label:'反過帳／更正', note:'原傳票保留，以沖回與重作保留完整版本', status:'done', kind:'operation', screen:'accounting-drafts' },
+  preview: { label:'公司別目標財務報表', note:'以目標 ERP 已過帳傳票產出損益、資產負債與現金流並檢核平衡', status:'done', kind:'report', screen:'accounting-financial-statements' }
 };
 const ledgerPipeStatusLabels = { done:'已完成', partial:'部分完成', planned:'尚未完成' };
 
@@ -238,7 +245,7 @@ modules.push({id:'FIN',name:'應收／應付管理',screens:[
   ['receivable-pipe','應收管理水管圖'],['ar-open','應收帳款／立帳'],['ar-source','結帳／發票建立'],['ar-receipt','收款／沖銷'],['ar-credits','待抵／退款'],['ar-aging','應收狀態／帳齡'],
   ['payable-pipe','應付管理水管圖'],['ap-open','應付帳款／立帳'],['ap-source','合併計價／應付憑單建立'],['ap-payment','付款／沖銷'],['ap-aging','應付狀態／帳齡'],
   ['treasury-pipe','銀行／票據資金水管圖'],['bank-ledger','銀行資金／對帳'],['ar-notes','應收票據'],['ap-notes','應付票據'],['advances-offset','預收／預付與對沖'],['finance-flow','財務流程圖'],['accounting-clearing','立沖帳查詢'],
-  ['ledger-pipe','會計總帳水管圖'],['accounting-auto-rules','自動分錄規則'],['accounting-drafts','會計分錄底稿'],['general-ledger','會計傳票／總帳'],['accounting-periods','會計期間管理'],['accounting-opening-balances','期初未結帳款'],['accounting-year-close','月底／年度結轉'],['accounting-financial-statements','公司別目標財務報表'],['accounting-financial-preview','公司別只讀財報預覽']
+  ['ledger-pipe','會計總帳水管圖'],['document-natures','單據／分錄性質'],['common-parameters','會計系統參數查詢'],['accounting-auto-rules','會計科目／自動分錄規則'],['accounting-budget','預算管理'],['accounting-drafts','會計傳票／分錄底稿'],['general-ledger','會計傳票／總帳'],['accounting-periods','會計期間／指定關帳'],['accounting-opening-balances','期初未結帳款'],['accounting-year-close','月底／年度結轉'],['accounting-fixed-assets','固定資產管理'],['accounting-profit-center','利潤中心管理'],['accounting-financial-statements','公司別目標財務報表'],['accounting-financial-preview','公司別只讀財報預覽']
 ]});
 modules.push({id:'RPT',name:'流程稽核',screens:[['operations-health','營運健康度'],['sales-flow-audit','銷售流程稽核'],['purchase-flow-audit','採購流程稽核'],['operations-reports','配銷／財務報表']]});
 modules.push({id:'ARCH',name:'架構與流程',screens:[['architecture-flow','系統架構與流程圖']]});
@@ -836,7 +843,7 @@ function bindReceivablePipeLinks(){
 function renderReceivablePipe(){
   const arrow='<span class="receivable-pipe-horizontal-arrow" aria-hidden="true">→</span>';
   const body=`<div class="receivable-pipe-intro"><div class="desc">依《iSM-應收管理系統》與財務演練文件整理應收管理順序：銷貨／銷退→應收立帳→結帳／發票→收款／沖銷→待抵／退款。銷貨是應收加項、銷退是減項；每一節點保留來源、單據狀態、原幣／本位幣、已沖與剩餘金額。結帳支援直接、手動、整批／多筆合併及統一／客戶結帳日；所有節點都可點選進入現有 SHEET。綠色代表目前已完成驗證，橘色代表部分完成，紅色虛線代表尚未完成。</div><div class="sales-pipe-legend"><span class="done">已完成且可操作</span><span class="partial">部分完成／待補</span><span class="planned">尚未完成／占位頁</span></div></div><div class="receivable-pipe-board"><div class="sales-pipe-system">應收管理系統<small>ACR｜銷貨／銷退 → 應收 → 結帳／發票 → 收款／沖銷 → 待抵／退款</small></div><div class="receivable-pipe-prereq"><div class="receivable-pipe-section-label">前置資料與規則</div>${receivablePipeNode('customer')}${receivablePipeNode('rules')}${receivablePipeNode('currency')}</div><div class="receivable-pipe-flow-caption">主流程：銷貨／銷退來源先建立應收依據，再依結帳規則立帳；收款／沖銷後同步更新應收狀態與剩餘金額</div><div class="receivable-pipe-mainline"><div class="receivable-pipe-source-group"><div class="receivable-pipe-source-label">銷貨／銷退來源</div><div class="receivable-pipe-source-items">${receivablePipeNode('shipment')}${receivablePipeNode('return')}</div></div>${arrow}${receivablePipeNode('arOpen')}${arrow}${receivablePipeNode('settlement')}${arrow}${receivablePipeNode('collection')}${arrow}${receivablePipeNode('credits')}</div><div class="receivable-pipe-branch-grid"><div class="receivable-pipe-branch-card"><span>票據／資金／會計聯動</span><div class="receivable-pipe-branch-items">${receivablePipeNode('notes')}${receivablePipeNode('bank')}${receivablePipeNode('accounting')}</div></div><div class="receivable-pipe-branch-card receivable-pipe-branch-card--report"><span>狀態追蹤與文件報表</span><div class="receivable-pipe-branch-items">${receivablePipeNode('status')}${receivablePipeNode('reports')}</div></div></div></div><div class="desc">文件規則對照：結帳單可由銷貨／銷退直接結帳、手動建立，或依統一結帳日／客戶結帳日整批產生；收款可沖銷單筆或多筆結帳單，也可處理現金、銀行存款、應收票據、預收／溢收待抵、折讓與匯兌差額。銷退未收先沖減原應收，已收部分轉客戶待抵或退款；票據、銀行交易、分錄底稿與總帳保留可追溯關聯。報表支援應收對帳、客戶／業務員明細與帳齡、發票差異、逾期及未結案追蹤。原始 SH／SC 維持唯讀，所有導向作業使用目前登入公司別。</div>`;
-  finShell('應收管理水管圖', 'ACR-PIPE', body);
+  finShell('應收管理水管圖', body);
   $('#canvas .screen')?.classList.add('receivable-pipe-screen');
   bindReceivablePipeLinks();
 }
@@ -851,7 +858,7 @@ function bindPayablePipeLinks(){
 function renderPayablePipe(){
   const arrow='<span class="payable-pipe-horizontal-arrow" aria-hidden="true">→</span>';
   const body=`<div class="payable-pipe-intro"><div class="desc">依《iSM-應付管理系統》與財務演練文件整理應付管理順序：進貨／退貨→應付立帳→合併計價→付款／沖銷→待付與票據。進貨是應付加項、退貨／折讓是應付減項；每一節點保留來源、單據狀態、到貨／驗收／計價／付款數量、原幣／本位幣與剩餘金額。所有節點都可點選進入現有 SHEET。綠色代表目前已完成驗證，橘色代表部分完成，紅色虛線代表尚未完成。</div><div class="sales-pipe-legend"><span class="done">已完成且可操作</span><span class="partial">部分完成／待補</span><span class="planned">尚未完成／占位頁</span></div></div><div class="payable-pipe-board"><div class="sales-pipe-system">應付管理系統<small>ACP｜進貨／退貨 → 應付 → 合併計價 → 付款／沖銷 → 待付／票據</small></div><div class="payable-pipe-prereq"><div class="payable-pipe-section-label">前置資料與規則</div>${payablePipeNode('supplier')}${payablePipeNode('rules')}${payablePipeNode('currency')}</div><div class="payable-pipe-flow-caption">主流程：只有驗收合格且完成進貨確認的數量才可形成應付來源；合併計價後，付款／沖銷回寫已付量與應付餘額</div><div class="payable-pipe-mainline"><div class="payable-pipe-source-group"><div class="payable-pipe-source-label">進貨／退貨來源</div><div class="payable-pipe-source-items">${payablePipeNode('receipt')}${payablePipeNode('return')}</div></div>${arrow}${payablePipeNode('apOpen')}${arrow}${payablePipeNode('pricing')}${arrow}${payablePipeNode('payment')}${arrow}<div class="payable-pipe-final-group">${payablePipeNode('pending')}${payablePipeNode('notes')}</div></div><div class="payable-pipe-branch-grid"><div class="payable-pipe-branch-card"><span>數量／計價／費用與來源明細</span><div class="payable-pipe-branch-items">${payablePipeNode('pricingDetail')}${payablePipeNode('receiptDetails')}${payablePipeNode('rejectedReturn')}</div></div><div class="payable-pipe-branch-card payable-pipe-branch-card--finance"><span>銀行／會計／應付報表</span><div class="payable-pipe-branch-items">${payablePipeNode('bank')}${payablePipeNode('accounting')}${payablePipeNode('reports')}</div></div></div></div><div class="desc">文件規則對照：應付憑單可由進貨／退貨直接結帳、手動建立，或依統一結帳日／廠商結帳日整批產生；一般應付憑單為加項，退貨／沖帳／折讓為減項。計價需核對到貨量、驗收合格量、驗退／退回量、計價量與付款量，並納入運費、保險及其他費用；付款可一次沖銷多筆或部分沖銷，並依一般、應付票據、待抵、溢付、匯差、折讓及應收帳款對沖等類別形成對應分錄。應付票據、銀行提款／對帳、進貨發票差異、應付明細／分戶帳、廠商帳齡、未結案與模擬付款報表保留可追溯關聯。原始 SH／SC 維持唯讀，所有導向作業使用目前登入公司別。</div>`;
-  finShell('應付管理水管圖', 'ACP-PIPE', body);
+  finShell('應付管理水管圖', body);
   $('#canvas .screen')?.classList.add('payable-pipe-screen');
   bindPayablePipeLinks();
 }
@@ -1218,26 +1225,45 @@ function bindTreasuryPipeLinks(){
 function renderTreasuryPipe(){
   const arrow='<span class="treasury-pipe-horizontal-arrow" aria-hidden="true">→</span>';
   const body=`<div class="treasury-pipe-intro"><div class="desc">依《iSM-財務實作演練班》與銀行／票據作業規則整理資金主線：存提款→票據託收／兌現／退票／註銷→逐筆對帳→餘額→資金報表。應收／應付票據共用資金事件歷程，但仍依目前公司別、幣別與來源單據分開處理。每個節點都可點選進入現有 SHEET；管帳、管錢與對帳責任分開標示。</div><div class="sales-pipe-legend"><span class="done">已完成且可操作</span><span class="partial">部分完成／待補</span><span class="planned">尚未完成／占位頁</span></div></div><div class="treasury-pipe-board"><div class="sales-pipe-system">銀行／票據資金管理<small>FIN｜存提款 → 票據票況 → 對帳 → 餘額 → 資金報表</small></div><div class="treasury-pipe-prereq"><div class="treasury-pipe-section-label">前置資料與規則</div>${treasuryPipeNode('accounts')}${treasuryPipeNode('rules')}${treasuryPipeNode('sources')}</div><div class="treasury-pipe-flow-caption">主流程：收付款或票據狀態事件先形成銀行／資金交易；交易過帳後更新餘額，逐筆對帳完成後才列為已對帳</div><div class="treasury-pipe-mainline">${treasuryPipeNode('deposits')}${arrow}<div class="treasury-pipe-note-group"><div class="treasury-pipe-group-label">票據託收／兌現／退票／註銷</div><div class="treasury-pipe-note-items">${treasuryPipeNode('arNotes')}${treasuryPipeNode('apNotes')}</div></div>${arrow}${treasuryPipeNode('reconcile')}${arrow}${treasuryPipeNode('balance')}${arrow}${treasuryPipeNode('reports')}</div><div class="treasury-pipe-branch-grid"><div class="treasury-pipe-branch-card"><span>權責分離與作業入口</span><div class="treasury-pipe-branch-items">${treasuryPipeNode('cash')}${treasuryPipeNode('accounting')}${treasuryPipeNode('reconciliation')}</div></div><div class="treasury-pipe-branch-card treasury-pipe-branch-card--audit"><span>事件／報表／稽核</span><div class="treasury-pipe-branch-items">${treasuryPipeNode('audit')}${treasuryPipeNode('accounts')}${treasuryPipeNode('reports')}</div></div></div></div><div class="desc">權責規則對照：管錢負責建立／過帳存提款、收付款與票據資金事件；管帳負責分錄底稿、科目與總帳來源；對帳人員負責逐筆核對對帳單、差異與完成狀態。票據狀態變更需保留日期、人員、銀行交易與分錄底稿歷程；兌現、退票與註銷不可跳過既有資金事件。銀行帳上餘額、未兌現票據、未對帳交易、資金預估與異常報表均依目前登入公司別查詢，SH／SC 原始資料維持唯讀。</div>`;
-  finShell('銀行／票據資金水管圖', 'TREASURY-PIPE', body);
+  finShell('銀行／票據資金水管圖', body);
   $('#canvas .screen')?.classList.add('treasury-pipe-screen');
   bindTreasuryPipeLinks();
 }
 function ledgerPipeNode(id){
   const item=ledgerPipeNodes[id];
   if(!item)return '';
-  return `<button type="button" class="sales-pipe-node ledger-pipe-node ${item.status}" data-ledger-screen="${esc(item.screen)}" title="開啟${esc(item.label)}"><span class="sales-pipe-node-title">${esc(item.label)}</span><small>${esc(item.note)}</small><em>${esc(ledgerPipeStatusLabels[item.status]||item.status)}・點選開啟</em></button>`;
+  return `<button type="button" class="sales-pipe-node ledger-pipe-node ledger-pipe-node--${esc(item.kind||'operation')} ${item.status}" data-ledger-screen="${esc(item.screen)}" title="開啟${esc(item.label)}"><span class="sales-pipe-node-title">${esc(item.label)}</span><small>${esc(item.note)}</small><em>${esc(ledgerPipeStatusLabels[item.status]||item.status)}・點選開啟</em></button>`;
 }
 function bindLedgerPipeLinks(){
   document.querySelectorAll('[data-ledger-screen]').forEach(button=>button.onclick=()=>navigateToScreen(button.dataset.ledgerScreen));
 }
-function renderLedgerPipe(){
+function renderLedgerPipeLegacy(){
   const arrow='<span class="ledger-pipe-horizontal-arrow" aria-hidden="true">→</span>';
   const body=`<div class="ledger-pipe-intro"><div class="desc">依《iSM-財務實作演練班》與會計總帳規則整理主線：產生分錄底稿→維護→核准→拋轉正式傳票→總帳→月底／年度結轉→試算表與明細報表。每個節點可點選進入現有 SHEET；來源鎖定、底稿還原、借貸平衡、立沖必填與期間控制以支線連回主流程。</div><div class="sales-pipe-legend"><span class="done">已完成且可操作</span><span class="partial">部分完成／待補</span><span class="planned">尚未完成／占位頁</span></div></div><div class="ledger-pipe-board"><div class="sales-pipe-system">會計總帳管理<small>ACT／AST｜底稿 → 核准 → 傳票 → 總帳 → 結轉 → 報表</small></div><div class="ledger-pipe-prereq"><div class="ledger-pipe-section-label">前置資料、來源與期間</div>${ledgerPipeNode('accounts')}${ledgerPipeNode('sources')}${ledgerPipeNode('periods')}${ledgerPipeNode('opening')}</div><div class="ledger-pipe-flow-caption">主流程：來源單據產生底稿後即鎖定；核准前完成借貸、科目、立沖與期間檢查，正式過帳後才進入總帳及結轉報表</div><div class="ledger-pipe-stage ledger-pipe-stage--draft">${ledgerPipeNode('draft')}${arrow}${ledgerPipeNode('maintain')}${arrow}${ledgerPipeNode('approve')}${arrow}${ledgerPipeNode('transfer')}</div><div class="ledger-pipe-down-arrow" aria-hidden="true">↓</div><div class="ledger-pipe-stage ledger-pipe-stage--ledger">${ledgerPipeNode('journal')}${arrow}${ledgerPipeNode('ledger')}${arrow}${ledgerPipeNode('closing')}${arrow}${ledgerPipeNode('reports')}</div><div class="ledger-pipe-branch-grid"><div class="ledger-pipe-branch-card"><span>來源鎖定、期間與更正控制</span><div class="ledger-pipe-branch-items">${ledgerPipeNode('sourceLock')}${ledgerPipeNode('periodControl')}${ledgerPipeNode('reversal')}</div></div><div class="ledger-pipe-branch-card ledger-pipe-branch-card--report"><span>期初、結轉與財報核對</span><div class="ledger-pipe-branch-items">${ledgerPipeNode('opening')}${ledgerPipeNode('reports')}${ledgerPipeNode('preview')}</div></div></div></div><div class="desc">控制規則對照：底稿可由多筆應收、應付、收付款、票據與銀行來源產生並依科目彙總，但維護時不可任意新增或刪除來源分錄；核准前必須檢查借貸平衡、科目、立沖對象、來源狀態、權限與會計期間。拋轉後保留底稿與正式傳票關聯，只有已過帳傳票進入總帳；已過帳資料不可直接修改，須以沖回／更正與重作保留版本。月底快照、年度損益結轉、下一年度期初、試算表、科目餘額、總帳明細及期初期末核對均依目前公司別處理，SH／SC 原始 ACT／AST 維持唯讀。</div>`;
-  finShell('會計總帳水管圖', 'GL-PIPE', body);
+  finShell('會計總帳水管圖', body);
   $('#canvas .screen')?.classList.add('ledger-pipe-screen');
   bindLedgerPipeLinks();
 }
-function renderFinanceScreen(s){if(s==='receivable-pipe')return renderReceivablePipe();if(s==='payable-pipe')return renderPayablePipe();if(s==='treasury-pipe')return renderTreasuryPipe();if(s==='ledger-pipe')return renderLedgerPipe();if(s==='finance-flow')return renderFinanceFlow();if(s==='ar-credits')return renderCustomerCreditsV2();if(s==='advances-offset')return renderAdvancesOffset();if(s==='bank-ledger')return renderBankLedger();if(s==='accounting-clearing')return renderAccountingClearing();if(s==='accounting-opening-balances')return renderAccountingOpeningBalancesV2();if(s==='accounting-periods')return renderAccountingPeriodsV2();if(s==='accounting-year-close')return renderAccountingYearCloseV2();if(s==='accounting-auto-rules')return renderAccountingAutoRules();if(s==='accounting-drafts')return renderAccountingDrafts();if(s==='general-ledger')return renderAccountingLedgerV2();if(s==='accounting-financial-statements')return renderTargetFinancialStatements();if(s==='accounting-financial-preview')return renderSourceFinancialPreview();const type=s.startsWith('ar-')?'AR':'AP';if(s.endsWith('source'))return renderFinanceSource(type);if(s.endsWith('receipt')||s.endsWith('payment'))return renderFinanceSettlement(type);if(s.endsWith('notes'))return renderFinanceNotes(type);renderFinanceOpen(type,s.endsWith('aging'));}
+function renderLedgerPipe(){
+  const downArrow='<div class="ledger-reference-core-arrow" aria-hidden="true">↓</div>';
+  const sideArrow='<span class="ledger-reference-branch-arrow" aria-hidden="true">→</span>';
+  const body=`<div class="ledger-pipe-intro"><div class="desc">依《iSM-會計總帳管理系統》主架構整理。中央為會計總帳主線，左側為自動分錄、票據資金與固定資產等聯動系統，右側為立沖帳與利潤中心管理；每個方塊都可點選進入對應 SHEET。藍色代表設定／作業，粉紅色代表外部聯動系統，紫色代表管理作業，橘色代表結轉，綠色代表報表；紅色虛線代表目前尚未建立的目標 ERP 作業。</div><div class="sales-pipe-legend"><span class="done">已完成且可操作</span><span class="partial">部分完成／待補</span><span class="planned">尚未完成／占位頁</span></div></div><div class="ledger-reference-board"><div class="ledger-reference-title">會計總帳系統<small>ACT／AST｜依 iSM 文件流程排列</small></div><div class="ledger-reference-top">${ledgerPipeNode('documentNature')}<span class="ledger-reference-top-arrow" aria-hidden="true">→</span>${ledgerPipeNode('accounts')}<span class="ledger-reference-top-arrow" aria-hidden="true">←</span>${ledgerPipeNode('systemParams')}</div><div class="ledger-reference-layout"><aside class="ledger-reference-side ledger-reference-side--left"><div class="ledger-reference-section-title">外部聯動系統</div>${ledgerPipeNode('autoJournal')}${ledgerPipeNode('treasury')}${ledgerPipeNode('fixedAssets')}</aside><main class="ledger-reference-core"><div class="ledger-reference-section-title">會計總帳主線</div>${ledgerPipeNode('budget')}${downArrow}${ledgerPipeNode('draft')}${downArrow}${ledgerPipeNode('posting')}${downArrow}${ledgerPipeNode('closing')}${downArrow}${ledgerPipeNode('specifiedClosing')}${downArrow}${ledgerPipeNode('reports')}</main><aside class="ledger-reference-side ledger-reference-side--right"><div class="ledger-reference-section-title">管理支線</div><div class="ledger-reference-branch-row">${sideArrow}${ledgerPipeNode('clearing')}</div><div class="ledger-reference-branch-row">${sideArrow}${ledgerPipeNode('profitCenter')}</div></aside></div><div class="ledger-reference-support"><div class="ledger-reference-section-title">本系統已完成的來源與控制支線</div><div class="ledger-reference-support-grid">${ledgerPipeNode('sources')}${ledgerPipeNode('opening')}${ledgerPipeNode('maintain')}${ledgerPipeNode('transfer')}${ledgerPipeNode('ledger')}${ledgerPipeNode('sourceLock')}${ledgerPipeNode('periodControl')}${ledgerPipeNode('reversal')}${ledgerPipeNode('preview')}</div></div><div class="ledger-reference-color-legend"><span class="setup">設定／作業</span><span class="external">外部聯動</span><span class="management">管理支線</span><span class="closing">結轉／關帳</span><span class="report">報表</span><span class="planned">尚未完成</span></div></div><div class="desc">流程與資料規則：來源單據先依公司別單據／分錄性質決定科目，再產生只能維護既有行次的分錄底稿；核准前檢查借貸平衡、立沖、權限、來源鎖定及會計期間，核准後才能拋轉正式傳票。只有已過帳傳票進入總帳、月底／年度結轉與報表；已過帳資料必須以沖回／重作保留版本。SH／SC 原始 ACT／AST 維持唯讀，所有節點導向目前登入公司的目標 ERP。</div>`;
+  finShell('會計總帳水管圖', body);
+  $('#canvas .screen')?.classList.add('ledger-pipe-screen');
+  bindLedgerPipeLinks();
+}
+function renderAccountingPlannedScreen(screen){
+  const configs={
+    'accounting-budget':{title:'預算管理',code:'BUDGET',desc:'文件定義預算名稱、科目／部門預算、預算複製、彙總及實際比較；目前目標 ERP 尚未建立獨立預算資料與作業流程。'},
+    'accounting-fixed-assets':{title:'固定資產管理系統',code:'FIXED-ASSETS',desc:'文件定義固定資產卡片、資產異動、折舊及自動分錄聯動；目前目標 ERP 尚未建立固定資產資料、折舊計算與過帳流程。'},
+    'accounting-profit-center':{title:'利潤中心管理',code:'PROFIT-CENTER',desc:'文件定義利潤中心歸屬／分攤、比較資料及部門別損益報表；目前目標 ERP 尚未建立獨立利潤中心資料與分攤流程。'}
+  };
+  const config=configs[screen]||{title:'會計總帳待建作業',code:'PLANNED',desc:'此作業尚未建立。'};
+  finShell(config.title,`<div class="ledger-planned-banner"><span class="status-planned">尚未完成／占位頁</span><strong>${esc(config.title)}</strong><p>${esc(config.desc)}</p><div class="desc">目前僅呈現文件落差與開發位置，不寫入資料庫、不建立新資料表；確認開發範圍後，再依既有目標 ERP 資料結構設計。</div><button class="btn" type="button" id="backToLedgerPipe">回到會計總帳水管圖</button></div>`);
+  $('#canvas .screen')?.classList.add('ledger-planned-screen');
+  $('#backToLedgerPipe')?.addEventListener('click',()=>navigateToScreen('ledger-pipe'));
+}
+function renderFinanceScreen(s){if(s==='receivable-pipe')return renderReceivablePipe();if(s==='payable-pipe')return renderPayablePipe();if(s==='treasury-pipe')return renderTreasuryPipe();if(s==='ledger-pipe')return renderLedgerPipe();if(s==='accounting-budget'||s==='accounting-fixed-assets'||s==='accounting-profit-center')return renderAccountingPlannedScreen(s);if(s==='finance-flow')return renderFinanceFlow();if(s==='ar-credits')return renderCustomerCreditsV2();if(s==='advances-offset')return renderAdvancesOffset();if(s==='bank-ledger')return renderBankLedger();if(s==='accounting-clearing')return renderAccountingClearing();if(s==='accounting-opening-balances')return renderAccountingOpeningBalancesV2();if(s==='accounting-periods')return renderAccountingPeriodsV2();if(s==='accounting-year-close')return renderAccountingYearCloseV2();if(s==='accounting-auto-rules')return renderAccountingAutoRules();if(s==='accounting-drafts')return renderAccountingDrafts();if(s==='general-ledger')return renderAccountingLedgerV2();if(s==='accounting-financial-statements')return renderTargetFinancialStatements();if(s==='accounting-financial-preview')return renderSourceFinancialPreview();const type=s.startsWith('ar-')?'AR':'AP';if(s.endsWith('source'))return renderFinanceSource(type);if(s.endsWith('receipt')||s.endsWith('payment'))return renderFinanceSettlement(type);if(s.endsWith('notes'))return renderFinanceNotes(type);renderFinanceOpen(type,s.endsWith('aging'));}
 
 function renderAccountingClearingLegacy(){
   finShell('立沖帳查詢',`<form id="clearingFilter" class="form"><div class="row c4"><select name="account_type"><option value="">應收／應付</option><option value="AR">應收</option><option value="AP">應付</option></select>${field('party_code','客戶／廠商')}${field('limit','顯示筆數','number','value="100" min="1" max="500"')}<button class="btn primary">查詢立沖</button></div></form><div id="clearingSummary"></div>${panelTable('立沖明細',['類別','帳款單','帳款日','收付款單','收付款日','對象','本次沖銷','帳款餘額','狀態'],'clearingRows')}`);
@@ -1584,12 +1610,18 @@ function renderArchitectureScreen(){
     ['N19','應收管理水管圖／SHEET排序與節點連結','已完成並收納於本區：依《iSM-應收管理系統》與財務演練文件建立獨立 ACR 水管圖，主線為銷貨／銷退→應收立帳→結帳／發票→收款／沖銷→待抵／退款；前置設定、應收票據／銀行、會計底稿與狀態／帳齡／對帳報表以支線呈現。節點可依登入權限導向對應 SHEET，FIN 分頁已依應收主流程排序。','done'],
     ['N20','應付管理水管圖／SHEET排序與節點連結','已完成並收納於本區：依《iSM-應付管理系統》與財務演練文件建立獨立 ACP 水管圖，主線為進貨／退貨→應付立帳→合併計價→付款／沖銷→待付／票據；計價／付款量、費用、發票差異與來源明細列為支線，銀行、會計與應付報表可由節點開啟。FIN 分頁已依應收、應付及共同財務流程排序。','done'],
     ['N21','銀行／票據資金水管圖／SHEET排序與節點連結','已完成並收納於本區：建立獨立資金水管圖，主線為存提款→應收／應付票據託收／兌現／退票／註銷→逐筆對帳→銀行／票據餘額→資金／票據報表；前置帳戶、幣別、期初與權責規則，以及管帳／管錢／對帳分工、事件歷程與異常稽核列為支線。每個節點可依登入權限導向對應 SHEET，FIN 分頁已依資金主流程排序。','done'],
-    ['N22','會計總帳水管圖／SHEET排序與節點連結','已完成並收納於本區：建立獨立 ACT／AST 會計總帳水管圖，主線為產生分錄底稿→維護→核准→拋轉正式傳票→總帳→月底／年度結轉→試算表與總帳明細報表；會計科目／自動分錄、期初、來源鎖定／底稿還原、期間控制、借貸平衡、立沖檢查、反過帳／更正及公司別目標三大財報列為前置與支線。每個節點可依登入權限導向對應 SHEET，FIN 分頁已依總帳流程排序。','done'],
+    ['N22','會計總帳水管圖／SHEET排序與節點連結','已完成並收納於本區：依《iSM-會計總帳管理系統》主架構重排為中央「預算→會計傳票建立→傳票過帳→月底結轉→指定關帳→帳務管理報表」，左側接自動分錄／票據資金／固定資產，右側接立沖帳／利潤中心；每個節點可依登入權限導向對應 SHEET，FIN 分頁已依總帳流程排序。預算、固定資產、利潤中心目前以紅色虛線占位並列入下一階段建議。','done'],
     ['N23','仙暉 2026 年 8 月進銷模擬與目標 ERP 三大財報','已完成並收納於本區：透過既有請購、採購、到貨、驗收、入庫過帳、計價、應付、付款、訂單、銷貨過帳、應收、收款與會計過帳 API，建立仙暉 2026-08 進貨 20 筆、銷貨 20 筆；目標 ERP 損益表、資產負債表、現金流量表與借貸／現金勾稽均通過。測試資料保留至使用者確認報表後再清除，SH 原始資料庫未寫入。','done']
    ];
   // 使用者已確認的項目進入開發順序；完成後即移到下方「已完成內容」折疊區。
   const roadmap=confirmedNextPhaseRoadmap;
-  const recommendations=[];
+  const recommendations=[
+    ['G01','會計系統參數設定作業','文件列為總帳前置設定；目前只有共用參數查詢，尚未形成依公司別的目標端維護、核准與異動歷程。','planned'],
+    ['G02','會計科目設定作業完整化','目前已有科目／自動分錄規則與總帳查詢，但尚需補齊科目主檔階層、啟用期間、公司別維護與權限稽核。','partial'],
+    ['G03','預算管理','補預算名稱、科目／部門預算建立／複製／彙總，以及實際與預算比較報表；目前尚無獨立目標 ERP 作業。','planned'],
+    ['G04','固定資產管理系統','補固定資產卡片、資產異動、折舊計算、期末處理與自動分錄聯動；目前尚無獨立目標 ERP 作業。','planned'],
+    ['G05','利潤中心管理','補利潤中心歸屬／分攤、比較資料、部門別損益與預算比較報表；目前尚無獨立目標 ERP 作業。','planned']
+  ];
   const compactColumn=(title,subtitle,steps)=>`<div class="compact-flow-column"><div class="compact-flow-title">${title}<small>${subtitle}</small></div>${steps.map(([name,note,status,impact],index)=>`${index?'<div class="compact-arrow">↓</div>':''}<div class="compact-node ${status}"><strong>${name}</strong><small>${note}</small>${impact?`<em>${impact}</em>`:''}</div>`).join('')}</div>`;
   const compactFlow=`<div class="architecture-compact">${compactColumn('訂單／銷售','COP → ACR',[
     ['客戶／品號／計價','S01 申請信用、S02 客戶品號與批次價格','done','核准後套用'],['銷售預測','依品號／依類別；版本／期間／明細／結案','done','接單量分開核對'],['報價／合約／獨立起點','公司別單別／核准／轉訂單；合約可一對多','done','S03'],['訂單／變更／交期','公司別單別／分批銷貨／交期排程','done','S04'],['訂單後續工具','重算／結案／揀貨／缺料需求；核准後正式請購／採購與暫出收入認列','done','S06'],['銷貨確認','公司別單別／過帳後出庫','done','庫存－'],['銷售統計／分析','COPR20 與 COP-ANALYSIS；客戶／品號／部門／業務員／期間','done','可追溯'],['銷退／折讓／憑證','銷退回庫、折讓不動庫存；應收來源、列印／匯出','done','S07'],['應收憑單','結帳日、發票與多幣別已完成','done',''],['收款／票據','匯差／託收／兌現／退票／註銷已完成','done','銀行餘額＋歷程']
@@ -1603,7 +1635,7 @@ function renderArchitectureScreen(){
   document.querySelectorAll('.compact-node small').forEach(element=>{if(element.textContent.includes('SC 財報預覽'))element.textContent=element.textContent.replace('SC 財報預覽','公司別三大財報');});
   document.querySelector('.architecture-block .architecture-canvas')?.insertAdjacentHTML('beforebegin','<div class="architecture-pipe-entry"><div><strong>第一階段：銷售管理水管圖</strong><small>依《iSM-訂單管理系統》排序；節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-sales-screen="sales-pipe">開啟銷售水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：庫存管理水管圖</strong><small>依《iSM-庫存管理系統》排序；開帳、異動、驗收／過帳、可用量、台帳與更正節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-inventory-screen="inventory-pipe">開啟庫存水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：採購管理水管圖</strong><small>依《iSM-採購管理系統》排序；請購、採購、到貨、驗收、進貨、退貨與應付節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-purchase-screen="purchase-pipe">開啟採購水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：應收管理水管圖</strong><small>依《iSM-應收管理系統》排序；銷貨／銷退、應收、結帳／發票、收款／沖銷、待抵／退款與追蹤節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-receivable-screen="receivable-pipe">開啟應收水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：應付管理水管圖</strong><small>依《iSM-應付管理系統》排序；進貨／退貨、應付、合併計價、付款／沖銷、待付／票據與費用節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-payable-screen="payable-pipe">開啟應付水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：銀行／票據資金水管圖</strong><small>依財務演練文件排序；存提款、票據票況、逐筆對帳、餘額、資金報表與管帳／管錢／對帳權責可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-treasury-screen="treasury-pipe">開啟銀行／票據資金水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：會計總帳水管圖</strong><small>依財務演練文件排序；分錄底稿、維護、核准、傳票、總帳、結轉、報表、來源鎖定與期間控制可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-ledger-screen="ledger-pipe">開啟會計總帳水管圖</button></div>');
   $('#refreshScreen').onclick=renderArchitectureScreen;
-  const recommendationBlock=`<div class="architecture-block"><h3>下一階段開發建議</h3><div class="desc">目前沒有尚未確認的建議；後續檢查到的新落差會先列在這裡，確認要修改後再移入上方「下一階段開發順序（已確認項目）」。</div></div>`;
+  const recommendationBlock=`<div class="architecture-block"><h3>下一階段開發建議</h3><div class="desc">以下為依《iSM-會計總帳管理系統》比對目前程式後的新落差；尚未確認前只列在本區，不會建立資料表或寫入資料。確認要修改後再移入上方「下一階段開發順序（已確認項目）」。</div><div class="architecture-roadmap">${recommendations.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${no}</span><div><strong>${title}</strong><p>${desc}</p></div></div>`).join('')}</div></div>`;
   $('#canvas .arch-rule-grid')?.insertAdjacentHTML('beforebegin',recommendationBlock);
   bindSalesPipeLinks();
   bindInventoryPipeLinks();
