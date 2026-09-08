@@ -173,6 +173,11 @@ const routeCapability = [
   [/^\/sales-workflow\/document-types/, 'sales-document-types'],
   [/^\/sales-workflow\/customer-item(?:s|-mappings)(?:\/|$)/, 'sales-customer-items'],
   [/^\/sales-workflow\/customer-pricing(?:\/|$)/, 'sales-customer-pricing'],
+  [/^\/sales-workflow\/(contracts|delivery-schedules|exceptions|pick-lists|procurement-demands)(?:\/|$)/, 'sales-orders'],
+  [/^\/sales-workflow\/orders\/\d+\/(recalculate|close|pick-lists|procurement-demands)/, 'sales-orders'],
+  [/^\/sales-workflow\/documents\/\d+\/print(?:\/|$)/, 'sales-orders'],
+  [/^\/sales-workflow\/documents\/export(?:\/|$)/, 'sales-orders'],
+  [/^\/sales-workflow\/customer-controls(?:\/|$)/, 'source-customers'],
   [/^\/sales-workflow\/forecasts(?:\/|$)/, 'sales-forecast'],
   [/^\/sales-workflow\/order-changes/, 'sales-order-changes'],
   [/^\/sales-workflow\/orders-for-reopen/, 'sales-order-changes'],
@@ -230,7 +235,7 @@ export async function authorizationMiddleware(req, _res, next) {
     const match = routeCapability.find(([pattern]) => pattern.test(req.path));
     if (!match || req.auth.role_code === 'ADMIN') return next();
     const featureCode = match[1];
-    const action = /\/(approve|reject|post|close|reopen|restore|complete|reverse|validate|void|scan|acknowledge|correction|resolve|ignore)$/.test(req.path) ? 'can_approve' : req.method === 'GET' ? 'can_view' : req.method === 'POST' ? 'can_create' : req.method === 'PUT' || req.method === 'PATCH' ? 'can_update' : req.method === 'DELETE' ? 'can_delete' : 'can_view';
+    const action = /\/(approve|reject|post|close|reopen|restore|complete|reverse|validate|void|scan|acknowledge|correction|resolve|ignore|convert|cancel|submit|recalculate)$/.test(req.path) ? 'can_approve' : req.method === 'GET' ? 'can_view' : req.method === 'POST' ? 'can_create' : req.method === 'PUT' || req.method === 'PATCH' ? 'can_update' : req.method === 'DELETE' ? 'can_delete' : 'can_view';
     // 管帳角色可以查詢票據／銀行明細，但不能建立、過帳、沖回或變更資金。
     // 寫入仍由 finance-cash／finance-reconcile 的權限單獨控管。
     if (req.method === 'GET' && /^\/finance-workflow\/(notes|banks\/transactions)(?:\/|$)/.test(req.path)) {

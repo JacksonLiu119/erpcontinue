@@ -3,7 +3,9 @@ const accessState = { roles: [], activeRoleId: null, isAdmin: false, permissions
 const featureAliases = {
   basicdata:'basicdata', companies:'basicdata', 'common-parameters':'basicdata', 'code-rules':'basicdata',
   'job-categories':'basicdata', currencies:'basicdata', 'payment-terms':'basicdata', calendars:'basicdata',
-  'source-mappings':'basicdata', 'data-quality':'data-quality', customers:'source-customers', suppliers:'source-suppliers',
+  'source-mappings':'basicdata', 'data-quality':'data-quality', customers:'source-customers', 'sales-customer-controls':'source-customers', suppliers:'source-suppliers',
+  'sales-customer-pricing-batch':'sales-customer-pricing', 'sales-contracts':'sales-orders', 'sales-delivery-schedule':'sales-progress',
+  'sales-exceptions':'sales-progress', 'sales-order-tools':'sales-orders', 'sales-vouchers':'sales-orders',
   'inventory-detail':'inventory-new-ledger', 'inventory-ledger':'inventory-new-ledger',
   'inventory-balance':'inventory-new-balance', 'inventory-movement-stats':'inventory-new-ledger',
   'department-movement-stats':'inventory-new-ledger',

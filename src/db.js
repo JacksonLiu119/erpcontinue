@@ -1506,6 +1506,46 @@ export async function ensureTargetReversalSchema() {
 // the original customer ERP documents untouched while recording the
 // controlled order unlock/reopen operation in the target ERP.
 export async function ensureTargetSalesWorkflowSchema() {
+  for (const [column, definition] of [
+    ['credit_limit', 'DECIMAL(24,6) NOT NULL DEFAULT 0'],
+    ['credit_policy', "VARCHAR(20) NOT NULL DEFAULT 'warning'"],
+    ['is_active', 'TINYINT(1) NOT NULL DEFAULT 1'],
+    ['approved_by', 'BIGINT UNSIGNED NULL'],
+    ['approved_at', 'DATETIME NULL']
+  ]) await addColumnIfMissing('erp_customers', column, definition);
+  await pool.query(`CREATE TABLE IF NOT EXISTS sales_customer_requests (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, request_no VARCHAR(60) NOT NULL,
+    request_kind ENUM('new','change') NOT NULL, customer_code VARCHAR(30) NOT NULL,
+    before_json JSON NULL, requested_json JSON NOT NULL,
+    status ENUM('draft','pending','approved','rejected','voided') NOT NULL DEFAULT 'draft',
+    reason VARCHAR(500) NOT NULL, review_note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, submitted_by BIGINT UNSIGNED NULL, submitted_at DATETIME NULL,
+    reviewed_by BIGINT UNSIGNED NULL, reviewed_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_sales_customer_request(tenant_id,company_id,source_system,request_no),
+    KEY ix_sales_customer_request(source_database,status,customer_code,created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS sales_customer_request_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, request_id BIGINT UNSIGNED NOT NULL,
+    event_kind VARCHAR(30) NOT NULL, before_status VARCHAR(20) NULL, after_status VARCHAR(20) NULL,
+    reason VARCHAR(500) NULL, user_id BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_sales_customer_request_event(request_id,created_at),
+    CONSTRAINT fk_sales_customer_request_event FOREIGN KEY(request_id) REFERENCES sales_customer_requests(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS sales_credit_approval_requests (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL,
+    source_database VARCHAR(60) NOT NULL, customer_code VARCHAR(30) NOT NULL,
+    document_id BIGINT UNSIGNED NOT NULL, document_no VARCHAR(60) NOT NULL, document_kind VARCHAR(30) NOT NULL,
+    credit_limit DECIMAL(24,6) NOT NULL DEFAULT 0, exposure_amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    excess_amount DECIMAL(24,6) NOT NULL DEFAULT 0, status ENUM('pending','approved','rejected','used') NOT NULL DEFAULT 'pending',
+    reason VARCHAR(500) NULL, requested_by BIGINT UNSIGNED NULL, requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reviewed_by BIGINT UNSIGNED NULL, reviewed_at DATETIME NULL, review_note VARCHAR(500) NULL,
+    UNIQUE KEY uq_sales_credit_document(tenant_id,company_id,source_system,document_id),
+    KEY ix_sales_credit_approval(source_database,status,customer_code,requested_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
   const typeColumns = [
     ['type_full_name', 'VARCHAR(120) NULL'], ['nature_code', 'VARCHAR(4) NULL'],
     ['numbering_method', "VARCHAR(12) NOT NULL DEFAULT 'daily'"], ['year_digits', 'TINYINT UNSIGNED NOT NULL DEFAULT 4'],
@@ -1657,6 +1697,135 @@ export async function ensureTargetSalesForecastSchema() {
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY ix_erp_sales_forecast_event (tenant_id,company_id,source_system,source_database,forecast_id,created_at),
     CONSTRAINT fk_erp_sales_forecast_event_header FOREIGN KEY (forecast_id) REFERENCES erp_sales_forecasts(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+}
+
+// S02～S07 銷售第二階段共用結構。這些表只存在目前登入公司的目標 ERP，
+// 用來保存合約訂單、交期排程、訂單後續控制、揀貨／採購需求及流程事件；
+// SH／SC 原始 COP 資料仍維持唯讀，不以測試資料改寫來源狀態。
+export async function ensureTargetSalesPhase2Schema() {
+  await ensureTargetSalesWorkflowSchema();
+  await addColumnIfMissing('sales_documents', 'contract_id', 'BIGINT UNSIGNED NULL');
+  await addColumnIfMissing('sales_document_items', 'contract_item_id', 'BIGINT UNSIGNED NULL');
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_contracts (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    contract_no VARCHAR(60) NOT NULL, contract_type VARCHAR(30) NOT NULL DEFAULT 'sales_contract',
+    customer_code VARCHAR(30) NOT NULL, contract_date DATE NOT NULL,
+    period_from DATE NULL, period_to DATE NULL, currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD',
+    status ENUM('draft','approved','partial','completed','closed','voided') NOT NULL DEFAULT 'draft',
+    note VARCHAR(500) NULL, source_kind VARCHAR(30) NOT NULL DEFAULT 'manual',
+    source_table VARCHAR(60) NOT NULL DEFAULT 'erp_sales_contracts', source_key VARCHAR(160) NULL,
+    created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL,
+    closed_by BIGINT UNSIGNED NULL, closed_at DATETIME NULL, close_note VARCHAR(255) NULL,
+    voided_by BIGINT UNSIGNED NULL, voided_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_sales_contract_no(tenant_id,company_id,source_system,source_database,contract_no),
+    KEY ix_erp_sales_contract_filter(tenant_id,company_id,source_system,source_database,status,contract_date,customer_code)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_contract_items (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    contract_id BIGINT UNSIGNED NOT NULL, line_no INT UNSIGNED NOT NULL,
+    item_code VARCHAR(40) NOT NULL, item_name VARCHAR(160) NULL, specification VARCHAR(160) NULL,
+    unit VARCHAR(20) NOT NULL DEFAULT 'PCS', warehouse_code VARCHAR(30) NULL,
+    quantity DECIMAL(24,3) NOT NULL, converted_quantity DECIMAL(24,3) NOT NULL DEFAULT 0,
+    unit_price DECIMAL(24,6) NOT NULL DEFAULT 0, amount DECIMAL(24,6) NOT NULL DEFAULT 0,
+    expected_date DATE NULL, note VARCHAR(255) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_sales_contract_line(contract_id,line_no),
+    KEY ix_erp_sales_contract_line_item(contract_id,item_code),
+    CONSTRAINT fk_erp_sales_contract_line_header FOREIGN KEY(contract_id) REFERENCES erp_sales_contracts(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_contract_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    contract_id BIGINT UNSIGNED NOT NULL, tenant_id VARCHAR(60) NOT NULL,
+    company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    event_kind VARCHAR(40) NOT NULL, before_json JSON NULL, after_json JSON NULL,
+    reason VARCHAR(500) NOT NULL, changed_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_erp_sales_contract_event(contract_id,created_at),
+    KEY ix_erp_sales_contract_event_context(source_database,event_kind,created_at),
+    CONSTRAINT fk_erp_sales_contract_event_header FOREIGN KEY(contract_id) REFERENCES erp_sales_contracts(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_delivery_schedules (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    schedule_no VARCHAR(60) NOT NULL, order_id BIGINT UNSIGNED NOT NULL,
+    order_item_id BIGINT UNSIGNED NOT NULL, customer_code VARCHAR(30) NOT NULL,
+    item_code VARCHAR(40) NOT NULL, scheduled_date DATE NOT NULL,
+    quantity DECIMAL(24,3) NOT NULL, fulfilled_quantity DECIMAL(24,3) NOT NULL DEFAULT 0,
+    status ENUM('draft','approved','partial','fulfilled','cancelled') NOT NULL DEFAULT 'draft',
+    note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL,
+    approved_at DATETIME NULL, cancelled_by BIGINT UNSIGNED NULL, cancelled_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_sales_delivery_schedule_no(tenant_id,company_id,source_system,source_database,schedule_no),
+    KEY ix_erp_sales_delivery_schedule_order(source_database,order_id,order_item_id,status,scheduled_date)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_delivery_schedule_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    schedule_id BIGINT UNSIGNED NOT NULL, tenant_id VARCHAR(60) NOT NULL,
+    company_id VARCHAR(60) NOT NULL, source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    event_kind VARCHAR(40) NOT NULL, before_json JSON NULL, after_json JSON NULL,
+    reason VARCHAR(500) NOT NULL, changed_by BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_erp_sales_delivery_schedule_event(schedule_id,created_at),
+    CONSTRAINT fk_erp_sales_delivery_schedule_event_header FOREIGN KEY(schedule_id) REFERENCES erp_sales_delivery_schedules(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_order_control_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    order_id BIGINT UNSIGNED NOT NULL, action_code VARCHAR(40) NOT NULL,
+    before_json JSON NULL, after_json JSON NULL, reason VARCHAR(500) NOT NULL,
+    changed_by BIGINT UNSIGNED NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_erp_sales_order_control_event(source_database,order_id,created_at),
+    KEY ix_erp_sales_order_control_action(source_database,action_code,created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_pick_lists (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    pick_no VARCHAR(60) NOT NULL, order_id BIGINT UNSIGNED NOT NULL,
+    warehouse_code VARCHAR(30) NULL, pick_date DATE NOT NULL,
+    status ENUM('draft','approved','picked','cancelled') NOT NULL DEFAULT 'draft',
+    note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL,
+    approved_at DATETIME NULL, completed_by BIGINT UNSIGNED NULL, completed_at DATETIME NULL,
+    cancelled_by BIGINT UNSIGNED NULL, cancelled_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_sales_pick_no(tenant_id,company_id,source_system,source_database,pick_no),
+    KEY ix_erp_sales_pick_order(source_database,order_id,status,pick_date)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_pick_list_items (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    pick_list_id BIGINT UNSIGNED NOT NULL, order_item_id BIGINT UNSIGNED NOT NULL,
+    item_code VARCHAR(40) NOT NULL, quantity DECIMAL(24,3) NOT NULL,
+    picked_quantity DECIMAL(24,3) NOT NULL DEFAULT 0, note VARCHAR(255) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_sales_pick_line(pick_list_id,order_item_id),
+    CONSTRAINT fk_erp_sales_pick_line_header FOREIGN KEY(pick_list_id) REFERENCES erp_sales_pick_lists(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS erp_sales_procurement_demands (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    demand_no VARCHAR(60) NOT NULL, order_id BIGINT UNSIGNED NOT NULL,
+    order_item_id BIGINT UNSIGNED NOT NULL, item_code VARCHAR(40) NOT NULL,
+    quantity DECIMAL(24,3) NOT NULL, status ENUM('draft','pending','converted','cancelled') NOT NULL DEFAULT 'draft',
+    reason VARCHAR(500) NOT NULL, procurement_document_id BIGINT UNSIGNED NULL,
+    created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_erp_sales_procurement_demand_no(tenant_id,company_id,source_system,source_database,demand_no),
+    KEY ix_erp_sales_procurement_demand_order(source_database,order_id,order_item_id,status)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
 }
 

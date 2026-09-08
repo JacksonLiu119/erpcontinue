@@ -1,10 +1,11 @@
-import { pool, getSourcePool, sourceDatabases, reloadSourceDatabases, runWithTargetDatabase, tx, ensureProcurementSchema, ensureTargetProcurementTypeSchema, ensureTargetReceiptWorkflowSchema, ensureTargetReversalSchema, ensureTargetSalesWorkflowSchema, ensureTargetSalesCustomerItemSchema, ensureTargetSalesPricingSchema, ensureTargetSalesForecastSchema, ensureTargetDocumentNatureSchema, ensureTargetFinanceWorkflowSchema, validateOperationalSource } from './db.js';
+import { pool, getSourcePool, sourceDatabases, reloadSourceDatabases, runWithTargetDatabase, tx, ensureProcurementSchema, ensureTargetProcurementTypeSchema, ensureTargetReceiptWorkflowSchema, ensureTargetReversalSchema, ensureTargetSalesWorkflowSchema, ensureTargetSalesCustomerItemSchema, ensureTargetSalesPricingSchema, ensureTargetSalesForecastSchema, ensureTargetSalesPhase2Schema, ensureTargetDocumentNatureSchema, ensureTargetFinanceWorkflowSchema, validateOperationalSource } from './db.js';
 import { hashPassword, getDepartmentScope, recordAccessAudit } from './auth.js';
 import { registerImportQualityRoutes } from './import-quality.js';
 import { registerReportingRoutes } from './reports.js';
 import { registerSourceFinancialPreviewRoutes } from './source-financial-preview.js';
 import { registerSalesForecastRoutes, resolveSalesForecastOrderLink, refreshSalesForecastMetrics } from './sales-forecast.js';
 import { registerSalesAnalysisRoutes } from './sales-analysis.js';
+import { registerSalesPhase2Routes } from './sales-phase2.js';
 
 const listTables = {
   customers: ['id', 'code', 'name', 'tax_id', 'contact_name', 'phone', 'email', 'address', 'credit_limit', 'is_active'],
@@ -1042,6 +1043,7 @@ export function registerApi(app) {
   registerProcurementWorkflowRoutes(app);
   registerSalesReturnInspectionRoutes(app);
   registerSalesWorkflowRoutes(app);
+  registerSalesPhase2Routes(app);
   registerSalesAnalysisRoutes(app);
   registerSalesCustomerItemRoutes(app);
   registerSalesCustomerPricingRoutes(app);
@@ -1333,7 +1335,7 @@ const canonicalMasterConfigs = {
   customers: {
     table: 'erp_customers', code: 'customer_code', name: 'customer_name', sourceTable: 'copma',
     fields: ['customer_code', 'short_name', 'customer_name', 'responsible_person', 'contact_name', 'phone', 'fax', 'email', 'mobile', 'tax_id', 'currency_code', 'payment_term_code', 'payment_term_source_value', 'invoice_type', 'tax_type', 'closing_day'],
-    select: 'customer_code, short_name, customer_name, responsible_person, contact_name, phone, fax, email, mobile, tax_id, currency_code, payment_term_code, payment_term_source_value, invoice_type, tax_type, closing_day',
+    select: 'customer_code, short_name, customer_name, responsible_person, contact_name, phone, fax, email, mobile, tax_id, currency_code, payment_term_code, payment_term_source_value, invoice_type, tax_type, closing_day, credit_limit, credit_policy, is_active',
     sourceSelect: `MA001 AS customer_code, MA002 AS short_name, MA003 AS customer_name,
       MA004 AS responsible_person, MA005 AS contact_name, MA006 AS phone, MA008 AS fax,
       MA009 AS email, MA138 AS mobile, MA010 AS tax_id, MA014 AS currency_code,
@@ -1499,6 +1501,7 @@ function registerCanonicalMasterRoutes(app) {
       try {
         const sourceName = sourceDbFromRequest(req);
         await ensureProcurementSchema();
+        if(type==='customers')await ensureTargetSalesWorkflowSchema();
         await syncCanonicalMaster(sourceName, type);
         for (const relatedType of config.related || []) await syncCanonicalMaster(sourceName, relatedType);
         const source = sourceDatabases[sourceName];
@@ -1512,6 +1515,7 @@ function registerCanonicalMasterRoutes(app) {
 
     app.post(`/api/master/${type}`, async (req, res, next) => {
       try {
+        if(type==='customers')throw badRequest('客戶新增必須由客戶申請作業送審，核准後才寫入主檔');
         const sourceName = sourceDbFromRequest(req);
         requireShMasterSource(sourceName);
         const body = req.body || {};
@@ -1531,6 +1535,7 @@ function registerCanonicalMasterRoutes(app) {
 
     app.put(`/api/master/${type}/:code`, async (req, res, next) => {
       try {
+        if(type==='customers')throw badRequest('客戶資料修改必須建立變更申請，核准後才更新主檔');
         const sourceName = sourceDbFromRequest(req);
         requireShMasterSource(sourceName);
         const code = trim(req.params.code);
@@ -4169,7 +4174,51 @@ async function resolveSalesDocumentPrice(conn, context, document, itemInput, sou
   return { customerCode, itemCode, pricingUnit, currencyCode, unitPrice, pricing, hasExplicitUnitPrice, ...lineage };
 }
 
+const customerRequestFields=['customer_code','short_name','customer_name','responsible_person','contact_name','phone','fax','email','mobile','tax_id','currency_code','payment_term_code','invoice_type','tax_type','closing_day','credit_limit','credit_policy','is_active'];
+const SALES_CREDIT_EPS=0.000001;
+function salesCompanyContext(db){
+  const source=sourceDatabases[db];
+  if(!source)throw badRequest(`找不到資料來源：${db}`);
+  return {tenant_id:source.tenant_id||'default',company_id:source.company_id||db,source_system:source.source_system||source.adapter_code||'ism-sh',source_database:db};
+}
+function customerRequestPayload(body={}){
+  const out={};
+  for(const field of customerRequestFields) out[field]=field==='credit_limit'?Number(body[field]||0):field==='is_active'?Number(body[field]??1):(trim(body[field])||null);
+  if(!out.customer_code||!out.customer_name)throw badRequest('客戶代號與客戶名稱為必填');
+  if(!Number.isFinite(out.credit_limit)||out.credit_limit<0)throw badRequest('信用額度不可為負數');
+  if(!['warning','block','approval'].includes(out.credit_policy||''))out.credit_policy='warning';
+  return out;
+}
+async function customerCreditSnapshot(conn,c,customerCode,extraAmount=0,excludeDocumentId=0){
+  const [[customer]]=await conn.query(`SELECT customer_code,customer_name,credit_limit,credit_policy,is_active FROM erp_customers WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND customer_code=? LIMIT 1`,[c.tenant_id,c.company_id,c.source_system,c.source_database,customerCode]);
+  if(!customer||!Number(customer.is_active))throw badRequest('找不到目前公司別已啟用的客戶');
+  const [[ar]]=await conn.query(`SELECT COALESCE(SUM(balance_amount),0) amount FROM finance_open_items WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND account_type='AR' AND party_code=? AND status IN ('approved','open','partial')`,[c.tenant_id,c.company_id,c.source_system,c.source_database,customerCode]);
+  const [[orders]]=await conn.query(`SELECT COALESCE(SUM(GREATEST(i.quantity-i.related_quantity,0)*i.unit_price),0) amount FROM sales_documents d JOIN sales_document_items i ON i.document_id=d.id WHERE d.tenant_id=? AND d.company_id=? AND d.source_system=? AND d.source_database=? AND d.customer_code=? AND d.document_kind='sales_order' AND d.status IN ('approved','partial') AND d.id<>?`,[c.tenant_id,c.company_id,c.source_system,c.source_database,customerCode,Number(excludeDocumentId)||0]);
+  const arAmount=Number(ar.amount||0),orderAmount=Number(orders.amount||0),added=Number(extraAmount||0),exposure=arAmount+orderAmount+added,limit=Number(customer.credit_limit||0);
+  return {...customer,ar_amount:arAmount,open_order_amount:orderAmount,pending_document_amount:added,exposure_amount:exposure,excess_amount:limit>0?Math.max(exposure-limit,0):0,over_limit:limit>0&&exposure>limit+SALES_CREDIT_EPS};
+}
+async function enforceSalesDocumentCredit(document,userId){
+  if(!['sales_order','shipment'].includes(document.document_kind))return null;
+  await ensureTargetFinanceWorkflowSchema();
+  const c=salesCompanyContext(String(document.source_database).toUpperCase());
+  const [[amountRow]]=await pool.query('SELECT COALESCE(SUM(quantity*unit_price),0) amount FROM sales_document_items WHERE document_id=?',[document.id]);
+  const extra=document.document_kind==='sales_order'?Number(amountRow.amount||0):0;
+  const snapshot=await tx(conn=>customerCreditSnapshot(conn,c,document.customer_code,extra,document.document_kind==='sales_order'?document.id:0));
+  if(!snapshot.over_limit)return snapshot;
+  if(snapshot.credit_policy==='warning')return {...snapshot,warning:`客戶信用額度已超過 ${snapshot.excess_amount}`};
+  if(snapshot.credit_policy==='block')throw badRequest(`客戶信用額度不足，超額 ${snapshot.excess_amount}，目前規則禁止核准`);
+  const[[approved]]=await pool.query(`SELECT id FROM sales_credit_approval_requests WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND document_id=? AND status='approved' LIMIT 1`,[c.tenant_id,c.company_id,c.source_system,c.source_database,document.id]);
+  if(approved)return {...snapshot,credit_approval_id:approved.id};
+  await pool.query(`INSERT INTO sales_credit_approval_requests(tenant_id,company_id,source_system,source_database,customer_code,document_id,document_no,document_kind,credit_limit,exposure_amount,excess_amount,status,reason,requested_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending','系統信用額度檢核送簽',?) ON DUPLICATE KEY UPDATE credit_limit=VALUES(credit_limit),exposure_amount=VALUES(exposure_amount),excess_amount=VALUES(excess_amount),status=IF(status='approved','approved','pending'),requested_by=VALUES(requested_by),requested_at=NOW()`,[c.tenant_id,c.company_id,c.source_system,c.source_database,document.customer_code,document.id,document.document_no,document.document_kind,snapshot.credit_limit,snapshot.exposure_amount,snapshot.excess_amount,userId]);
+  const error=badRequest(`客戶信用額度超過 ${snapshot.excess_amount}，已送出信用放行申請，核准後才能繼續`);error.status=409;throw error;
+}
 function registerSalesWorkflowRoutes(app){
+  app.get('/api/sales-workflow/customer-controls/requests',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const db=sourceDbFromRequest(req),c=ctx(db);const[rows]=await pool.query(`SELECT r.*,u.display_name created_by_name,rv.display_name reviewed_by_name FROM sales_customer_requests r LEFT JOIN access_users u ON u.id=r.created_by LEFT JOIN access_users rv ON rv.id=r.reviewed_by WHERE r.tenant_id=? AND r.company_id=? AND r.source_system=? AND r.source_database=? ORDER BY r.created_at DESC LIMIT 200`,[c.tenant_id,c.company_id,c.source_system,db]);res.json({ok:true,data:rows});}catch(e){next(e);}});
+  app.post('/api/sales-workflow/customer-controls/requests',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const db=sourceDbFromRequest(req),c=ctx(db),kind=trim(req.body?.request_kind)||'new',payload=customerRequestPayload(req.body),reason=trim(req.body?.reason);if(!['new','change'].includes(kind)||!reason)throw badRequest('請選擇申請類型並填寫原因');let before=null;const[[current]]=await pool.query(`SELECT * FROM erp_customers WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND customer_code=?`,[c.tenant_id,c.company_id,c.source_system,db,payload.customer_code]);if(kind==='new'&&current)throw badRequest('客戶代號已存在，請改用資料變更申請');if(kind==='change'&&!current)throw badRequest('找不到要變更的客戶');if(current)before=Object.fromEntries(customerRequestFields.map(f=>[f,current[f]]));const no=`CR-${new Date().toISOString().replace(/[-:TZ.]/g,'').slice(0,14)}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;const[r]=await pool.query(`INSERT INTO sales_customer_requests(tenant_id,company_id,source_system,source_database,request_no,request_kind,customer_code,before_json,requested_json,status,reason,created_by) VALUES(?,?,?,?,?,?,?,?,?,'draft',?,?)`,[c.tenant_id,c.company_id,c.source_system,db,no,kind,payload.customer_code,before?JSON.stringify(before):null,JSON.stringify(payload),reason,req.auth.id]);await pool.query(`INSERT INTO sales_customer_request_events(request_id,event_kind,before_status,after_status,reason,user_id) VALUES(?,'created',NULL,'draft',?,?)`,[r.insertId,reason,req.auth.id]);res.status(201).json({ok:true,data:{id:r.insertId,request_no:no,status:'draft'}});}catch(e){next(e);}});
+  app.post('/api/sales-workflow/customer-controls/requests/:id/submit',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const db=sourceDbFromRequest(req),id=Number(req.params.id);const[r]=await pool.query(`UPDATE sales_customer_requests SET status='pending',submitted_by=?,submitted_at=NOW() WHERE id=? AND source_database=? AND status='draft'`,[req.auth.id,id,db]);if(!r.affectedRows)throw badRequest('只有目前公司的草稿申請可以送審');await pool.query(`INSERT INTO sales_customer_request_events(request_id,event_kind,before_status,after_status,reason,user_id) VALUES(?,'submitted','draft','pending',?,?)`,[id,trim(req.body?.reason)||'送出審核',req.auth.id]);res.json({ok:true,data:{id,status:'pending'}});}catch(e){next(e);}});
+  app.post('/api/sales-workflow/customer-controls/requests/:id/:action',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const db=sourceDbFromRequest(req),c=ctx(db),id=Number(req.params.id),action=req.params.action;if(!['approve','reject'].includes(action))return next();const out=await tx(async conn=>{const[[row]]=await conn.query(`SELECT * FROM sales_customer_requests WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND status='pending' FOR UPDATE`,[id,c.tenant_id,c.company_id,c.source_system,db]);if(!row)throw badRequest('只有目前公司的待審申請可以處理');const note=trim(req.body?.review_note)|| (action==='approve'?'核准客戶申請':'駁回客戶申請');if(action==='approve'){const p=typeof row.requested_json==='string'?JSON.parse(row.requested_json):row.requested_json;if(row.request_kind==='new')await conn.query(`INSERT INTO erp_customers(source_database,tenant_id,company_id,source_system,customer_code,short_name,customer_name,responsible_person,contact_name,phone,fax,email,mobile,tax_id,currency_code,payment_term_code,invoice_type,tax_type,closing_day,credit_limit,credit_policy,is_active,source_table,source_key,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'inventory_erp',?,?,NOW())`,[db,c.tenant_id,c.company_id,c.source_system,...customerRequestFields.map(f=>p[f]),`${c.tenant_id}:${c.company_id}:${c.source_system}:NEW:${p.customer_code}`,req.auth.id]);else await conn.query(`UPDATE erp_customers SET short_name=?,customer_name=?,responsible_person=?,contact_name=?,phone=?,fax=?,email=?,mobile=?,tax_id=?,currency_code=?,payment_term_code=?,invoice_type=?,tax_type=?,closing_day=?,credit_limit=?,credit_policy=?,is_active=?,approved_by=?,approved_at=NOW() WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND customer_code=?`,[...customerRequestFields.slice(1).map(f=>p[f]),req.auth.id,c.tenant_id,c.company_id,c.source_system,db,p.customer_code]);}const status=action==='approve'?'approved':'rejected';await conn.query(`UPDATE sales_customer_requests SET status=?,reviewed_by=?,reviewed_at=NOW(),review_note=? WHERE id=?`,[status,req.auth.id,note,id]);await conn.query(`INSERT INTO sales_customer_request_events(request_id,event_kind,before_status,after_status,reason,user_id) VALUES(?,?, 'pending',?,?,?)`,[id,status,status,note,req.auth.id]);return{id,status};});res.json({ok:true,data:out});}catch(e){next(e);}});
+  app.get('/api/sales-workflow/customer-controls/credit-report',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();await ensureTargetFinanceWorkflowSchema();const db=sourceDbFromRequest(req),c=ctx(db),customerCode=trim(req.query.customer_code);const params=[c.tenant_id,c.company_id,c.source_system,db];let filter='';if(customerCode){filter=' AND customer_code=?';params.push(customerCode);}const[customers]=await pool.query(`SELECT customer_code FROM erp_customers WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND is_active=1${filter} ORDER BY customer_code LIMIT 500`,params);const rows=[];for(const x of customers)rows.push(await tx(conn=>customerCreditSnapshot(conn,c,x.customer_code)));const[pending]=await pool.query(`SELECT * FROM sales_credit_approval_requests WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?${customerCode?' AND customer_code=?':''} ORDER BY requested_at DESC LIMIT 200`,customerCode?[c.tenant_id,c.company_id,c.source_system,db,customerCode]:[c.tenant_id,c.company_id,c.source_system,db]);res.json({ok:true,data:{rows,pending}});}catch(e){next(e);}});
+  app.post('/api/sales-workflow/customer-controls/credit-approvals/:id/:action',async(req,res,next)=>{try{await ensureTargetSalesWorkflowSchema();const db=sourceDbFromRequest(req),c=ctx(db),id=Number(req.params.id),status=req.params.action==='approve'?'approved':req.params.action==='reject'?'rejected':null;if(!status)return next();const[r]=await pool.query(`UPDATE sales_credit_approval_requests SET status=?,reviewed_by=?,reviewed_at=NOW(),review_note=? WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND status='pending'`,[status,req.auth.id,trim(req.body?.review_note)||status,id,c.tenant_id,c.company_id,c.source_system,db]);if(!r.affectedRows)throw badRequest('找不到目前公司待處理的信用放行申請');res.json({ok:true,data:{id,status}});}catch(e){next(e);}});
   const ctx=db=>{const s=sourceDatabases[db];if(!s)throw badRequest(`找不到資料來源：${db}`);return{tenant_id:s.tenant_id||'default',company_id:s.company_id||db,source_system:s.source_system||s.adapter_code||'ism-sh',source_database:db};};
   const EPS=0.000001;
 
@@ -4283,6 +4332,7 @@ function registerSalesWorkflowRoutes(app){
     try{
       await ensureTargetSalesPricingSchema();
       await ensureTargetSalesForecastSchema();
+      await ensureTargetFinanceWorkflowSchema();
        const b=req.body||{},db=String(b.source_database||'SH').toUpperCase(),c=await ensure(db),kind=trim(b.document_kind),date=validDate(b.document_date),type=trim(b.document_type);
        await syncCanonicalMaster(db, 'currencies');
        const [[dt]]=await pool.query(`SELECT * FROM sales_document_types
@@ -4327,12 +4377,19 @@ function registerSalesWorkflowRoutes(app){
         const customerCode=trim(b.customer_code)||source?.customer_code,itemCode=trim(b.item_code)||source?.item_code;
         if(!customerCode||!itemCode)throw badRequest('客戶與品號不可空白');
         assertConfiguredSource(dt,source?.document_kind,Boolean(source),'銷售單據');
-        const no=trim(b.document_no)||await nextConfiguredDocumentNumber(conn,'sales_documents','document_no',dt,date),inventory=['shipment','sales_return'].includes(kind)?'pending':'not_applicable',status=documentTypeNeedsApproval(dt)?'draft':'approved';
+        const no=trim(b.document_no)||await nextConfiguredDocumentNumber(conn,'sales_documents','document_no',dt,date),inventory=['shipment','sales_return'].includes(kind)?'pending':'not_applicable';
+        let status=documentTypeNeedsApproval(dt)?'draft':'approved',creditSnapshot=null;
         const document={document_kind:kind,document_type:type,document_no:no,document_date:date,customer_code:customerCode,currency_code:trim(b.currency_code)||source?.currency_code||null};
          const price=await resolveSalesDocumentPrice(conn,c,document,{item_code:itemCode,item_name:trim(b.item_name)||source?.item_name,specification:trim(b.specification)||source?.specification,unit:trim(b.unit)||source?.unit||'PCS',quantity:qty,unit_price:b.unit_price},source);
+         if(status==='approved'&&['sales_order','shipment'].includes(kind)){
+           creditSnapshot=await customerCreditSnapshot(conn,c,customerCode,kind==='sales_order'?qty*Number(price.unitPrice||0):0);
+           if(creditSnapshot.over_limit&&creditSnapshot.credit_policy==='block')throw badRequest(`客戶信用額度不足，超額 ${creditSnapshot.excess_amount}，目前規則禁止核准`);
+           if(creditSnapshot.over_limit&&creditSnapshot.credit_policy==='approval')status='draft';
+         }
          const forecastLink=kind==='sales_order'?await resolveSalesForecastOrderLink(conn,c,{forecast_item_id:b.forecast_item_id,forecast_no:b.forecast_no,document_date:date,customer_code:customerCode,item_code:itemCode,warehouse_code:trim(b.warehouse_code)||source?.warehouse_code,quantity:qty}):null;
          const warehouseCode=forecastLink?.warehouse_code||trim(b.warehouse_code)||source?.warehouse_code||null;
-         const [h]=await conn.query(`INSERT INTO sales_documents(tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,customer_code,currency_code,warehouse_code,salesperson_code,source_document_id,return_type,status,inventory_status,note,created_by,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,db,kind,type,no,date,customerCode,price.currencyCode,warehouseCode,trim(b.salesperson_code),source?.document_id||Number(b.source_document_id||0)||null,returnType,status,inventory,trim(b.note),req.auth.id,documentTypeNeedsApproval(dt)?null:req.auth.id,documentTypeNeedsApproval(dt)?null:new Date()]);
+        const [h]=await conn.query(`INSERT INTO sales_documents(tenant_id,company_id,source_system,source_database,document_kind,document_type,document_no,document_date,customer_code,currency_code,warehouse_code,salesperson_code,source_document_id,return_type,status,inventory_status,note,created_by,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[c.tenant_id,c.company_id,c.source_system,db,kind,type,no,date,customerCode,price.currencyCode,warehouseCode,trim(b.salesperson_code),source?.document_id||Number(b.source_document_id||0)||null,returnType,status,inventory,trim(b.note),req.auth.id,status==='approved'?req.auth.id:null,status==='approved'?new Date():null]);
+        if(creditSnapshot?.over_limit&&creditSnapshot.credit_policy==='approval')await conn.query(`INSERT INTO sales_credit_approval_requests(tenant_id,company_id,source_system,source_database,customer_code,document_id,document_no,document_kind,credit_limit,exposure_amount,excess_amount,status,reason,requested_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending','自動核准單據因信用超額改為送簽',?)`,[c.tenant_id,c.company_id,c.source_system,db,customerCode,h.insertId,no,kind,creditSnapshot.credit_limit,creditSnapshot.exposure_amount,creditSnapshot.excess_amount,req.auth.id]);
         const [i]=await conn.query(`INSERT INTO sales_document_items(
            document_id,line_no,source_item_id,forecast_item_id,forecast_no,item_code,item_name,specification,unit,warehouse_code,
           quantity,unit_price,unit_cost,expected_date,allowance_amount,
@@ -4343,7 +4400,7 @@ function registerSalesWorkflowRoutes(app){
           priceUpdate=await upsertSalesPriceFromDocument(conn,c,{...document,id:h.insertId,currency_code:price.currencyCode},{...price,unit:price.pricingUnit,item_code:price.itemCode,unit_price:price.unitPrice},req.auth.id);
         }
          if(status==='approved'&&forecastLink) await refreshSalesForecastMetrics(conn,c,forecastLink.forecast_id);
-         return{id:h.insertId,item_id:i.insertId,document_no:no,status,forecast_item_id:forecastLink?.forecast_item_id||null,forecast_no:forecastLink?.forecast_no||null,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
+         return{id:h.insertId,item_id:i.insertId,document_no:no,status,credit_warning:creditSnapshot?.over_limit&&creditSnapshot.credit_policy==='warning'?`信用額度超過 ${creditSnapshot.excess_amount}`:null,credit_approval_required:creditSnapshot?.over_limit&&creditSnapshot.credit_policy==='approval',forecast_item_id:forecastLink?.forecast_item_id||null,forecast_no:forecastLink?.forecast_no||null,price_source_kind:price.price_source_kind,price_rule_id:price.price_rule_id,price_tier_id:price.price_tier_id,price_update:priceUpdate};
       });
       res.status(201).json({ok:true,data:out});
     }catch(e){next(e);}
@@ -4355,6 +4412,8 @@ function registerSalesWorkflowRoutes(app){
       const id=Number(req.params.id),sourceDatabase=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase();
        const c=ctx(sourceDatabase);
        await syncCanonicalMaster(sourceDatabase, 'currencies');
+      const [[creditDocument]]=await pool.query(`SELECT * FROM sales_documents WHERE id=? AND source_database=?`,[id,sourceDatabase]);
+      const creditResult=creditDocument?await enforceSalesDocumentCredit(creditDocument,req.auth.id):null;
       const out=await tx(async conn=>{
         const [[document]]=await conn.query(`SELECT d.* FROM sales_documents d
           WHERE d.id=? AND d.source_database=? AND d.tenant_id=? AND d.company_id=? AND d.source_system=? AND d.status='draft' FOR UPDATE`,[
@@ -4386,7 +4445,8 @@ function registerSalesWorkflowRoutes(app){
            for(const item of items) priceUpdates.push(await upsertSalesPriceFromDocument(conn,c,document,item,req.auth.id));
          }
          for(const forecastId of forecastIds) await refreshSalesForecastMetrics(conn,c,forecastId);
-         return {id,source_database:sourceDatabase,status:'approved',price_updates:priceUpdates};
+         await conn.query("UPDATE sales_credit_approval_requests SET status='used' WHERE document_id=? AND source_database=? AND status='approved'",[id,sourceDatabase]);
+         return {id,source_database:sourceDatabase,status:'approved',credit_warning:creditResult?.warning||null,price_updates:priceUpdates};
       });
       res.json({ok:true,data:out});
     }catch(e){next(e);}
@@ -4462,6 +4522,8 @@ function registerSalesWorkflowRoutes(app){
     try{
       await ensureTargetSalesWorkflowSchema();await ensureTargetFinanceWorkflowSchema();
       const id=Number(req.params.id),requestedDb=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase();
+      const [[creditDocument]]=await pool.query(`SELECT * FROM sales_documents WHERE id=? AND source_database=?`,[id,requestedDb]);
+      if(creditDocument?.document_kind==='shipment')await enforceSalesDocumentCredit(creditDocument,req.auth.id);
       let orderResults=[];
       await tx(async conn=>{
         const [[d]]=await conn.query('SELECT * FROM sales_documents WHERE id=? AND source_database=? FOR UPDATE',[id,requestedDb]);
@@ -4513,6 +4575,7 @@ function registerSalesWorkflowRoutes(app){
           }
         }
       });
+      await pool.query("UPDATE sales_credit_approval_requests SET status='used' WHERE document_id=? AND source_database=? AND status='approved'",[id,requestedDb]);
       res.json({ok:true,data:{id,status:'posted',order_results:orderResults}});
     }catch(e){next(e);}
   });

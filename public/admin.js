@@ -23,6 +23,7 @@ const featureNames = {
   'sales-statistics':'銷售統計彙總','sales-analysis':'銷售分析',
   'sales-customer-items':'客戶品號（外部料號對照）',
   'sales-customer-pricing':'客戶產品計價',
+  'sales-customer-controls':'客戶申請／信用控管',
   'finance-workflow':'應收／應付','finance-bookkeeping':'財務管帳（銀行明細）','finance-cash':'財務管錢（存提款／票據）',
   'finance-reconcile':'銀行逐筆對帳','accounting-general-ledger':'會計傳票／總帳','operations-health':'營運健康度',
   'sales-flow-audit':'銷售流程稽核','purchase-flow-audit':'採購流程稽核','architecture-flow':'系統架構與流程圖'
