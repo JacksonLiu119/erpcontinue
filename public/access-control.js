@@ -10,6 +10,7 @@ const featureAliases = {
   'inventory-balance':'inventory-new-balance', 'inventory-movement-stats':'inventory-new-ledger',
   'department-movement-stats':'inventory-new-ledger',
   'inventory-batch':'inventory-transactions', 'inventory-month-close':'inventory-transactions', 'inventory-special-reports':'operations-reports',
+  'purchase-basic-gaps':'procurement-document-types', 'purchase-maintenance-gaps':'purchase-progress', 'purchase-report-gaps':'purchase-progress',
   'receipt-pricing':'receipt-entry',
   'finance-flow':'finance-workflow', 'ar-source':'finance-workflow', 'ar-open':'finance-workflow', 'ar-credits':'finance-workflow', 'ar-receipt':'finance-workflow',
   'ar-notes':'finance-workflow', 'ar-aging':'finance-workflow', 'ap-source':'finance-workflow',
