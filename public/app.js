@@ -23,29 +23,58 @@ const masterConfigs = {
 };
 
 const salesPipeNodes = {
-  setup: { label:'單據性質設定作業', note:'依公司別維護單別、核准、前置與編號規則', status:'done', screen:'sales-document-types' },
-  customer: { label:'客戶申請／資料變更／信用控管', note:'申請審核、版本、信用額度與超額放行', status:'done', screen:'sales-customer-controls' },
-  customerItem: { label:'客戶品號資料建立作業', note:'外部客戶料號、客戶品名／規格、ERP 品號、有效期間與維護稽核已完成', status:'done', screen:'sales-customer-items' },
-  customerPricing: { label:'客戶產品計價建立作業', note:'客戶／品號價格、折扣、幣別、生效期間、核准與來源追蹤已完成', status:'done', screen:'sales-customer-pricing' },
-  pricingBatch: { label:'客戶產品價格批次調整', note:'批次建立草稿、逐筆核准與版本事件稽核', status:'done', screen:'sales-customer-pricing-batch' },
-  forecast: { label:'銷售預測建立作業', note:'COPI04／COPI13 預測版本、期間、明細、結案與接單量分開核對', status:'done', screen:'sales-forecast' },
-  quote: { label:'報價單建立作業', note:'報價、合約或獨立銷售起點', status:'done', screen:'sales-quotations' },
-  contract: { label:'合約／專案訂單管理', note:'合約核准後可一對多轉訂單，依轉單量結案', status:'done', screen:'sales-contracts' },
-  order: { label:'客戶訂單建立作業', note:'核准後可分批轉銷貨並追蹤未交量', status:'done', screen:'sales-orders' },
-  change: { label:'訂單變更單建立作業', note:'受控解結／重開、版本與重新核准', status:'done', screen:'sales-order-changes' },
-  deliverySchedule: { label:'預計出貨／交期排程', note:'一張訂單可多筆排程，核准後依銷貨履約回寫', status:'done', screen:'sales-delivery-schedule' },
-  followup: { label:'接單統計／跟催報表', note:'含訂單進度與未交訂單查詢', status:'done', screen:'sales-progress' },
-  exceptions: { label:'銷售異常稽核', note:'未轉、逾期、未定價、已出貨未立帳與孤兒來源', status:'done', screen:'sales-exceptions' },
-  shipment: { label:'銷貨單建立作業', note:'銷貨確認／過帳後才扣庫存', status:'done', screen:'sales-shipments' },
-  return: { label:'銷退單建立作業', note:'驗收合格回庫；折讓不動庫存', status:'done', screen:'sales-returns' },
-  statistics: { label:'銷售統計彙總報表', note:'COPR20 客戶／品號／業務員／期間彙總訂單量、已交量、未交量與金額', status:'done', screen:'sales-statistics' },
-  analysis: { label:'銷售分析系統', note:'客戶／品號／部門／業務員／期間；庫存／應收來源可追溯', status:'done', screen:'sales-analysis' },
-  orderTools: { label:'訂單後續／揀貨／缺料需求', note:'重算、受控結案、揀貨、缺料需求；核准後正式請購／採購與暫出收入認列', status:'done', screen:'sales-order-tools' },
-  vouchers: { label:'銷售憑證／列印／匯出', note:'銷售文件列印、CSV 匯出與應收憑證來源追蹤', status:'done', screen:'sales-vouchers' },
-  inventory: { label:'庫存管理系統', note:'銷貨出庫與銷退回庫的中央控制', status:'done', screen:'inventory-new-ledger' },
-  receivable: { label:'應收管理系統', note:'銷貨／銷退→應收→結帳→收款與待抵退款', status:'done', screen:'receivable-pipe' }
+  setup: { label:'單據性質設定作業', note:'依公司別維護單別、核准、前置與編號規則', status:'done', kind:'setup', screen:'sales-document-types' },
+  customer: { label:'客戶申請／資料變更／信用控管', note:'申請審核、版本、信用額度與超額放行', status:'done', kind:'setup', screen:'sales-customer-controls' },
+  customerItem: { label:'客戶品號資料建立作業', note:'外部客戶料號、客戶品名／規格、ERP 品號、有效期間與維護稽核已完成', status:'done', kind:'setup', screen:'sales-customer-items' },
+  customerPricing: { label:'客戶產品計價建立作業', note:'客戶／品號價格、折扣、幣別、生效期間、核准與來源追蹤已完成', status:'done', kind:'setup', screen:'sales-customer-pricing' },
+  pricingBatch: { label:'客戶產品價格批次調整', note:'批次建立草稿、逐筆核准與版本事件稽核', status:'done', kind:'setup', screen:'sales-customer-pricing-batch' },
+  pricingReports: { label:'計價明細／特價／價格檢核', note:'iSM 列獨立計價明細、特價產生與價格檢查；目前由計價與報表頁合併承接', status:'partial', kind:'report', screen:'sales-report-gaps' },
+  forecast: { label:'銷售預測建立作業', note:'COPI04／COPI13 預測版本、期間、明細、結案與接單量分開核對', status:'done', kind:'operation', screen:'sales-forecast' },
+  quote: { label:'報價單建立作業', note:'報價、合約或獨立銷售起點', status:'done', kind:'operation', screen:'sales-quotations' },
+  contract: { label:'合約／專案訂單管理', note:'合約核准後可一對多轉訂單，依轉單量結案', status:'done', kind:'operation', screen:'sales-contracts' },
+  order: { label:'客戶訂單建立作業', note:'核准後可分批轉銷貨並追蹤未交量', status:'done', kind:'operation', screen:'sales-orders' },
+  change: { label:'訂單變更單建立作業', note:'受控解結／重開、版本與重新核准', status:'done', kind:'operation', screen:'sales-order-changes' },
+  deliverySchedule: { label:'預計出貨／交期排程', note:'一張訂單可多筆排程，核准後依銷貨履約回寫', status:'done', kind:'operation', screen:'sales-delivery-schedule' },
+  followup: { label:'接單統計／跟催報表', note:'含訂單進度與未交訂單查詢', status:'done', kind:'report', screen:'sales-progress' },
+  exceptions: { label:'銷售異常稽核', note:'未轉、逾期、未定價、已出貨未立帳與孤兒來源', status:'done', kind:'report', screen:'sales-exceptions' },
+  shipment: { label:'銷貨單建立作業', note:'銷貨確認／過帳後才扣庫存', status:'done', kind:'operation', screen:'sales-shipments' },
+  return: { label:'銷退單建立作業', note:'驗收合格回庫；折讓不動庫存', status:'done', kind:'operation', screen:'sales-returns' },
+  statistics: { label:'銷售統計彙總報表', note:'COPR20 客戶／品號／業務員／期間彙總訂單量、已交量、未交量與金額', status:'done', kind:'report', screen:'sales-statistics' },
+  analysis: { label:'銷售分析系統', note:'客戶／品號／部門／業務員／期間；庫存／應收來源可追溯', status:'done', kind:'report', screen:'sales-analysis' },
+  orderTools: { label:'訂單後續／揀貨／缺料需求', note:'重算、受控結案、揀貨、缺料需求；核准後正式請購／採購與暫出收入認列', status:'done', kind:'management', screen:'sales-order-tools' },
+  vouchers: { label:'銷售憑證／列印／匯出', note:'銷售文件列印、CSV 匯出與應收憑證來源追蹤', status:'done', kind:'report', screen:'sales-vouchers' },
+  reportGroup: { label:'銷售專用報表群', note:'iSM 客戶／品號／交易／未開票／價格異常與揀貨報表目前由統計／分析／憑證頁承接', status:'planned', kind:'report', screen:'sales-report-gaps' },
+  maintenance: { label:'管理維護／資料查詢作業', note:'iSM 重算、結案、轉採購、清除與客戶／訂單／交易查詢尚未逐頁拆分', status:'planned', kind:'management', screen:'sales-maintenance-gaps' },
+  inventory: { label:'庫存管理系統', note:'銷貨出庫與銷退回庫的中央控制', status:'done', kind:'external', screen:'inventory-pipe' },
+  receivable: { label:'應收管理系統', note:'銷貨／銷退→應收→結帳→收款與待抵退款', status:'done', kind:'external', screen:'receivable-pipe' }
 };
 const salesPipeStatusLabels = { done:'已完成', partial:'部分完成', planned:'尚未完成' };
+const salesPipeNextStages = {
+  setup:'基本資料／價格管理',
+  customer:'客戶品號資料建立',
+  customerItem:'客戶產品計價建立',
+  customerPricing:'價格批次／銷售預測',
+  pricingBatch:'計價明細／價格檢核',
+  pricingReports:'銷售預測／報價單',
+  forecast:'報價單建立',
+  quote:'合約／客戶訂單',
+  contract:'客戶訂單建立',
+  order:'交期排程／銷貨建立',
+  change:'重新核准訂單',
+  deliverySchedule:'銷貨單建立',
+  followup:'統計／分析報表',
+  exceptions:'訂單後續受控處理',
+  shipment:'銷退／應收來源',
+  return:'應收結帳／退款',
+  statistics:'銷售分析',
+  analysis:'憑證／庫存／應收聯動',
+  vouchers:'應收管理',
+  orderTools:'庫存／採購聯動',
+  reportGroup:'管理維護作業',
+  maintenance:'跨模組流程稽核',
+  inventory:'庫存異動台帳／可用量',
+  receivable:'結帳／收款／沖銷'
+};
 
 // 依《iSM-採購管理系統》整理採購主線；節點只負責導向既有 SHEET，
 // 實際資料權限仍由登入角色與 API 端共同控管。
@@ -251,15 +280,17 @@ modules.push({id:'SAL',name:'銷售管理',screens:[
   ['sales-orders','客戶訂單建立作業'],
   ['sales-order-changes','訂單變更單建立作業'],
   ['sales-delivery-schedule','預計出貨／交期排程'],
+  ['sales-shipments','銷貨單建立作業'],
+  ['sales-returns','銷退單建立作業'],
   ['sales-progress','接單統計／跟催報表'],
   ['sales-exceptions','銷售異常稽核'],
   ['sales-open-orders','未交訂單查詢'],
-  ['sales-shipments','銷貨單建立作業'],
-  ['sales-returns','銷退單建立作業'],
   ['sales-statistics','銷售統計彙總報表'],
   ['sales-analysis','銷售分析系統'],
+  ['sales-vouchers','銷售憑證／列印／匯出'],
   ['sales-order-tools','訂單後續／揀貨／缺料需求'],
-  ['sales-vouchers','銷售憑證／列印／匯出']
+  ['sales-report-gaps','銷售專用報表差異（文件落差占位）'],
+  ['sales-maintenance-gaps','銷售管理維護差異（文件落差占位）']
 ]});
 
 modules.push({id:'FIN',name:'應收／應付管理',screens:[
@@ -794,6 +825,7 @@ const salesKinds={quotation:'報價單',sales_order:'客戶訂單',shipment:'銷
 function salesShell(t,b){$('#canvas').innerHTML=`<section class="screen"><div class="screen-head"><h2>${t}</h2><span class="code">${esc(targetDatabaseLabel())}</span></div><div class="screen-body"><div class="desc">${esc(currentDatabase)} 原始資料僅供歷史查詢；本公司新單據與庫存異動只寫入 ${esc(targetDatabaseLabel())}。</div>${b}</div></section>`;}
 function renderSalesScreen(s){
   if(s==='sales-pipe')return renderSalesPipe();
+  if(['sales-report-gaps','sales-maintenance-gaps'].includes(s))return renderSalesPlannedScreen(s);
   if(s==='sales-document-types')return renderSalesTypes();
   if(s==='sales-progress'||s==='sales-open-orders')return renderSalesProgress(s==='sales-open-orders');
   if(s==='sales-order-changes')return renderSalesChanges();
@@ -819,7 +851,11 @@ function renderSalesScreen(s){
 function salesPipeNode(id){
   const item=salesPipeNodes[id];
   if(!item)return '';
-  return '<button type="button" class="sales-pipe-node '+item.status+'" data-sales-screen="'+esc(item.screen)+'" title="開啟'+esc(item.label)+'"><span class="sales-pipe-node-title">'+esc(item.label)+'</span><small>'+esc(item.note)+'</small><em>'+esc(salesPipeStatusLabels[item.status]||item.status)+'・點選開啟</em></button>';
+  const kind=item.kind?` sales-pipe-node--${item.kind}`:'';
+  const company=currentCompanyContext?.company_name||currentDatabase;
+  const companyCode=currentCompanyContext?.company_code||currentDatabase;
+  const nextStage=salesPipeNextStages[id]||'依流程圖支線';
+  return '<button type="button" class="sales-pipe-node '+item.status+kind+'" data-sales-screen="'+esc(item.screen)+'" data-sales-company="'+esc(companyCode)+'" data-sales-source-database="'+esc(currentDatabase)+'" data-sales-target-database="'+esc(targetDatabaseLabel())+'" data-sales-next-stage="'+esc(nextStage)+'" title="開啟'+esc(item.label)+'｜公司：'+esc(company)+'（'+esc(companyCode)+'）｜目標：'+esc(targetDatabaseLabel())+'｜來源：'+esc(currentDatabase)+'｜下一階段：'+esc(nextStage)+'"><span class="sales-pipe-node-title">'+esc(item.label)+'</span><small>'+esc(item.note)+'</small><em>'+esc(salesPipeStatusLabels[item.status]||item.status)+'・下一階段：'+esc(nextStage)+'</em></button>';
 }
 function navigateToScreen(screen){
   const visible=getVisibleModules();
@@ -925,7 +961,7 @@ function renderSalesPipeLegacy(){
   $('#canvas .screen')?.classList.add('sales-pipe-screen');
   bindSalesPipeLinks();
 }
- function renderSalesPipe(){
+ function renderSalesPipePrevious(){
   const arrow='<div class="sales-pipe-arrow" aria-hidden="true">↓</div>';
   const grid=(className,ids)=>`<div class="${className}">${ids.map(salesPipeNode).join('')}</div>`;
   const section=(title,content,className='')=>`<section class="sales-pipe-flow-section ${className}"><div class="sales-pipe-section-label">${title}</div>${content}</section>`;
@@ -934,7 +970,28 @@ function renderSalesPipeLegacy(){
   $('#canvas .screen')?.classList.add('sales-pipe-screen');
   bindSalesPipeLinks();
  }
- function renderSalesPricingBatch(){
+function renderSalesPipe(){
+  const arrow='<div class="sales-pipe-arrow" aria-hidden="true">↓</div>';
+  const horizontalArrow='<div class="sales-pipe-horizontal-arrow sales-pipe-manual-arrow" aria-hidden="true">→</div>';
+  const grid=(className,ids)=>'<div class="'+className+'">'+ids.map(salesPipeNode).join('')+'</div>';
+  const group=(title,content,className='')=>'<section class="sales-pipe-manual-group '+className+'"><div class="sales-pipe-section-label">'+title+'</div>'+content+'</section>';
+  const context='<div class="sales-pipe-context"><span>目前公司：'+esc(currentCompanyContext?.company_name||currentDatabase)+'（'+esc(currentCompanyContext?.company_code||currentDatabase)+'）</span><span>目標資料庫：'+esc(targetDatabaseLabel())+'</span><span>來源資料庫：'+esc(currentDatabase)+'</span><span>節點會保留下一階段導向並沿用同一公司上下文</span></div>';
+  const body='<div class="sales-pipe-intro"><div class="desc">依《iSM-訂單管理系統》主架構（第 9 頁）與功能分組（第 10–12 頁）整理。中央主線為報價／合約或獨立訂單→銷貨→銷退；左側為基本資料、價格與預測來源，右側為接單跟催、統計、憑證與管理維護。銷貨確認／過帳才扣庫存，銷退驗收合格才回庫；每個節點都可點選進入對應 SHEET。</div>'+context+'<div class="sales-pipe-legend"><span class="done">已完成且可操作</span><span class="partial">部分完成／待補</span><span class="planned">尚未完成／占位頁</span></div></div><div class="sales-pipe-board sales-pipe-board--manual"><div class="sales-pipe-system">訂單管理系統<small>COP｜依 iSM 文件排序：基本資料 → 價格／預測 → 報價／訂單 → 銷貨／銷退 → 報表／管理</small></div>'+arrow+group('1. 單據性質與前置規則',salesPipeNode('setup'),'sales-pipe-manual-single')+arrow+group('2. 基本資料與價格管理',grid('sales-pipe-flow-grid sales-pipe-flow-grid--4',['customer','customerItem','customerPricing','pricingBatch','pricingReports']))+'<div class="sales-pipe-stage-note">客戶信用、客戶品號與核准價格先以目前公司別建立；報價／訂單只帶入同公司有效版本。iSM 的特價產生、計價明細與價格檢查目前標示為部分完成，尚未另拆資料表。</div><div class="sales-pipe-manual-layout"><div class="sales-pipe-manual-column sales-pipe-manual-column--source">'+group('3. 銷售預測／報價來源',salesPipeNode('forecast')+arrow+salesPipeNode('quote'))+'</div>'+horizontalArrow+'<div class="sales-pipe-manual-column sales-pipe-manual-column--main">'+group('4. 合約／訂單／履約主線',salesPipeNode('contract')+arrow+salesPipeNode('order')+'<div class="sales-pipe-branch-stack"><span>訂單變更與交期控制</span>'+salesPipeNode('change')+salesPipeNode('deliverySchedule')+'</div>'+arrow+salesPipeNode('shipment')+'<div class="sales-pipe-branch-card"><span>銷退／折讓支線</span>'+salesPipeNode('return')+'</div>')+'</div>'+horizontalArrow+'<div class="sales-pipe-manual-column sales-pipe-manual-column--reports">'+group('5. 接單跟催／統計／管理支線',salesPipeNode('followup')+salesPipeNode('exceptions')+salesPipeNode('statistics')+salesPipeNode('analysis')+salesPipeNode('vouchers')+salesPipeNode('orderTools')+salesPipeNode('reportGroup')+salesPipeNode('maintenance'))+'</div></div>'+arrow+group('6. 跨模組聯動',grid('sales-pipe-flow-grid sales-pipe-flow-grid--2',['inventory','receivable']))+'</div><div class="desc">目前已完成的銷售主流程與 S01～S07 維持可操作；本次新增的紅色或橘色節點是依文件逐一對照後發現的 SHEET 覆蓋差異：iSM 的特價／計價檢查、多組銷售報表與管理維護作業，目前分別由計價、統計／分析／憑證及訂單後續工具合併承接，先保留占位或部分完成標示，不新增資料表。所有作業均沿用登入工作階段固定的公司別與目標 ERP，SH／SC 原始資料維持唯讀。</div>';
+  salesShell('銷售管理水管圖',body);
+  $('#canvas .screen')?.classList.add('sales-pipe-screen');
+  bindSalesPipeLinks();
+}
+function renderSalesPlannedScreen(screen){
+  const configs={
+    'sales-report-gaps': {title:'銷售專用報表群（文件落差占位）',code:'COP-RPT-GAPS',desc:'《iSM-訂單管理系統》第 11 頁列出客戶接單、訂單利潤分析、訂單／客戶／品號／業務員預計出貨、訂單銷貨狀況，以及第 11 頁的客戶銷貨明細／彙總、歷史交易、產品銷貨、已出貨未開票、銷售價格異常與揀貨單等報表。現有程式已有銷售進度、統計、分析與憑證頁，但尚未逐一形成同名且可核對的報表 SHEET。',decision:'先確認要集中為 COP 銷售報表中心，或按文件拆成接單／預計出貨／銷貨／未開票／價格異常／揀貨等報表；確認後再逐一補欄位、API、來源鍵與公司別篩選。'},
+    'sales-maintenance-gaps': {title:'銷售管理維護／資料查詢（文件落差占位）',code:'COP-ADM-GAPS',desc:'《iSM-訂單管理系統》第 11 頁列出訂單已交量重計、訂單指定結案、訂單轉採購單複製、單據清除、客戶資訊查詢、訂單資訊查詢、訂單樹狀資訊查詢與客戶商品交易記錄查詢；現有程式已有訂單後續工具與流程稽核，但尚未逐項拆出管理維護 SHEET。',decision:'先確認哪些屬於同一個受控維護中心、哪些必須分成只讀查詢；資料清除與重算必須保留權限、期間、版本及事件紀錄，確認前不建立新資料表或直接清除資料。'}
+  };
+  const config=configs[screen]||configs['sales-report-gaps'];
+  salesShell(config.title,'<div class="sales-planned-banner"><strong>目前為文件流程占位</strong><p>'+esc(config.desc)+'</p><p><b>待確認的合併方式：</b>'+esc(config.decision)+'</p><button class="btn" id="salesPlannedBack" type="button">回到銷售管理水管圖</button></div><div class="desc">此頁只記錄《iSM-訂單管理系統》與現有 SHEET 的差異，不會寫入資料庫、不會變更 SH／SC 原始資料；確認合併方式後再移入「下一階段開發順序（已確認項目）」。</div>');
+  $('#canvas .screen')?.classList.add('sales-planned-screen');
+  $('#salesPlannedBack').onclick=()=>navigateToScreen('sales-pipe');
+}
+function renderSalesPricingBatch(){
   const today=procurementToday();
   const body=`<div class="sales-reference-card done"><div class="sales-reference-status">S02 已完成</div><h3>客戶產品價格批次調整</h3><p>批次資料先建立成目標 ERP 草稿，每一列仍保留自己的生效日、公司別、來源與事件；送出後請到「客戶產品計價建立作業」逐筆核准，才會被報價／訂單帶入。</p><div class="sales-reference-grid"><div><strong>輸入方式</strong><br>以 JSON 一次貼上多筆客戶／品號價格；服務端逐筆檢查客戶、品號、幣別、日期與重複版本。</div><div><strong>流程邊界</strong><br>批次調整不覆蓋歷史價格，也不修改 SH／SC 原始資料；核准仍依既有計價權限控管。</div></div></div><form id="salesPricingBatchForm" class="form phase2-form"><div class="row c3">${field('batch_no','批次編號','text','placeholder="空白＝系統產生"')}${field('reason','批次調整原因','text','required maxlength="500"')}${field('effective_hint','預設生效日提示','date',`value="${today}" disabled`)}</div><div class="field"><label>批次計價明細 JSON</label><textarea name="items_json" required>[{"customer_code":"客戶代號","item_code":"ERP品號","pricing_unit":"PCS","currency_code":"TWD","unit_price":0,"discount_rate_pct":0,"effective_from":"${today}"}]</textarea></div><div class="phase2-actions"><button class="btn primary" type="submit">建立批次計價草稿</button><button class="btn" type="button" id="salesPricingBatchGo">前往計價核准</button></div></form><div class="panel phase2-table"><div class="panel-head"><span>本公司最近批次計價</span><button class="btn small" id="salesPricingBatchReload" type="button">重新整理</button></div><div class="panel-body"><div class="desc" id="salesPricingBatchMeta">資料載入中…</div><div class="table-wrap"><table class="grid"><thead><tr><th>狀態</th><th>客戶</th><th>品號</th><th>幣別</th><th>單價</th><th>折扣</th><th>生效日</th><th>批次／來源</th></tr></thead><tbody id="salesPricingBatchRows"><tr><td colspan="8" class="empty-hint">載入中…</td></tr></tbody></table></div></div></div>`;
   salesShell('客戶產品價格批次調整',body);
@@ -1413,7 +1470,6 @@ function renderAccountingDrafts(){
   $('#draftGenerateForm').onsubmit=async e=>{e.preventDefault();const selected=[...document.querySelectorAll('[data-draft-source]:checked')].map(x=>Number(x.value));if(!selected.length){toast('請至少選擇一筆來源帳款',true);return;}const form=e.currentTarget;try{const result=await api('/api/accounting/drafts/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_database:currentDatabase,source_refs:selected,draft_date:form.elements.draft_date.value,memo:form.elements.memo.value})});toast(`底稿 ${result.draft_no} 已產生並鎖定來源`);form.reset();form.elements.draft_date.value=procurementToday();await load();await openDetail(result.id);}catch(x){toast(x.message,true);}};$('#accountingDraftReload').onclick=load;load();
 }
 const confirmedNextPhaseRoadmap=[
-  ['SAL-PIPE','下一階段：銷售管理水管圖／SHEET排序與節點連結','已確認列入下一階段：依《iSM-訂單管理系統》逐一對照報價、合約／訂單、銷貨、銷退、應收與銷售報表 SHEET；每個節點保留公司別、來源與下一階段導向。','planned'],
   ['ACR-PIPE','下一階段：應收管理水管圖／SHEET排序與節點連結','已確認列入下一階段：依應收與財務文件對照銷貨／銷退、應收、結帳／發票、收款／沖銷、待抵／退款、票據與報表；缺少獨立 SHEET 的功能先討論合併方式。','planned'],
   ['ACP-PIPE','下一階段：應付管理水管圖／SHEET排序與節點連結','已確認列入下一階段：依應付與財務文件對照進貨／退貨、應付、合併計價、付款／沖銷、待付／票據、費用與報表；不同公司別規則不可混用。','planned']
 ];
@@ -1619,6 +1675,7 @@ function renderArchitectureScreen(){
     ${line(590,835,590,875,'拋轉傳票')}${line(590,945,590,970,'過帳總帳')}
   </svg>`;
   const completed=[
+    ['N16-6','銷售管理水管圖／SHEET排序與節點連結（iSM 文件對照）','已完成並收納於本區：依《iSM-訂單管理系統》第 9 頁主架構與第 10–12 頁功能分組，將銷售 SHEET 依單據性質／前置→基本資料／價格→預測／報價→合約／訂單→銷貨／銷退→跟催／報表／管理→庫存／應收聯動排列；每個節點可點選導向既有 SHEET，並保留目前公司、目標資料庫與來源資料庫上下文。文件中的專用報表群與管理維護作業若目前由既有頁面合併承接，已用紅色占位並列入下一階段開發建議，未新增資料表。','done'],
     ['01','SH／仙暉 7 月端到端驗證','已實跑 10 組測試鏈：請購→採購→分批進貨→驗收／入庫→報價→訂單→分批銷貨→應收／應付→收付款→傳票／總帳；測試資料寫入 inventory_erp，SH 原始庫未回寫。','done'],
     ['02','一對多、數量與庫存卡控','已驗證請購核准／採購鎖定後才能轉單，採購一張對應多張進貨單；驗收合格量才入庫、銷貨確認才出庫，剩餘量與庫存異動台帳可核對。','done'],
     ['03','報價→訂單→分批銷貨追蹤','已驗證報價轉訂單、訂單分批銷貨、已交量／未交量回寫，以及來源單號與下一階段稽核。','done'],
@@ -1667,6 +1724,9 @@ function renderArchitectureScreen(){
   // 使用者已確認的項目進入開發順序；完成後即移到下方「已完成內容」折疊區。
   const roadmap=confirmedNextPhaseRoadmap;
   const recommendations=[
+    ['SAL-G01','銷售：iSM 專用報表群逐一對照','《iSM-訂單管理系統》列客戶接單、訂單利潤分析、各維度預計出貨、訂單銷貨狀況、客戶／品號／歷史交易、已出貨未開票、價格異常與揀貨等報表；目前由銷售進度、統計、分析與憑證頁合併承接，尚未逐一形成同名 SHEET。先確認集中報表中心或拆分報表群，再補欄位、API、來源鍵與公司別篩選。','planned'],
+    ['SAL-G02','銷售：管理維護與只讀查詢分流','文件列訂單已交量重計、指定結案、轉採購單複製、單據清除、客戶／訂單／樹狀資訊與客戶商品交易記錄查詢；目前由訂單後續工具與流程稽核承接，尚未逐項拆出管理維護 SHEET。需先定義可更正與只讀查詢的權責、版本、期間及事件歷程，確認前不清除資料。','planned'],
+    ['SAL-G03','銷售：計價明細／特價／價格檢核 SHEET','文件把客戶產品計價、特價產生、計價資料明細、商品價格批次調整與價格檢查分開列示；目前計價主檔與批次調整已可操作，但特價產生、明細查詢與檢查結果尚由既有頁面合併承接。需確認沿用同一計價來源或拆成只讀報表，並維持公司別、幣別、生效日與核准版本。','partial'],
     ['G01','會計系統參數設定作業','文件列為總帳前置設定；目前只有共用參數查詢，尚未形成依公司別的目標端維護、核准與異動歷程。','planned'],
     ['G02','會計科目設定作業完整化','目前已有科目／自動分錄規則與總帳查詢，但尚需補齊科目主檔階層、啟用期間、公司別維護與權限稽核。','partial'],
     ['G03','預算管理','補預算名稱、科目／部門預算建立／複製／彙總，以及實際與預算比較報表；目前尚無獨立目標 ERP 作業。','planned'],
@@ -1695,7 +1755,7 @@ function renderArchitectureScreen(){
   document.querySelectorAll('.compact-node small').forEach(element=>{if(element.textContent.includes('SC 財報預覽'))element.textContent=element.textContent.replace('SC 財報預覽','公司別三大財報');});
   document.querySelector('.architecture-block .architecture-canvas')?.insertAdjacentHTML('beforebegin','<div class="architecture-pipe-entry"><div><strong>第一階段：銷售管理水管圖</strong><small>依《iSM-訂單管理系統》排序；節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-sales-screen="sales-pipe">開啟銷售水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：庫存管理水管圖</strong><small>依《iSM-庫存管理系統》排序；開帳、異動、驗收／過帳、可用量、台帳與更正節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-inventory-screen="inventory-pipe">開啟庫存水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：採購管理水管圖</strong><small>依《iSM-採購管理系統》排序；現有 SHEET 已對應主線，缺少的基本資料、管理維護與專用報表以占位標示並列入建議</small></div><button class="btn primary" type="button" data-purchase-screen="purchase-pipe">開啟採購水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：應收管理水管圖</strong><small>依《iSM-應收管理系統》排序；銷貨／銷退、應收、結帳／發票、收款／沖銷、待抵／退款與追蹤節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-receivable-screen="receivable-pipe">開啟應收水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：應付管理水管圖</strong><small>依《iSM-應付管理系統》排序；進貨／退貨、應付、合併計價、付款／沖銷、待付／票據與費用節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-payable-screen="payable-pipe">開啟應付水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：銀行／票據資金水管圖</strong><small>依財務演練文件排序；存提款、票據票況、逐筆對帳、餘額、資金報表與管帳／管錢／對帳權責可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-treasury-screen="treasury-pipe">開啟銀行／票據資金水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：會計總帳水管圖</strong><small>依財務演練文件排序；分錄底稿、維護、核准、傳票、總帳、結轉、報表、來源鎖定與期間控制可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-ledger-screen="ledger-pipe">開啟會計總帳水管圖</button></div>');
   $('#refreshScreen').onclick=renderArchitectureScreen;
-  const recommendationBlock=`<div class="architecture-block"><h3>下一階段開發建議</h3><div class="desc">以下為依《iSM-庫存管理系統》、《iSM-採購管理系統》及《iSM-會計總帳管理系統》比對目前程式後的新落差；尚未確認前只列在本區，不會建立資料表或寫入資料。確認要修改後再移入上方「下一階段開發順序（已確認項目）」。</div><div class="architecture-roadmap">${recommendations.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${no}</span><div><strong>${title}</strong><p>${desc}</p></div></div>`).join('')}</div></div>`;
+  const recommendationBlock=`<div class="architecture-block"><h3>下一階段開發建議</h3><div class="desc">以下為依《iSM-訂單管理系統》、《iSM-庫存管理系統》、《iSM-採購管理系統》及《iSM-會計總帳管理系統》比對目前程式後的新落差；尚未確認前只列在本區，不會建立資料表或寫入資料。確認要修改後再移入上方「下一階段開發順序（已確認項目）」。</div><div class="architecture-roadmap">${recommendations.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${no}</span><div><strong>${title}</strong><p>${desc}</p></div></div>`).join('')}</div></div>`;
   $('#canvas .arch-rule-grid')?.insertAdjacentHTML('beforebegin',recommendationBlock);
   bindSalesPipeLinks();
   bindInventoryPipeLinks();

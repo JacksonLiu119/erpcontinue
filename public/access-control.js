@@ -6,6 +6,7 @@ const featureAliases = {
   'source-mappings':'basicdata', 'data-quality':'data-quality', customers:'source-customers', 'sales-customer-controls':'source-customers', suppliers:'source-suppliers',
   'sales-customer-pricing-batch':'sales-customer-pricing', 'sales-contracts':'sales-orders', 'sales-delivery-schedule':'sales-progress',
   'sales-exceptions':'sales-progress', 'sales-order-tools':'sales-orders', 'sales-vouchers':'sales-orders',
+  'sales-report-gaps':'sales-statistics', 'sales-maintenance-gaps':'sales-orders',
   'inventory-detail':'inventory-new-ledger', 'inventory-ledger':'inventory-new-ledger',
   'inventory-balance':'inventory-new-balance', 'inventory-movement-stats':'inventory-new-ledger',
   'department-movement-stats':'inventory-new-ledger',
@@ -19,6 +20,17 @@ const featureAliases = {
 };
 function canViewFeature(screen) {
   if (accessState.isAdmin) return true;
+  // 銷售水管圖是 COP 導覽頁；具備任一銷售主檔、訂單、銷貨或銷售報表權限即可看到，
+  // 節點點入後仍會依各自 SHEET 權限再次攔截。
+  if (screen === 'sales-pipe') {
+    return accessState.permissions.some(row => [
+      'sales-document-types','source-customers','customers','items',
+      'sales-customer-controls','sales-customer-items','sales-customer-pricing',
+      'sales-forecast','sales-quotations','sales-orders','sales-progress',
+      'sales-shipments','sales-returns','sales-statistics','sales-analysis',
+      'sales-vouchers','sales-order-tools','sales-exceptions'
+    ].includes(row.feature_code) && Number(row.can_view));
+  }
   // 採購水管圖是導覽頁；只要角色具備任一採購／進貨查詢權限即可看到，
   // 每個節點點入後仍會依各自 SHEET 權限再次攔截。
   if (screen === 'purchase-pipe') {
