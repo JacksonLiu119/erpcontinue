@@ -197,6 +197,7 @@ const routeCapability = [
   [/^\/finance-workflow\/banks\/accounts(?:\/|$)/, 'finance-bookkeeping'],
   [/^\/finance-workflow\/notes(?:\/|$)/, 'finance-cash'],
   [/^\/finance-workflow\//, 'finance-workflow'],
+  [/^\/accounting\/g0[1-5](?:\/|$)/, 'accounting-general-ledger'],
   [/^\/accounting\/(periods)/, 'accounting-periods'],
   [/^\/accounting\/(auto-rules)/, 'accounting-auto-rules'],
   [/^\/accounting\/clearing/, 'accounting-clearing'],

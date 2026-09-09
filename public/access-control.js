@@ -19,7 +19,7 @@ const featureAliases = {
   'finance-flow':'finance-workflow', 'ar-source':'finance-workflow', 'ar-open':'finance-workflow', 'ar-credits':'finance-workflow', 'ar-receipt':'finance-workflow',
   'ar-notes':'finance-workflow', 'ar-aging':'finance-workflow', 'ap-source':'finance-workflow',
   'ap-open':'finance-workflow', 'ap-payment':'finance-workflow', 'ap-notes':'finance-workflow', 'advances-offset':'finance-workflow',
-  'ap-aging':'finance-workflow', 'general-ledger':'accounting-general-ledger', 'accounting-financial-preview':'accounting-general-ledger', 'accounting-financial-statements':'accounting-general-ledger', 'accounting-budget':'accounting-general-ledger', 'accounting-fixed-assets':'accounting-general-ledger', 'accounting-profit-center':'accounting-general-ledger', 'operations-reports':'operations-reports'
+  'ap-aging':'finance-workflow', 'general-ledger':'accounting-general-ledger', 'accounting-financial-preview':'accounting-general-ledger', 'accounting-financial-statements':'accounting-general-ledger', 'accounting-budget':'accounting-general-ledger', 'accounting-fixed-assets':'accounting-general-ledger', 'accounting-profit-center':'accounting-general-ledger', 'accounting-system-params':'accounting-general-ledger', 'accounting-accounts':'accounting-general-ledger', 'accounting-g01':'accounting-general-ledger', 'accounting-g02':'accounting-general-ledger', 'accounting-g03':'accounting-general-ledger', 'accounting-g04':'accounting-general-ledger', 'accounting-g05':'accounting-general-ledger', 'operations-reports':'operations-reports'
 };
 function canViewFeature(screen) {
   if (accessState.isAdmin) return true;
@@ -92,6 +92,7 @@ function canViewFeature(screen) {
       'finance-workflow','finance-bookkeeping','accounting-drafts',
       'accounting-general-ledger','accounting-periods','accounting-year-close',
       'accounting-opening-balances','accounting-auto-rules',
+      'accounting-system-params','accounting-accounts',
       'operations-health','operations-reports'
     ].includes(row.feature_code) && Number(row.can_view));
   }

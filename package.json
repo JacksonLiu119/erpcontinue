@@ -17,6 +17,7 @@
     "verify:sales-return-finance": "node scripts/verify-sales-return-finance.mjs",
     "verify:finance-settlement-modes": "node scripts/verify-finance-settlement-modes.mjs",
     "verify:accounting-drafts": "node scripts/verify-accounting-drafts.mjs",
+    "verify:accounting-g01-g05": "node scripts/verify-accounting-g01-g05.mjs",
     "verify:bank-note-reconciliation": "node scripts/verify-bank-note-reconciliation.mjs",
     "verify:accounting-period-rollforward": "node scripts/verify-accounting-period-rollforward.mjs",
     "verify:advances-offset": "node scripts/verify-advances-offset.mjs",

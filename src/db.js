@@ -2625,6 +2625,163 @@ export async function ensureTargetFinanceWorkflowSchema() {
     KEY ix_accounting_period_event(period_id,created_at,id),
     CONSTRAINT fk_accounting_period_event_period FOREIGN KEY(period_id) REFERENCES accounting_periods(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  // G01～G05：會計總帳管理系統的目標端獨立作業。
+  // 這些表只建立在目前的 inventory_erp 目標庫，所有資料都帶完整公司／來源上下文；
+  // 不會在 SH／SC 原始資料庫建立或更新任何表。
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_system_parameters (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    parameter_code VARCHAR(60) NOT NULL, parameter_name VARCHAR(120) NOT NULL,
+    parameter_value TEXT NULL, data_type VARCHAR(20) NOT NULL DEFAULT 'text',
+    effective_from DATE NULL, effective_to DATE NULL, version_no INT UNSIGNED NOT NULL DEFAULT 1,
+    status VARCHAR(20) NOT NULL DEFAULT 'draft', note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_system_parameter(tenant_id,company_id,source_system,source_database,parameter_code,version_no),
+    KEY ix_accounting_system_parameter_current(tenant_id,company_id,source_system,source_database,parameter_code,status,effective_from)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_system_parameter_events (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, parameter_id BIGINT UNSIGNED NOT NULL,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    event_kind VARCHAR(30) NOT NULL, before_json JSON NULL, after_json JSON NULL,
+    reason VARCHAR(500) NULL, user_id BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_accounting_system_parameter_event(parameter_id,created_at,id),
+    CONSTRAINT fk_accounting_system_parameter_event FOREIGN KEY(parameter_id) REFERENCES accounting_system_parameters(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_account_events (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, account_id BIGINT UNSIGNED NOT NULL,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    event_kind VARCHAR(30) NOT NULL, before_json JSON NULL, after_json JSON NULL,
+    reason VARCHAR(500) NULL, user_id BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_accounting_account_event(account_id,created_at,id),
+    CONSTRAINT fk_accounting_account_event FOREIGN KEY(account_id) REFERENCES accounting_accounts(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_budgets (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    budget_code VARCHAR(60) NOT NULL, budget_name VARCHAR(120) NOT NULL,
+    fiscal_year CHAR(4) NOT NULL, version_name VARCHAR(60) NOT NULL DEFAULT 'BASE',
+    period_count TINYINT UNSIGNED NOT NULL DEFAULT 12,
+    currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD', status VARCHAR(20) NOT NULL DEFAULT 'draft',
+    total_amount DECIMAL(24,6) NOT NULL DEFAULT 0, note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_budget(tenant_id,company_id,source_system,source_database,budget_code,version_name),
+    KEY ix_accounting_budget_filter(tenant_id,company_id,source_system,source_database,fiscal_year,status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_budget_lines (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, budget_id BIGINT UNSIGNED NOT NULL,
+    line_no INT UNSIGNED NOT NULL, account_code VARCHAR(30) NOT NULL,
+    account_name VARCHAR(120) NULL, department_code VARCHAR(30) NULL,
+    period_no TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    budget_amount DECIMAL(24,6) NOT NULL DEFAULT 0, note VARCHAR(500) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_budget_line(budget_id,line_no),
+    KEY ix_accounting_budget_line_account(budget_id,account_code,department_code,period_no),
+    CONSTRAINT fk_accounting_budget_line FOREIGN KEY(budget_id) REFERENCES accounting_budgets(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_budget_events (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, budget_id BIGINT UNSIGNED NOT NULL,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    event_kind VARCHAR(30) NOT NULL, before_status VARCHAR(20) NULL,
+    after_status VARCHAR(20) NULL, reason VARCHAR(500) NULL, user_id BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_accounting_budget_event(budget_id,created_at,id),
+    CONSTRAINT fk_accounting_budget_event FOREIGN KEY(budget_id) REFERENCES accounting_budgets(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_fixed_assets (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    asset_no VARCHAR(60) NOT NULL, asset_name VARCHAR(120) NOT NULL,
+    category_code VARCHAR(30) NULL, account_code VARCHAR(30) NOT NULL DEFAULT '1501',
+    account_name VARCHAR(120) NOT NULL DEFAULT '累計折舊',
+    depreciation_expense_account_code VARCHAR(30) NOT NULL DEFAULT '5101',
+    depreciation_expense_account_name VARCHAR(120) NOT NULL DEFAULT '銷貨成本',
+    department_code VARCHAR(30) NULL,
+    location VARCHAR(120) NULL, supplier_code VARCHAR(60) NULL,
+    acquisition_date DATE NULL, in_service_date DATE NOT NULL,
+    original_cost DECIMAL(24,6) NOT NULL, residual_value DECIMAL(24,6) NOT NULL DEFAULT 0,
+    useful_life_months INT UNSIGNED NOT NULL, depreciation_method VARCHAR(30) NOT NULL DEFAULT 'straight_line',
+    currency_code VARCHAR(10) NOT NULL DEFAULT 'TWD', accumulated_depreciation DECIMAL(24,6) NOT NULL DEFAULT 0,
+    net_book_value DECIMAL(24,6) NOT NULL DEFAULT 0, status VARCHAR(20) NOT NULL DEFAULT 'draft',
+    note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL,
+    approved_at DATETIME NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_fixed_asset(tenant_id,company_id,source_system,source_database,asset_no),
+    KEY ix_accounting_fixed_asset_status(tenant_id,company_id,source_system,source_database,status,in_service_date)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_fixed_asset_events (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, asset_id BIGINT UNSIGNED NOT NULL,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    event_kind VARCHAR(30) NOT NULL, before_json JSON NULL, after_json JSON NULL,
+    reason VARCHAR(500) NULL, user_id BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_accounting_fixed_asset_event(asset_id,created_at,id),
+    CONSTRAINT fk_accounting_fixed_asset_event FOREIGN KEY(asset_id) REFERENCES accounting_fixed_assets(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_fixed_asset_depreciations (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, asset_id BIGINT UNSIGNED NOT NULL,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    depreciation_no VARCHAR(60) NOT NULL, depreciation_period CHAR(7) NOT NULL,
+    depreciation_date DATE NOT NULL, depreciation_amount DECIMAL(24,6) NOT NULL,
+    accumulated_depreciation DECIMAL(24,6) NOT NULL, status VARCHAR(20) NOT NULL DEFAULT 'draft',
+    journal_draft_id BIGINT UNSIGNED NULL, note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, posted_by BIGINT UNSIGNED NULL,
+    approved_at DATETIME NULL, posted_at DATETIME NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_fixed_asset_depreciation(tenant_id,company_id,source_system,source_database,asset_id,depreciation_period),
+    KEY ix_accounting_fixed_asset_depreciation_period(tenant_id,company_id,source_system,source_database,depreciation_period,status),
+    CONSTRAINT fk_accounting_fixed_asset_depreciation_asset FOREIGN KEY(asset_id) REFERENCES accounting_fixed_assets(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_profit_centers (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    center_code VARCHAR(60) NOT NULL, center_name VARCHAR(120) NOT NULL,
+    department_code VARCHAR(30) NULL, parent_center_code VARCHAR(60) NULL,
+    allocation_basis VARCHAR(30) NOT NULL DEFAULT 'direct', status VARCHAR(20) NOT NULL DEFAULT 'draft',
+    is_active TINYINT(1) NOT NULL DEFAULT 1, note VARCHAR(500) NULL,
+    created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL, approved_at DATETIME NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_profit_center(tenant_id,company_id,source_system,source_database,center_code),
+    KEY ix_accounting_profit_center_status(tenant_id,company_id,source_system,source_database,status,is_active)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_profit_center_allocations (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    allocation_code VARCHAR(60) NOT NULL, allocation_name VARCHAR(120) NOT NULL,
+    fiscal_year CHAR(4) NOT NULL, source_account_code VARCHAR(30) NOT NULL,
+    target_center_code VARCHAR(60) NOT NULL, target_department_code VARCHAR(30) NULL,
+    allocation_ratio DECIMAL(9,6) NOT NULL, status VARCHAR(20) NOT NULL DEFAULT 'draft',
+    note VARCHAR(500) NULL, created_by BIGINT UNSIGNED NULL, approved_by BIGINT UNSIGNED NULL,
+    approved_at DATETIME NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_accounting_profit_center_allocation(tenant_id,company_id,source_system,source_database,allocation_code,target_center_code,source_account_code),
+    KEY ix_accounting_profit_center_allocation_filter(tenant_id,company_id,source_system,source_database,fiscal_year,status),
+    KEY ix_accounting_profit_center_allocation_target(target_center_code)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS accounting_profit_center_events (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, entity_kind VARCHAR(30) NOT NULL,
+    entity_id BIGINT UNSIGNED NOT NULL, tenant_id VARCHAR(60) NOT NULL, company_id VARCHAR(60) NOT NULL,
+    source_system VARCHAR(60) NOT NULL, source_database VARCHAR(60) NOT NULL,
+    event_kind VARCHAR(30) NOT NULL, before_json JSON NULL, after_json JSON NULL,
+    reason VARCHAR(500) NULL, user_id BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY ix_accounting_profit_center_event(entity_kind,entity_id,created_at,id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
   for (const [table, column, definition] of [
     ['finance_opening_balances','opening_batch_id','BIGINT UNSIGNED NULL'],
     ['finance_opening_balances','opening_line_id','BIGINT UNSIGNED NULL'],
@@ -2645,6 +2802,26 @@ export async function ensureTargetFinanceWorkflowSchema() {
     ['accounting_year_closings','reconciliation_status',"VARCHAR(20) NOT NULL DEFAULT 'pending'"],
     ['accounting_year_closings','next_fiscal_year','CHAR(4) NULL']
   ]) await addColumnIfMissing(table, column, definition);
+  for (const [column, definition] of [
+    ['parent_account_code','VARCHAR(30) NULL'],
+    ['account_level','INT UNSIGNED NOT NULL DEFAULT 1'],
+    ['normal_balance',"VARCHAR(10) NOT NULL DEFAULT 'debit'"],
+    ['is_detail','TINYINT(1) NOT NULL DEFAULT 1'],
+    ['effective_from','DATE NULL'],
+    ['effective_to','DATE NULL'],
+    ['version_no','INT UNSIGNED NOT NULL DEFAULT 1'],
+    ['status',"VARCHAR(20) NOT NULL DEFAULT 'approved'"],
+    ['updated_by','BIGINT UNSIGNED NULL'],
+    ['approved_by','BIGINT UNSIGNED NULL'],
+    ['approved_at','DATETIME NULL'],
+    ['note','VARCHAR(500) NULL'],
+    ['updated_at','TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP']
+  ]) await addColumnIfMissing('accounting_accounts', column, definition);
+  await addColumnIfMissing('accounting_journal_lines', 'department_code', 'VARCHAR(30) NULL');
+  await addColumnIfMissing('accounting_journal_lines', 'profit_center_code', 'VARCHAR(60) NULL');
+  await addColumnIfMissing('accounting_budgets', 'period_count', 'TINYINT UNSIGNED NOT NULL DEFAULT 12');
+  await addColumnIfMissing('accounting_fixed_assets', 'depreciation_expense_account_code', "VARCHAR(30) NOT NULL DEFAULT '5101'");
+  await addColumnIfMissing('accounting_fixed_assets', 'depreciation_expense_account_name', "VARCHAR(120) NOT NULL DEFAULT '銷貨成本'");
   // 同一家公司可能匯入多個來源 ERP；單別規則與會計期間必須連同來源資料庫隔離，
   // 否則 SH 建立的規則會阻擋 SC 建立同名規則。
   for (const [table,index,columns] of [
