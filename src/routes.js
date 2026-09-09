@@ -7,6 +7,7 @@ import { registerTargetFinancialStatementRoutes } from './target-financial-state
 import { registerSalesForecastRoutes, resolveSalesForecastOrderLink, refreshSalesForecastMetrics } from './sales-forecast.js';
 import { registerSalesAnalysisRoutes } from './sales-analysis.js';
 import { registerSalesPhase2Routes } from './sales-phase2.js';
+import { registerSalesMaintenanceRoutes } from './sales-maintenance.js';
 
 const listTables = {
   customers: ['id', 'code', 'name', 'tax_id', 'contact_name', 'phone', 'email', 'address', 'credit_limit', 'is_active'],
@@ -1045,6 +1046,7 @@ export function registerApi(app) {
   registerSalesReturnInspectionRoutes(app);
   registerSalesWorkflowRoutes(app);
   registerSalesPhase2Routes(app);
+  registerSalesMaintenanceRoutes(app);
   registerSalesAnalysisRoutes(app);
   registerSalesCustomerItemRoutes(app);
   registerSalesCustomerPricingRoutes(app);

@@ -2,7 +2,8 @@ import {
   pool,
   sourceDatabases,
   ensureTargetSalesWorkflowSchema,
-  ensureTargetFinanceWorkflowSchema
+  ensureTargetFinanceWorkflowSchema,
+  ensureTargetSalesPricingSchema
 } from './db.js';
 
 const EPSILON = 0.000001;
@@ -284,7 +285,7 @@ const salesReportCatalog = Object.freeze([
   { key: 'return-reason-analysis', report_name: '銷退原因分析表', section: '其他表單', mode: 'return_reason', kinds: ['sales_return'], status: 'partial', note: '目前以銷退／折讓備註作為原因來源，正式原因代碼與統計維度仍待補齊。' },
   { key: 'deposit-settlement-status', report_name: '訂金結帳狀況表(訂單)', section: '其他表單', mode: 'unavailable', status: 'planned', note: '目前尚無獨立訂金來源欄位，先保留文件落差，不以一般應收金額冒充訂金。' },
   { key: 'pick-list-print', report_name: '揀貨單列印作業', section: '管理維護作業', mode: 'pick_list', status: 'partial', note: '以揀貨單與訂單明細承接，可追蹤揀貨量與已揀量；正式列印版仍由中心承接。' },
-  { key: 'pricing-detail', report_name: '計價資料明細表', section: '商品價格管理', mode: 'unavailable', status: 'planned', note: '目前計價主檔可查，但尚未形成文件同名明細報表，先列為報表中心落差。' }
+  { key: 'pricing-detail', report_name: '計價資料明細表', section: '商品價格管理', mode: 'pricing_detail', status: 'partial', note: '已可查目標 ERP 計價版本、分量級距、有效日、來源鍵與事件；原始 COPMB／COPMC 對照、特價產生與正式列印格式仍由價格維護頁承接。' }
 ]);
 const salesReportByKey = new Map(salesReportCatalog.map(report => [report.key, report]));
 
@@ -380,6 +381,15 @@ function reportColumns(report) {
     ]
   };
   if (summary[report.mode]) return summary[report.mode];
+  if (report.mode === 'pricing_detail') return [
+    ['customer_code', '客戶'], ['customer_name', '客戶名稱'], ['item_code', '品號'], ['item_name', '品名'],
+    ['pricing_unit', '計價單位'], ['currency_code', '幣別'], ['unit_price', '單價'],
+    ['discount_rate_percent', '折扣率(%)'], ['tax_included', '含稅'], ['quantity_pricing_flag', '分量計價'],
+    ['tier_count', '分量級距'], ['effective_from', '生效日'], ['effective_to', '失效日'],
+    ['effective_status', '生效狀態'], ['status', '核准狀態'], ['is_active', '啟用'],
+    ['source_kind', '來源種類'], ['source_document_no', '來源單號'], ['source_table', '來源表'],
+    ['event_count', '事件數'], ['source_key', '來源鍵']
+  ];
   if (report.mode === 'shipped_not_invoiced') return [
     ['document_no', '銷貨單'], ['document_date', '銷貨日期'], ['customer_code', '客戶'],
     ['customer_name', '客戶名稱'], ['item_code', '品號'], ['item_name', '品名'], ['currency_code', '幣別'],
@@ -610,11 +620,13 @@ async function loadSalesScheduleReport(req, context, fromDate, toDate, limit) {
   if (toDate) { where.push('p.scheduled_date<=?'); params.push(toDate); }
   addReportFilter(where, params, req.query.customer_code, 'p.customer_code');
   addReportFilter(where, params, req.query.item_code, 'p.item_code');
-  addReportFilter(where, params, req.query.warehouse_code, 'p.warehouse_code');
+  // iSM 排程結構只保存訂單／品號／日期／數量，庫別沿用來源訂單的庫別，
+  // 不假設排程表存在未定義的 warehouse_code 欄位。
+  addReportFilter(where, params, req.query.warehouse_code, 'd.warehouse_code');
   if (trim(req.query.order_id)) { where.push('p.order_id=?'); params.push(Number(req.query.order_id)); }
   const [rows] = await pool.query(`
     SELECT p.id AS schedule_id,p.schedule_no,p.scheduled_date,p.quantity,p.fulfilled_quantity,p.status,
-      p.order_id,d.document_no AS order_no,p.customer_code,p.item_code,p.warehouse_code,
+      p.order_id,d.document_no AS order_no,p.customer_code,p.item_code,d.warehouse_code,
       p.order_item_id AS item_id
     FROM erp_sales_delivery_schedules p
     JOIN sales_documents d ON d.id=p.order_id AND d.tenant_id=p.tenant_id AND d.company_id=p.company_id
@@ -685,8 +697,70 @@ async function loadSalesContractReport(req, context, fromDate, toDate, limit) {
   return rows.map(row => ({ ...row, contract_date: normalizeDateValue(row.contract_date), expected_date: normalizeDateValue(row.expected_date), quantity: numeric(row.quantity), converted_quantity: numeric(row.converted_quantity), remaining_quantity: Math.max(numeric(row.quantity) - numeric(row.converted_quantity), 0), unit_price: numeric(row.unit_price), amount: numeric(row.amount), source_database: context.source_database, company_id: context.company_id, tenant_id: context.tenant_id, source_system: context.source_system, source_key: `${context.source_database}|sales_contract|${row.contract_id}|${row.item_id}` }));
 }
 
+function pricingEffectiveStatus(row, asOfDate) {
+  if (trim(row.status) === 'voided') return '已作廢';
+  if (!numeric(row.is_active)) return '已停用';
+  if (trim(row.status) !== 'approved') return '待核准';
+  const date = asOfDate || new Date().toISOString().slice(0, 10);
+  const from = normalizeDateValue(row.effective_from);
+  const to = normalizeDateValue(row.effective_to);
+  if (from && from > date) return '尚未生效';
+  if (to && to < date) return '已失效';
+  return '生效中';
+}
+
+async function loadSalesPricingDetailReport(req, context, fromDate, toDate, limit, asOfDate) {
+  const where = ['p.tenant_id=?', 'p.company_id=?', 'p.source_system=?', 'p.source_database=?'];
+  const params = [context.tenant_id, context.company_id, context.source_system, context.source_database];
+  if (fromDate) { where.push('p.effective_from>=?'); params.push(fromDate); }
+  if (toDate) { where.push('p.effective_from<=?'); params.push(toDate); }
+  addReportFilter(where, params, req.query.customer_code, 'p.customer_code');
+  addReportFilter(where, params, req.query.item_code, 'p.item_code');
+  addReportFilter(where, params, req.query.currency_code, 'p.currency_code');
+  addReportFilter(where, params, req.query.status, 'p.status');
+  if (trim(req.query.active_only) === '1') where.push('p.is_active=1');
+  const [rows] = await pool.query(`
+    SELECT p.id AS pricing_id,p.customer_code,c.customer_name,p.item_code,i.item_name,i.specification,
+      p.pricing_unit,p.currency_code,p.unit_price,p.discount_rate,p.tax_included,p.quantity_pricing_flag,p.trade_condition,
+      p.effective_from,p.effective_to,p.status,p.is_active,p.source_kind,p.source_document_no,p.source_document_type,
+      p.source_table,p.source_key,
+      (SELECT COUNT(*) FROM erp_customer_item_price_tiers t WHERE t.pricing_id=p.id) AS tier_count,
+      (SELECT COUNT(*) FROM erp_customer_item_price_events pe WHERE pe.pricing_id=p.id
+        AND pe.tenant_id=p.tenant_id AND pe.company_id=p.company_id
+        AND pe.source_system=p.source_system AND pe.source_database=p.source_database) AS event_count
+    FROM erp_customer_item_prices p
+    LEFT JOIN erp_customers c ON c.tenant_id=p.tenant_id AND c.company_id=p.company_id AND c.source_system=p.source_system
+      AND c.source_database=p.source_database AND c.customer_code=p.customer_code
+    LEFT JOIN erp_items i ON i.tenant_id=p.tenant_id AND i.company_id=p.company_id AND i.source_system=p.source_system
+      AND i.source_database=p.source_database AND i.item_code=p.item_code
+    WHERE ${where.join(' AND ')}
+    ORDER BY p.customer_code,p.item_code,p.effective_from DESC,p.id DESC
+    LIMIT ?`, [...params, limit]);
+  return rows.map(row => ({
+    ...row,
+    effective_from: normalizeDateValue(row.effective_from),
+    effective_to: normalizeDateValue(row.effective_to),
+    unit_price: numeric(row.unit_price),
+    discount_rate: row.discount_rate === null || row.discount_rate === undefined ? null : numeric(row.discount_rate),
+    discount_rate_percent: row.discount_rate === null || row.discount_rate === undefined ? null : Number((numeric(row.discount_rate) * 100).toFixed(4)),
+    tax_included: numeric(row.tax_included),
+    quantity_pricing_flag: numeric(row.quantity_pricing_flag),
+    tier_count: numeric(row.tier_count),
+    event_count: numeric(row.event_count),
+    is_active: numeric(row.is_active),
+    effective_status: pricingEffectiveStatus(row, asOfDate),
+    source_database: context.source_database,
+    company_id: context.company_id,
+    tenant_id: context.tenant_id,
+    source_system: context.source_system,
+    source_key: trim(row.source_key) || `${context.source_database}|customer_price|${row.pricing_id}|${row.customer_code}|${row.item_code}`
+  }));
+}
+
 function reportSourceDefinitions(report) {
-  const tables = report.mode === 'schedule'
+  const tables = report.mode === 'pricing_detail'
+    ? 'erp_customer_item_prices + erp_customer_item_price_tiers + erp_customer_item_price_events + ERP 主檔對照'
+    : report.mode === 'schedule'
     ? 'erp_sales_delivery_schedules + sales_documents'
     : report.mode === 'pick_list'
       ? 'erp_sales_pick_lists + erp_sales_pick_list_items + sales_documents'
@@ -697,7 +771,9 @@ function reportSourceDefinitions(report) {
           : report.mode === 'shipped_not_invoiced'
             ? 'sales_documents + sales_document_items + finance_vouchers + finance_voucher_sources'
             : 'sales_documents + sales_document_items + ERP 主檔對照';
-  const trace = report.mode === 'schedule'
+  const trace = report.mode === 'pricing_detail'
+    ? 'source_database + pricing_id + customer_code + item_code + effective_from + source_key'
+    : report.mode === 'schedule'
     ? 'source_database + order_id + order_item_id + schedule_no'
     : report.mode === 'pick_list'
       ? 'source_database + order_id + order_item_id + pick_no'
@@ -720,6 +796,7 @@ function reportColumnsAsObjects(report) {
 }
 
 async function buildSalesReportRows(req, context, report, fromDate, toDate, limit) {
+  if (report.mode === 'pricing_detail') return loadSalesPricingDetailReport(req, context, fromDate, toDate, limit, optionalDate(req.query.as_of_date) || toDate || null);
   if (report.mode === 'unavailable') return [];
   if (report.mode === 'schedule') return loadSalesScheduleReport(req, context, fromDate, toDate, limit);
   if (report.mode === 'pick_list') return loadSalesPickReport(req, context, fromDate, toDate, limit);
@@ -1015,7 +1092,9 @@ export function registerSalesAnalysisRoutes(app) {
       if (!report) throw badRequest(`不支援的 iSM 銷售報表：${reportKey}`);
       const fromDate = optionalDate(req.query.from_date || req.query.date_from);
       const toDate = optionalDate(req.query.to_date || req.query.date_to);
+      const asOfDate = optionalDate(req.query.as_of_date) || toDate || null;
       if (fromDate && toDate && fromDate > toDate) throw badRequest('銷售報表日期起日不可晚於迄日');
+      if (report.mode === 'pricing_detail') await ensureTargetSalesPricingSchema();
       const limit = clampLimit(req.query.limit);
       const rows = await buildSalesReportRows(req, context, report, fromDate, toDate, limit);
       const summary = summarizeSalesReportRows(rows);
@@ -1037,6 +1116,7 @@ export function registerSalesAnalysisRoutes(app) {
         target_database: sourceDatabases[sourceDatabase]?.target_database || null,
         from_date: fromDate,
         to_date: toDate,
+        as_of_date: asOfDate,
         limit,
         columns: reportColumnsAsObjects(report),
         rows,

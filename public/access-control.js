@@ -6,7 +6,10 @@ const featureAliases = {
   'source-mappings':'basicdata', 'data-quality':'data-quality', customers:'source-customers', 'sales-customer-controls':'source-customers', suppliers:'source-suppliers',
   'sales-customer-pricing-batch':'sales-customer-pricing', 'sales-contracts':'sales-orders', 'sales-delivery-schedule':'sales-progress',
   'sales-exceptions':'sales-progress', 'sales-order-tools':'sales-orders', 'sales-vouchers':'sales-orders',
-  'sales-report-center':'sales-statistics', 'sales-report-gaps':'sales-statistics', 'sales-maintenance-gaps':'sales-orders',
+  'sales-report-center':'sales-statistics', 'sales-report-gaps':'sales-statistics',
+  'sales-maintenance':'sales-maintenance', 'sales-maintenance-gaps':'sales-maintenance',
+  'sales-customer-info':'sales-readonly', 'sales-order-info':'sales-readonly',
+  'sales-order-tree':'sales-readonly', 'sales-customer-transactions':'sales-readonly',
   'inventory-detail':'inventory-new-ledger', 'inventory-ledger':'inventory-new-ledger',
   'inventory-balance':'inventory-new-balance', 'inventory-movement-stats':'inventory-new-ledger',
   'department-movement-stats':'inventory-new-ledger',
@@ -28,7 +31,8 @@ function canViewFeature(screen) {
       'sales-customer-controls','sales-customer-items','sales-customer-pricing',
       'sales-forecast','sales-quotations','sales-orders','sales-progress',
       'sales-shipments','sales-returns','sales-statistics','sales-analysis',
-      'sales-vouchers','sales-order-tools','sales-exceptions'
+      'sales-vouchers','sales-order-tools','sales-exceptions','sales-maintenance','sales-readonly',
+      'sales-customer-info','sales-order-info','sales-order-tree','sales-customer-transactions'
     ].includes(row.feature_code) && Number(row.can_view));
   }
   // 採購水管圖是導覽頁；只要角色具備任一採購／進貨查詢權限即可看到，
