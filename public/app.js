@@ -37,7 +37,7 @@ const salesManualNames = Object.freeze({
   contract: '合約訂單建立作業',
   order: '客戶訂單建立作業',
   change: '訂單變更單建立作業',
-  deliverySchedule: '訂單預計出貨明細表',
+  deliverySchedule: '訂單/商品/客戶/業務員預計出貨明細表',
   followup: '接單統計／跟催報表',
   shipmentStatus: '訂單銷貨狀況表',
   shipment: '銷貨單建立作業',
@@ -50,6 +50,35 @@ const salesManualNames = Object.freeze({
   inventory: '庫存管理系統',
   accounts: '帳款管理系統'
 });
+
+// 對應《iSM-訂單管理系統》報表目錄。這些是報表中心的同名 SHEET 入口，
+// 不是自行發明的新作業；status 只表示目前既有資料來源與欄位的完成程度。
+const salesReportCatalog = Object.freeze([
+  ['customer-order-statistics', '客戶接單統計表', '接單統計/跟催報表', 'done'],
+  ['order-profit-analysis', '訂單利潤分析狀況表', '接單統計/跟催報表', 'partial'],
+  ['expected-shipment-detail', '訂單/商品/客戶/業務員預計出貨明細表', '接單統計/跟催報表', 'partial'],
+  ['order-shipment-status', '訂單銷貨狀況表', '接單統計/跟催報表', 'done'],
+  ['customer-sales-detail', '客戶銷貨明細表', '銷售統計/管理報表', 'partial'],
+  ['customer-sales-summary', '客戶銷貨彙總表', '銷售統計/管理報表', 'partial'],
+  ['historical-transactions', '歷史交易記錄表', '銷售統計/管理報表', 'partial'],
+  ['product-sales-detail', '產品銷貨明細表', '銷售統計/管理報表', 'partial'],
+  ['department-sales-period', '商品部門銷貨期報表', '銷售統計/管理報表', 'partial'],
+  ['shipped-not-invoiced', '已出貨未開發票明細表', '銷售統計/管理報表', 'partial'],
+  ['sales-price-exception', '銷售價格異常表', '銷售統計/管理報表', 'partial'],
+  ['quotation-detail', '報價單明細表', '各類明細表', 'partial'],
+  ['customer-order-detail', '客戶訂單明細表', '各類明細表', 'partial'],
+  ['order-change-detail', '訂單變更明細表', '各類明細表', 'partial'],
+  ['shipment-detail', '銷貨單明細表', '各類明細表', 'partial'],
+  ['sales-return-detail', '銷退單明細表', '各類明細表', 'partial'],
+  ['contract-detail', '合約訂單明細表', '各類明細表', 'partial'],
+  ['contract-shipment-detail', '合約訂單銷貨明細表', '各類明細表', 'partial'],
+  ['customer-order-fo-detail', '客戶訂單 F/O 明細表', '各類明細表', 'planned'],
+  ['customer-shipment-schedule', '客戶別商品出貨排程表', '其他表單', 'partial'],
+  ['return-reason-analysis', '銷退原因分析表', '其他表單', 'partial'],
+  ['deposit-settlement-status', '訂金結帳狀況表(訂單)', '其他表單', 'planned'],
+  ['pick-list-print', '揀貨單列印作業', '管理維護作業', 'partial'],
+  ['pricing-detail', '計價資料明細表', '商品價格管理', 'planned']
+]);
 
 const purchaseManualNames = Object.freeze({
   documentTypes: '單據性質設定作業',
@@ -120,7 +149,7 @@ const salesPipeNodes = {
   analysis: { label:salesManualNames.analysis, note:'客戶／品號／部門／業務員／期間；庫存／應收來源可追溯', status:'done', kind:'report', screen:'sales-analysis' },
   orderTools: { label:salesManualNames.maintenance, note:'訂單已交量重計、指定結案、轉採購、揀貨與暫出收入認列；目前由管理維護頁承接', status:'done', kind:'management', screen:'sales-order-tools' },
   vouchers: { label:salesManualNames.vouchers, note:'報價、訂單、銷貨、銷退與發票等文件憑證；目前由憑證頁合併承接', status:'done', kind:'report', screen:'sales-vouchers' },
-  reportGroup: { label:salesManualNames.detailReports, note:'文件列各類明細表；目前客戶／品號／交易／未開票／價格異常與揀貨報表尚未逐一拆分', status:'planned', kind:'report', screen:'sales-report-gaps' },
+  reportGroup: { label:salesManualNames.detailReports, note:'文件列各類明細表；目前由集中報表中心逐一承接同名 SHEET，仍以狀態標示欄位與來源落差', status:'partial', kind:'report', screen:'sales-report-center' },
   maintenance: { label:salesManualNames.maintenance, note:'文件列重算、結案、轉採購、清除及客戶／訂單／交易查詢；目前尚未逐頁拆分', status:'planned', kind:'management', screen:'sales-maintenance-gaps' },
   inventory: { label:salesManualNames.inventory, note:'銷貨出庫與銷退回庫的中央控制', status:'done', kind:'external', screen:'inventory-pipe' },
   receivable: { label:salesManualNames.accounts, note:'銷貨／銷退→應收→結帳→收款與待抵退款', status:'done', kind:'external', screen:'receivable-pipe' }
@@ -374,11 +403,11 @@ modules.push({id:'SAL',name:'訂單管理',screens:[
   ['sales-progress',salesManualNames.followup],
   ['sales-exceptions','銷售異常稽核（補充作業）'],
   ['sales-open-orders',salesManualNames.shipmentStatus],
+  ['sales-report-center','銷售報表中心（iSM 報表群）'],
   ['sales-statistics',salesManualNames.statistics],
   ['sales-analysis',salesManualNames.analysis],
   ['sales-vouchers',salesManualNames.vouchers],
   ['sales-order-tools',salesManualNames.maintenance],
-  ['sales-report-gaps',salesManualNames.detailReports+'（文件落差占位）'],
   ['sales-maintenance-gaps',salesManualNames.maintenance+'（文件落差占位）']
 ]});
 
@@ -931,7 +960,8 @@ function salesShell(t,b){
 }
 function renderSalesScreen(s){
   if(s==='sales-pipe')return renderSalesPipe();
-  if(['sales-report-gaps','sales-maintenance-gaps'].includes(s))return renderSalesPlannedScreen(s);
+  if(s==='sales-report-center'||s==='sales-report-gaps')return renderSalesReportCenter();
+  if(s==='sales-maintenance-gaps')return renderSalesPlannedScreen(s);
   if(s==='sales-document-types')return renderSalesTypes();
   if(s==='sales-progress'||s==='sales-open-orders')return renderSalesProgress(s==='sales-open-orders');
   if(s==='sales-order-changes')return renderSalesChanges();
@@ -1088,6 +1118,30 @@ function renderSalesPipeLegacy(){
    salesShell('訂單管理水管圖',body.replaceAll('銷售管理','訂單管理'));
   $('#canvas .screen')?.classList.add('sales-pipe-screen');
   bindSalesPipeLinks();
+}
+function renderSalesReportCenter(){
+  const end=procurementToday(),start=end.slice(0,4)+'-01-01';
+  const statusLabel={done:'已完成',partial:'部分完成',planned:'尚未完成'};
+  const reportOptions=salesReportCatalog.map(([key,name,,status])=>`<option value="${esc(key)}" ${key==='customer-order-statistics'?'selected':''}>${esc(name)}｜${statusLabel[status]}</option>`).join('');
+  const body=`<div class="sales-reference-card partial"><div class="sales-reference-status">iSM 報表群／集中承接</div><h3>《iSM-訂單管理系統》專用報表逐一對照</h3><p>依手冊報表名稱建立同名 SHEET 入口。既有銷售進度、統計、分析、憑證與揀貨頁仍保留；報表中心只讀整合目前可取得的目標 ERP 來源，並在每個項目標示完成程度、來源鍵與文件落差。</p><div class="sales-reference-grid"><div><strong>公司隔離</strong><br>公司別／來源由登入工作階段固定：${esc(currentCompanyContext?.company_name||currentDatabase)}（${esc(currentDatabase)}）。查詢不提供跨公司下拉，也不讀取其他公司資料。</div><div><strong>資料邊界</strong><br>使用既有 sales_documents、sales_document_items、交期／揀貨、應收憑單與主檔對照；不新增資料表、不修改 SH／SC 原始資料，製造／成本仍不納入。</div></div></div><form id="salesReportCenterFilter" class="form"><div class="row c4">${field('from_date','日期起日','date',`value="${start}"`)}${field('to_date','日期迄日','date',`value="${end}"`)}${selectField('report_key','iSM 報表名稱',reportOptions)}${selectField('limit','最多顯示筆數','<option value="200">200</option><option value="500" selected>500</option><option value="2000">2000</option>')}</div><div class="row c4">${field('customer_code','客戶代號')}${field('item_code','品號')}${field('salesperson_code','業務員代號')}${field('department_code','部門代號')}</div><div class="row c4">${field('warehouse_code','庫別')}${field('currency_code','幣別')}${selectField('document_kind','單據種類','<option value="">依報表規則</option><option value="quotation">報價單</option><option value="sales_order">客戶訂單</option><option value="shipment">銷貨單</option><option value="sales_return">銷退／折讓</option>')}<div class="field"><label>公司／來源（登入固定）</label><input value="${esc(currentCompanyContext?.company_name||currentDatabase)}｜${esc(currentDatabase)}" disabled></div></div><button class="btn primary" type="submit">查詢目前報表</button><button class="btn" id="salesReportCenterReload" type="button">重新整理</button></form><div class="sales-report-center-catalog" id="salesReportCenterCatalog"></div><div class="report-meta" id="salesReportCenterMeta"><span>報表載入中…</span></div><div id="salesReportCenterSummary"></div><div id="salesReportCenterNotice"></div><div class="panel sales-report-center-results"><div class="panel-head"><span id="salesReportCenterResultTitle">報表結果</span></div><div class="panel-body"><div class="table-wrap"><table class="grid"><thead id="salesReportCenterHead"></thead><tbody id="salesReportCenterRows"><tr><td class="empty-hint">載入中…</td></tr></tbody></table></div></div></div><details class="panel"><summary class="panel-head">來源、來源鍵與文件落差</summary><div class="panel-body"><div class="table-wrap"><table class="grid"><thead><tr><th>報表</th><th>使用資料表</th><th>證據／狀態</th><th>追溯鍵</th><th>規則／落差</th></tr></thead><tbody id="salesReportCenterSources"><tr><td colspan="5" class="empty-hint">查詢後顯示</td></tr></tbody></table></div><div class="desc" id="salesReportCenterReconciliation"></div></div></details>`;
+  salesShell('銷售報表中心（iSM 報表群）',body);
+  $('#canvas .screen')?.classList.add('sales-report-center-screen');
+  const form=$('#salesReportCenterFilter'),catalogElement=$('#salesReportCenterCatalog'),meta=$('#salesReportCenterMeta'),summaryElement=$('#salesReportCenterSummary'),noticeElement=$('#salesReportCenterNotice'),headElement=$('#salesReportCenterHead'),rowsElement=$('#salesReportCenterRows'),sourcesElement=$('#salesReportCenterSources'),reconciliationElement=$('#salesReportCenterReconciliation'),resultTitle=$('#salesReportCenterResultTitle');
+  const number=value=>{const n=Number(value||0);return Number.isFinite(n)?n.toLocaleString('zh-TW',{maximumFractionDigits:6}):'0';};
+  const statusText=status=>statusLabel[status]||status||'—';
+  const renderCatalog=(remote)=>{
+    const current=new Map((remote||[]).map(row=>[row.key,row]));
+    const groups=new Map();
+    salesReportCatalog.forEach(([key,name,section,status])=>{const row=current.get(key)||{key,report_name:name,section,status,note:'依 iSM 文件逐一對照'};if(!groups.has(row.section))groups.set(row.section,[]);groups.get(row.section).push(row);});
+    catalogElement.innerHTML=[...groups.entries()].map(([section,rows])=>`<section class="sales-report-center-group"><h3>${esc(section)}</h3><div class="sales-report-center-cards">${rows.map(row=>`<button type="button" class="sales-report-card ${esc(row.status||'planned')} ${form.elements.report_key.value===row.key?'active':''}" data-sales-report-key="${esc(row.key)}"><strong>${esc(row.report_name)}</strong><span>${esc(statusText(row.status))}</span><small>${esc(row.note||'')}</small></button>`).join('')}</div></section>`).join('');
+    document.querySelectorAll('[data-sales-report-key]').forEach(button=>button.onclick=()=>{form.elements.report_key.value=button.dataset.salesReportKey;load();});
+  };
+  const queryFromForm=()=>{const values=Object.fromEntries(new FormData(form)),query=new URLSearchParams({source_database:currentDatabase,report_key:values.report_key||'customer-order-statistics',from_date:values.from_date||'',to_date:values.to_date||'',limit:values.limit||'500'});['customer_code','item_code','salesperson_code','department_code','warehouse_code','currency_code','document_kind'].forEach(key=>{if(values[key])query.set(key,values[key]);});return query;};
+  const numericKeys=new Set(['document_count','line_count','quantity','sales_quantity','order_quantity','delivered_quantity','remaining_quantity','fulfilled_quantity','remaining_schedule_quantity','picked_quantity','remaining_pick_quantity','converted_quantity','old_quantity','new_quantity','unit_price','new_unit_price','amount','order_amount','delivered_amount','remaining_amount','sales_amount','return_amount','net_sales_amount','cost_amount','profit_amount','invoiced_amount','uninvoiced_amount','cost_coverage_rate','exception_count']);
+  const cell=(key,value)=>{if(value===null||value===undefined||value==='')return '—';if(numericKeys.has(key))return number(value);if(key==='source_key'||key==='source_key_sample')return `<small class="sales-report-source-key">${esc(value)}</small>`;return esc(value);};
+  const renderSummary=(summary)=>{const items=[['資料列',summary.row_count],['單據數',summary.document_count],['數量',summary.quantity||summary.order_quantity||summary.sales_quantity],['金額',summary.amount||summary.order_amount||summary.sales_amount],['剩餘量',summary.remaining_quantity],['未開票金額',summary.uninvoiced_amount],['異常筆數',summary.exception_count]];summaryElement.innerHTML='<div class="report-summary-grid">'+items.map(([label,value])=>`<div class="report-summary-card"><span>${label}</span><strong>${number(value)}</strong></div>`).join('')+'</div>';};
+  const load=async()=>{try{const result=await api('/api/sales-workflow/report-center?'+queryFromForm().toString()),rows=result.rows||[],columns=result.columns||[];renderCatalog(result.catalog||[]);resultTitle.textContent=`${result.report_name||'報表結果'}（${statusText(result.status)}）`;meta.innerHTML=`<span>報表：${esc(result.report_name||'—')}</span><span>分類：${esc(result.section||'—')}</span><span>公司／來源：${esc(result.company_id||'—')}／${esc(result.source_database||currentDatabase)}</span><span>目標資料庫：${esc(result.target_database||targetDatabaseLabel())}</span><span>期間：${esc(result.from_date||'不限')}～${esc(result.to_date||'不限')}</span><span>顯示 ${number(rows.length)} 列；上限 ${number(result.limit)}</span>`;renderSummary(result.summary||{});noticeElement.innerHTML=result.availability==='planned'?`<div class="sales-report-center-notice planned"><strong>尚未完成：${esc(result.report_name)}</strong><br>${esc(result.note||'目前沒有獨立來源或欄位，先保留文件落差。')}</div>`:result.status==='partial'?`<div class="sales-report-center-notice partial"><strong>部分完成：${esc(result.report_name)}</strong><br>${esc(result.note||'目前以既有來源合併承接，仍需補正式欄位或版面。')}</div>`:'';headElement.innerHTML=columns.length?'<tr>'+columns.map(column=>`<th>${esc(column.label)}</th>`).join('')+'</tr>':'<tr><th>狀態</th></tr>';rowsElement.innerHTML=rows.map(row=>'<tr>'+columns.map(column=>`<td class="${numericKeys.has(column.key)?'num':''}">${cell(column.key,row[column.key])}</td>`).join('')+'</tr>').join('')||`<tr><td colspan="${Math.max(columns.length,1)}" class="empty-hint">${result.availability==='planned'?'目前沒有可查詢的獨立來源；請依文件落差規劃後續欄位。':'目前公司別與日期條件查無資料'}</td></tr>`;sourcesElement.innerHTML=(result.source_definitions||[]).map(source=>`<tr><td>${esc(source.source||result.report_name||'—')}</td><td>${esc(source.tables||'—')}</td><td>${esc(source.evidence||'—')}<br><span class="phase2-status ${result.status==='done'?'done':result.status==='partial'?'partial':'error'}">${esc(statusText(result.status))}</span></td><td>${esc(source.trace||'—')}</td><td>${esc(source.rule||result.note||'—')}</td></tr>`).join('')||'<tr><td colspan="5" class="empty-hint">目前沒有來源定義</td></tr>';reconciliationElement.textContent=result.reconciliation||'';}catch(error){meta.innerHTML=`<span>報表載入失敗：${esc(error.message)}</span>`;summaryElement.innerHTML='';noticeElement.innerHTML='<div class="sales-report-center-notice planned">請確認目前公司別、登入權限與資料庫連線。</div>';headElement.innerHTML='<tr><th>報表結果</th></tr>';rowsElement.innerHTML=`<tr><td class="empty-hint">${esc(error.message)}</td></tr>`;sourcesElement.innerHTML='';}};
+  form.onsubmit=event=>{event.preventDefault();load();};$('#salesReportCenterReload').onclick=load;renderCatalog();load();
 }
 function renderSalesPlannedScreen(screen){
   const configs={
@@ -1782,7 +1836,8 @@ function renderArchitectureScreen(){
     ${line(590,835,590,875,'拋轉傳票')}${line(590,945,590,970,'過帳總帳')}
   </svg>`;
   const completed=[
-    ['N16-6','銷售管理水管圖／SHEET排序與節點連結（iSM 文件對照）','已完成並收納於本區：依《iSM-訂單管理系統》第 9 頁主架構與第 10–12 頁功能分組，將銷售 SHEET 依單據性質／前置→基本資料／價格→預測／報價→合約／訂單→銷貨／銷退→跟催／報表／管理→庫存／應收聯動排列；每個節點可點選導向既有 SHEET，並保留目前公司、目標資料庫與來源資料庫上下文。文件中的專用報表群與管理維護作業若目前由既有頁面合併承接，已用紅色占位並列入下一階段開發建議，未新增資料表。','done'],
+    ['N16-6','銷售管理水管圖／SHEET排序與節點連結（iSM 文件對照）','已完成並收納於本區：依《iSM-訂單管理系統》第 9 頁主架構與第 10–12 頁功能分組，將銷售 SHEET 依單據性質／前置→基本資料／價格→預測／報價→合約／訂單→銷貨／銷退→跟催／報表／管理→庫存／應收聯動排列；每個節點可點選導向既有 SHEET，並保留目前公司、目標資料庫與來源資料庫上下文。專用報表群本次已建立集中報表中心與同名報表節點，完成／部分完成／尚未完成狀態及文件落差均逐項呈現，未新增資料表。','done'],
+    ['SAL-G01','銷售：iSM 專用報表群逐一對照','已完成並收納於本區：依《iSM-訂單管理系統》逐一建立客戶接單、訂單利潤分析、預計出貨、訂單銷貨狀況、客戶／品號／歷史交易、已出貨未開發票、價格異常、各類明細、出貨排程、銷退原因、訂金結帳、揀貨與計價資料等同名報表節點。報表中心已補日期起訖、客戶／品號／業務員／部門／庫別／幣別／單據種類條件、來源鍵與公司別固定隔離；來源不足的項目仍明確標示部分完成／尚未完成，不以合併資料冒充正式報表。','done'],
     ['01','SH／仙暉 7 月端到端驗證','已實跑 10 組測試鏈：請購→採購→分批進貨→驗收／入庫→報價→訂單→分批銷貨→應收／應付→收付款→傳票／總帳；測試資料寫入 inventory_erp，SH 原始庫未回寫。','done'],
     ['02','一對多、數量與庫存卡控','已驗證請購核准／採購鎖定後才能轉單，採購一張對應多張進貨單；驗收合格量才入庫、銷貨確認才出庫，剩餘量與庫存異動台帳可核對。','done'],
     ['03','報價→訂單→分批銷貨追蹤','已驗證報價轉訂單、訂單分批銷貨、已交量／未交量回寫，以及來源單號與下一階段稽核。','done'],
@@ -1832,7 +1887,6 @@ function renderArchitectureScreen(){
    const roadmap=confirmedNextPhaseRoadmap;
    const completedDisplay=completed.map(([no,title,desc,status])=>[no,title.replaceAll('銷售管理','訂單管理'),desc.replaceAll('銷售管理','訂單管理'),status]);
   const recommendations=[
-    ['SAL-G01','銷售：iSM 專用報表群逐一對照','《iSM-訂單管理系統》列客戶接單、訂單利潤分析、各維度預計出貨、訂單銷貨狀況、客戶／品號／歷史交易、已出貨未開票、價格異常與揀貨等報表；目前由銷售進度、統計、分析與憑證頁合併承接，尚未逐一形成同名 SHEET。先確認集中報表中心或拆分報表群，再補欄位、API、來源鍵與公司別篩選。','planned'],
     ['SAL-G02','銷售：管理維護與只讀查詢分流','文件列訂單已交量重計、指定結案、轉採購單複製、單據清除、客戶／訂單／樹狀資訊與客戶商品交易記錄查詢；目前由訂單後續工具與流程稽核承接，尚未逐項拆出管理維護 SHEET。需先定義可更正與只讀查詢的權責、版本、期間及事件歷程，確認前不清除資料。','planned'],
     ['SAL-G03','銷售：計價明細／特價／價格檢核 SHEET','文件把客戶產品計價、特價產生、計價資料明細、商品價格批次調整與價格檢查分開列示；目前計價主檔與批次調整已可操作，但特價產生、明細查詢與檢查結果尚由既有頁面合併承接。需確認沿用同一計價來源或拆成只讀報表，並維持公司別、幣別、生效日與核准版本。','partial'],
     ['AR-G01','應收：結帳單自動結帳與建立作業分流','《iSM-應收管理系統》把「結帳單自動結帳作業」與「結帳單建立作業」分開列示；目前共用同一結帳來源 API 與頁面，已保留兩個水管節點但尚未拆成兩套獨立 SHEET。先確認是否維持共用承接，或補獨立自動結帳批次畫面。','partial'],

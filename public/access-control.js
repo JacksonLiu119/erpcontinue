@@ -6,7 +6,7 @@ const featureAliases = {
   'source-mappings':'basicdata', 'data-quality':'data-quality', customers:'source-customers', 'sales-customer-controls':'source-customers', suppliers:'source-suppliers',
   'sales-customer-pricing-batch':'sales-customer-pricing', 'sales-contracts':'sales-orders', 'sales-delivery-schedule':'sales-progress',
   'sales-exceptions':'sales-progress', 'sales-order-tools':'sales-orders', 'sales-vouchers':'sales-orders',
-  'sales-report-gaps':'sales-statistics', 'sales-maintenance-gaps':'sales-orders',
+  'sales-report-center':'sales-statistics', 'sales-report-gaps':'sales-statistics', 'sales-maintenance-gaps':'sales-orders',
   'inventory-detail':'inventory-new-ledger', 'inventory-ledger':'inventory-new-ledger',
   'inventory-balance':'inventory-new-balance', 'inventory-movement-stats':'inventory-new-ledger',
   'department-movement-stats':'inventory-new-ledger',

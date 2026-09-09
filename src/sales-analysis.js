@@ -257,6 +257,41 @@ const salesNumericFields = [
   'unmapped_department_count', 'unmapped_salesperson_count'
 ];
 
+// 《iSM-訂單管理系統》報表名稱基準。這裡的 key 是程式內部識別碼，
+// 對外顯示的 report_name 一律沿用手冊名稱；同名項目先集中在報表中心，
+// 不因目前由既有頁面合併承接就偽裝成另一個作業名稱。
+const salesReportCatalog = Object.freeze([
+  { key: 'customer-order-statistics', report_name: '客戶接單統計表', section: '接單統計/跟催報表', mode: 'customer_order_summary', kinds: ['sales_order'], status: 'done', note: '由 COPR20 銷售統計承接；依客戶、幣別彙總訂單量、已交量、未交量與金額。' },
+  { key: 'order-profit-analysis', report_name: '訂單利潤分析狀況表', section: '接單統計/跟催報表', mode: 'order_profit', kinds: ['sales_order'], status: 'partial', note: '訂單收入與明細成本可列出；製造／成本模組尚未納入，毛利完整性保留落差。' },
+  { key: 'expected-shipment-detail', report_name: '訂單/商品/客戶/業務員預計出貨明細表', section: '接單統計/跟催報表', mode: 'expected_shipment_detail', kinds: ['sales_order'], status: 'partial', note: '目前以訂單明細預交日與交期排程合併承接，尚待完整 iSM 預計出貨欄位。' },
+  { key: 'order-shipment-status', report_name: '訂單銷貨狀況表', section: '接單統計/跟催報表', mode: 'order_shipment_status', kinds: ['sales_order'], status: 'done', note: '沿用訂單已交量與銷貨關聯量，呈現未交量與未交金額。' },
+  { key: 'customer-sales-detail', report_name: '客戶銷貨明細表', section: '銷售統計/管理報表', mode: 'detail', kinds: ['shipment'], status: 'partial', note: '已可查已過帳銷貨明細；iSM 正式欄位版與列印格式仍由中心承接。' },
+  { key: 'customer-sales-summary', report_name: '客戶銷貨彙總表', section: '銷售統計/管理報表', mode: 'customer_sales_summary', kinds: ['shipment'], status: 'partial', note: '依客戶／幣別彙總已過帳銷貨量與金額，尚待正式報表版面與更多維度。' },
+  { key: 'historical-transactions', report_name: '歷史交易記錄表', section: '銷售統計/管理報表', mode: 'detail', kinds: ['quotation', 'sales_order', 'shipment', 'sales_return'], status: 'partial', note: '以目標 ERP 銷售文件與來源鍵承接；來源 ERP 歷史資料仍維持唯讀。' },
+  { key: 'product-sales-detail', report_name: '產品銷貨明細表', section: '銷售統計/管理報表', mode: 'detail', kinds: ['shipment'], status: 'partial', note: '已可按品號查已過帳銷貨明細，正式 iSM 報表欄位仍需補齊。' },
+  { key: 'department-sales-period', report_name: '商品部門銷貨期報表', section: '銷售統計/管理報表', mode: 'department_sales_period', kinds: ['shipment'], status: 'partial', note: '以業務員所屬部門與月份彙總；部門未對照的資料會保留在異常提示。' },
+  { key: 'shipped-not-invoiced', report_name: '已出貨未開發票明細表', section: '銷售統計/管理報表', mode: 'shipped_not_invoiced', kinds: ['shipment'], status: 'partial', note: '已串接應收憑單來源；僅已核准／已過帳且有有效發票的金額視為已開票。' },
+  { key: 'sales-price-exception', report_name: '銷售價格異常表', section: '銷售統計/管理報表', mode: 'price_exception', kinds: ['quotation', 'sales_order', 'shipment'], status: 'partial', note: '檢出零單價或缺少計價來源；完整 iSM 價格異常規則仍需補齊。' },
+  { key: 'quotation-detail', report_name: '報價單明細表', section: '各類明細表', mode: 'detail', kinds: ['quotation'], status: 'partial', note: '以報價單明細承接，保留客戶、品號、幣別、來源鍵與狀態。' },
+  { key: 'customer-order-detail', report_name: '客戶訂單明細表', section: '各類明細表', mode: 'detail', kinds: ['sales_order'], status: 'partial', note: '以訂單明細承接，保留已交量、未交量與來源鍵。' },
+  { key: 'order-change-detail', report_name: '訂單變更明細表', section: '各類明細表', mode: 'order_change_detail', status: 'partial', note: '以訂單變更草稿／核准紀錄承接，版本與受控解結歷程可追溯。' },
+  { key: 'shipment-detail', report_name: '銷貨單明細表', section: '各類明細表', mode: 'detail', kinds: ['shipment'], status: 'partial', note: '以已過帳銷貨明細承接，庫存過帳狀態與來源鍵一併呈現。' },
+  { key: 'sales-return-detail', report_name: '銷退單明細表', section: '各類明細表', mode: 'detail', kinds: ['sales_return'], status: 'partial', note: '銷退／折讓共用銷售來源；回庫與應收減項狀態一併呈現。' },
+  { key: 'contract-detail', report_name: '合約訂單明細表', section: '各類明細表', mode: 'contract_detail', status: 'partial', note: '以目標 ERP 合約及合約明細承接，尚待完整 iSM 欄位對照。' },
+  { key: 'contract-shipment-detail', report_name: '合約訂單銷貨明細表', section: '各類明細表', mode: 'contract_shipment_detail', kinds: ['shipment'], status: 'partial', note: '以銷貨來源合約／訂單關聯承接；無來源關聯的獨立銷貨仍保留為獨立起點。' },
+  { key: 'customer-order-fo-detail', report_name: '客戶訂單 F/O 明細表', section: '各類明細表', mode: 'unavailable', status: 'planned', note: '目前目標結構尚無獨立 F/O 欄位，先列出文件落差，不自行新增資料表。' },
+  { key: 'customer-shipment-schedule', report_name: '客戶別商品出貨排程表', section: '其他表單', mode: 'schedule', status: 'partial', note: '以交期排程表與訂單明細承接，排程不直接扣庫存。' },
+  { key: 'return-reason-analysis', report_name: '銷退原因分析表', section: '其他表單', mode: 'return_reason', kinds: ['sales_return'], status: 'partial', note: '目前以銷退／折讓備註作為原因來源，正式原因代碼與統計維度仍待補齊。' },
+  { key: 'deposit-settlement-status', report_name: '訂金結帳狀況表(訂單)', section: '其他表單', mode: 'unavailable', status: 'planned', note: '目前尚無獨立訂金來源欄位，先保留文件落差，不以一般應收金額冒充訂金。' },
+  { key: 'pick-list-print', report_name: '揀貨單列印作業', section: '管理維護作業', mode: 'pick_list', status: 'partial', note: '以揀貨單與訂單明細承接，可追蹤揀貨量與已揀量；正式列印版仍由中心承接。' },
+  { key: 'pricing-detail', report_name: '計價資料明細表', section: '商品價格管理', mode: 'unavailable', status: 'planned', note: '目前計價主檔可查，但尚未形成文件同名明細報表，先列為報表中心落差。' }
+]);
+const salesReportByKey = new Map(salesReportCatalog.map(report => [report.key, report]));
+
+function reportStatusLabel(status) {
+  return ({ done: '已完成', partial: '部分完成', planned: '尚未完成' }[status] || status || '—');
+}
+
 function normalizeRow(row, numericFields) {
   const output = { ...row };
   for (const field of numericFields) output[field] = numeric(row[field]);
@@ -304,6 +339,426 @@ function buildSalesWhere(req, context, fromDate, toDate) {
     params.push(`%${category}%`);
   }
   return { where, params };
+}
+
+function reportColumns(report) {
+  const common = [
+    ['document_no', '單號'], ['document_date', '日期'], ['document_kind', '單據種類'],
+    ['customer_code', '客戶'], ['customer_name', '客戶名稱'], ['item_code', '品號'],
+    ['item_name', '品名'], ['currency_code', '幣別'], ['quantity', '數量'],
+    ['related_quantity', '已交／關聯量'], ['remaining_quantity', '剩餘量'],
+    ['unit_price', '單價'], ['amount', '金額'], ['status', '狀態'],
+    ['inventory_status', '庫存狀態'], ['source_kind', '來源種類'],
+    ['source_document_no', '來源單號'], ['source_key', '來源鍵']
+  ];
+  const summary = {
+    customer_order_summary: [
+      ['customer_code', '客戶'], ['customer_name', '客戶名稱'], ['currency_code', '幣別'],
+      ['document_count', '訂單張數'], ['line_count', '明細數'], ['order_quantity', '訂單量'],
+      ['delivered_quantity', '已交量'], ['remaining_quantity', '未交量'],
+      ['order_amount', '訂單金額'], ['delivered_amount', '已交金額'],
+      ['remaining_amount', '未交金額'], ['source_key_sample', '來源鍵（樣本）']
+    ],
+    customer_sales_summary: [
+      ['customer_code', '客戶'], ['customer_name', '客戶名稱'], ['currency_code', '幣別'],
+      ['document_count', '銷貨張數'], ['line_count', '明細數'], ['sales_quantity', '銷貨量'],
+      ['sales_amount', '銷貨金額'], ['return_quantity', '銷退量'], ['return_amount', '銷退金額'],
+      ['net_sales_amount', '銷貨淨額'], ['source_key_sample', '來源鍵（樣本）']
+    ],
+    order_profit: [
+      ['document_no', '訂單'], ['document_date', '日期'], ['customer_code', '客戶'],
+      ['customer_name', '客戶名稱'], ['currency_code', '幣別'], ['document_count', '訂單張數'],
+      ['line_count', '明細數'], ['order_quantity', '訂單量'], ['delivered_quantity', '已交量'],
+      ['remaining_quantity', '未交量'], ['order_amount', '訂單金額'], ['cost_amount', '明細成本'],
+      ['profit_amount', '預估利潤'], ['cost_coverage_rate', '成本覆蓋率'], ['source_key_sample', '來源鍵（樣本）']
+    ],
+    department_sales_period: [
+      ['period_code', '期間'], ['department_code', '部門'], ['department_name', '部門名稱'],
+      ['currency_code', '幣別'], ['document_count', '銷貨張數'], ['line_count', '明細數'],
+      ['sales_quantity', '銷貨量'], ['sales_amount', '銷貨金額'], ['return_quantity', '銷退量'],
+      ['return_amount', '銷退金額'], ['net_sales_amount', '銷貨淨額'], ['source_key_sample', '來源鍵（樣本）']
+    ]
+  };
+  if (summary[report.mode]) return summary[report.mode];
+  if (report.mode === 'shipped_not_invoiced') return [
+    ['document_no', '銷貨單'], ['document_date', '銷貨日期'], ['customer_code', '客戶'],
+    ['customer_name', '客戶名稱'], ['item_code', '品號'], ['item_name', '品名'], ['currency_code', '幣別'],
+    ['quantity', '銷貨量'], ['amount', '銷貨金額'], ['invoiced_amount', '已開票金額'],
+    ['uninvoiced_amount', '未開票金額'], ['invoice_status', '發票狀態'], ['invoice_numbers', '發票號碼'],
+    ['source_key', '來源鍵']
+  ];
+  if (report.mode === 'price_exception') return [
+    ['document_no', '單號'], ['document_date', '日期'], ['document_kind', '單據種類'],
+    ['customer_code', '客戶'], ['item_code', '品號'], ['currency_code', '幣別'],
+    ['quantity', '數量'], ['unit_price', '單價'], ['amount', '金額'], ['exception_reason', '異常原因'],
+    ['status', '狀態'], ['price_source_kind', '計價來源'], ['price_source_no', '計價來源單號'], ['source_key', '來源鍵']
+  ];
+  if (report.mode === 'pick_list') return [
+    ['pick_no', '揀貨單'], ['pick_date', '揀貨日'], ['order_no', '訂單'], ['customer_code', '客戶'],
+    ['warehouse_code', '庫別'], ['item_code', '品號'], ['quantity', '揀貨量'],
+    ['picked_quantity', '已揀量'], ['remaining_pick_quantity', '待揀量'], ['status', '狀態'], ['source_key', '來源鍵']
+  ];
+  if (report.mode === 'schedule') return [
+    ['schedule_no', '排程單號'], ['scheduled_date', '預計出貨日'], ['order_no', '訂單'],
+    ['customer_code', '客戶'], ['item_code', '品號'], ['warehouse_code', '庫別'],
+    ['quantity', '排程量'], ['fulfilled_quantity', '已履約量'], ['remaining_schedule_quantity', '剩餘排程量'],
+    ['status', '狀態'], ['source_key', '來源鍵']
+  ];
+  if (report.mode === 'order_change_detail') return [
+    ['change_no', '變更單'], ['change_date', '變更日期'], ['document_no', '訂單'],
+    ['customer_code', '客戶'], ['item_code', '品號'], ['old_quantity', '原數量'],
+    ['new_quantity', '新數量'], ['new_unit_price', '新單價'], ['status', '狀態'],
+    ['reason', '變更原因'], ['source_key', '來源鍵']
+  ];
+  if (report.mode === 'contract_detail') return [
+    ['contract_no', '合約'], ['contract_date', '合約日期'], ['customer_code', '客戶'],
+    ['item_code', '品號'], ['quantity', '合約量'], ['converted_quantity', '已轉訂單量'],
+    ['remaining_quantity', '剩餘量'], ['unit_price', '單價'], ['amount', '金額'],
+    ['status', '狀態'], ['source_key', '來源鍵']
+  ];
+  if (report.mode === 'return_reason') return [
+    ['reason', '銷退／折讓原因'], ['currency_code', '幣別'], ['document_count', '單據張數'],
+    ['quantity', '數量'], ['amount', '金額'], ['source_key_sample', '來源鍵（樣本）']
+  ];
+  return common;
+}
+
+function normalizeDateValue(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+function normalizeSalesReportRow(raw, context) {
+  const documentKind = trim(raw.document_kind);
+  const quantity = Math.max(numeric(raw.quantity), 0);
+  const relatedQuantity = Math.min(Math.max(numeric(raw.related_quantity), 0), quantity);
+  const unitPrice = numeric(raw.unit_price);
+  const unitCost = numeric(raw.unit_cost);
+  const allowance = Math.max(numeric(raw.allowance_amount), 0);
+  const amount = Math.max(quantity * unitPrice - allowance, 0);
+  const orderAmount = documentKind === 'sales_order' ? amount : 0;
+  const deliveredQuantity = documentKind === 'sales_order' ? relatedQuantity : 0;
+  const deliveredAmount = documentKind === 'sales_order' ? deliveredQuantity * unitPrice : 0;
+  const remainingQuantity = documentKind === 'sales_order' ? Math.max(quantity - deliveredQuantity, 0) : 0;
+  const remainingAmount = documentKind === 'sales_order' ? Math.max(orderAmount - deliveredAmount, 0) : 0;
+  const shipmentQuantity = documentKind === 'shipment' ? quantity : 0;
+  const shipmentAmount = documentKind === 'shipment' ? amount : 0;
+  const returnQuantity = documentKind === 'sales_return' && trim(raw.return_type) === 'return' ? quantity : 0;
+  const returnAmount = documentKind === 'sales_return'
+    ? (trim(raw.return_type) === 'allowance' ? Math.max(allowance, quantity * unitPrice) : amount)
+    : 0;
+  const sourceKey = `${context.source_database}|${documentKind || 'unknown'}|${raw.document_id || ''}|${raw.item_id || ''}`;
+  const output = {
+    ...raw,
+    document_date: normalizeDateValue(raw.document_date),
+    expected_date: normalizeDateValue(raw.expected_date),
+    quantity,
+    related_quantity: relatedQuantity,
+    unit_price: unitPrice,
+    unit_cost: unitCost,
+    allowance_amount: allowance,
+    amount,
+    order_quantity: documentKind === 'sales_order' ? quantity : 0,
+    order_amount: orderAmount,
+    delivered_quantity: deliveredQuantity,
+    delivered_amount: deliveredAmount,
+    remaining_quantity: remainingQuantity,
+    remaining_amount: remainingAmount,
+    shipment_quantity: shipmentQuantity,
+    shipment_amount: shipmentAmount,
+    sales_quantity: shipmentQuantity,
+    sales_amount: shipmentAmount,
+    return_quantity: returnQuantity,
+    return_amount: returnAmount,
+    cost_amount: quantity * unitCost,
+    cost_covered_line: unitCost > EPSILON ? 1 : 0,
+    source_database: context.source_database,
+    company_id: context.company_id,
+    tenant_id: context.tenant_id,
+    source_system: context.source_system,
+    source_key: sourceKey
+  };
+  if (raw.invoiced_amount !== undefined) {
+    output.invoiced_amount = numeric(raw.invoiced_amount);
+    output.uninvoiced_amount = Math.max(shipmentAmount - output.invoiced_amount, 0);
+  }
+  return output;
+}
+
+function addReportFilter(where, params, value, expression) {
+  const text = trim(value);
+  if (text) {
+    where.push(`${expression}=?`);
+    params.push(text);
+  }
+}
+
+async function loadSalesReportBaseRows(req, context, report, fromDate, toDate, limit) {
+  const { where, params } = buildSalesWhere(req, context, fromDate, toDate);
+  if (Array.isArray(report.kinds) && report.kinds.length) {
+    where.push(`d.document_kind IN (${report.kinds.map(() => '?').join(',')})`);
+    params.push(...report.kinds);
+  }
+  const invoiceJoin = report.mode === 'shipped_not_invoiced' ? `
+    LEFT JOIN (
+      SELECT vs.source_document_id,vs.source_document_item_id,
+        COALESCE(SUM(CASE WHEN fv.status IN ('approved','posted') AND fv.invoice_status IN ('issued','received') THEN vs.allocated_amount ELSE 0 END),0) AS invoiced_amount,
+        GROUP_CONCAT(DISTINCT CASE WHEN fv.status IN ('approved','posted') AND fv.invoice_status IN ('issued','received') THEN fv.invoice_status END ORDER BY fv.invoice_status SEPARATOR '、') AS invoice_status,
+        GROUP_CONCAT(DISTINCT CASE WHEN fv.status IN ('approved','posted') AND fv.invoice_status IN ('issued','received') THEN COALESCE(fv.invoice_no,'待補發票') END ORDER BY fv.invoice_no SEPARATOR '、') AS invoice_numbers
+      FROM finance_voucher_sources vs
+      JOIN finance_vouchers fv ON fv.id=vs.voucher_id
+      WHERE vs.source_kind='shipment' AND fv.account_type='AR'
+        AND fv.tenant_id=? AND fv.company_id=? AND fv.source_system=? AND fv.source_database=?
+        AND fv.status<>'voided'
+      GROUP BY vs.source_document_id,vs.source_document_item_id
+    ) invoice_sources ON invoice_sources.source_document_id=d.id AND invoice_sources.source_document_item_id=i.id` : '';
+  const invoiceParams = report.mode === 'shipped_not_invoiced'
+    ? [context.tenant_id, context.company_id, context.source_system, context.source_database]
+    : [];
+  const invoiceSelect = report.mode === 'shipped_not_invoiced'
+    ? 'invoice_sources.invoiced_amount,invoice_sources.invoice_status,invoice_sources.invoice_numbers'
+    : '0 AS invoiced_amount,NULL AS invoice_status,NULL AS invoice_numbers';
+  const [rows] = await pool.query(`
+    SELECT d.id AS document_id,d.document_kind,d.document_type,d.document_no,d.document_date,d.status,d.inventory_status,
+      d.return_type,d.contract_id,d.customer_code,cm.customer_name,d.salesperson_code,em.employee_name,
+      em.department_code,dp.department_name,COALESCE(i.warehouse_code,d.warehouse_code) AS warehouse_code,
+      d.currency_code,i.id AS item_id,i.line_no,i.source_item_id,i.contract_item_id,i.item_code,
+      COALESCE(NULLIF(i.item_name,''),im.item_name) AS item_name,im.specification,im.category_1,im.category_2,im.category_3,im.category_4,
+      i.quantity,i.related_quantity,i.unit_price,i.unit_cost,i.expected_date,i.allowance_amount,
+      i.price_source_kind,i.price_source_id,i.price_source_no,
+      COALESCE(src_d.document_kind,src_h.document_kind) AS source_kind,
+      COALESCE(src_d.document_no,src_h.document_no) AS source_document_no,
+      COALESCE(src_d.id,src_h.id) AS source_document_id,
+      src_i.id AS source_document_item_id,
+      ${invoiceSelect}
+    ${salesFromSql}
+    ${invoiceJoin}
+    WHERE ${where.join(' AND ')}
+    ORDER BY d.document_date DESC,d.document_no,i.line_no
+    LIMIT ?`, [...invoiceParams, ...params, limit]);
+  return rows.map(row => normalizeSalesReportRow(row, context));
+}
+
+function reportGroup(rows, keys, metricFields) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = keys.map(field => String(row[field] ?? '')).join('\u0000');
+    let group = groups.get(key);
+    if (!group) {
+      group = { report_row_kind: 'summary', ...Object.fromEntries(keys.map(field => [field, row[field] ?? null])), document_count: 0, line_count: 0, source_key_sample: '', source_document_sample: '', _documents: new Set(), _sources: new Set(), _sourceDocuments: new Set(), _statuses: new Set() };
+      for (const field of metricFields) group[field] = 0;
+      groups.set(key, group);
+    }
+    group._documents.add(String(row.document_id || ''));
+    group._sources.add(String(row.source_key || ''));
+    group._sourceDocuments.add(String(row.document_no || ''));
+    if (row.status) group._statuses.add(String(row.status));
+    group.line_count += 1;
+    for (const field of metricFields) group[field] += numeric(row[field]);
+  }
+  return [...groups.values()].map(group => {
+    group.document_count = group._documents.size;
+    group.source_key_sample = [...group._sources].filter(Boolean).slice(0, 5).join('、');
+    group.source_document_sample = [...group._sourceDocuments].filter(Boolean).slice(0, 5).join('、');
+    group.status_codes = [...group._statuses].join('、');
+    delete group._documents;
+    delete group._sources;
+    delete group._sourceDocuments;
+    delete group._statuses;
+    return group;
+  });
+}
+
+function summarizeSalesReportRows(rows) {
+  const grouped = rows.some(row => row.report_row_kind === 'summary');
+  const summary = {
+    row_count: rows.length,
+    document_count: grouped ? rows.reduce((sum, row) => sum + numeric(row.document_count), 0) : new Set(rows.map(row => String(row.document_id || row.document_no || row.pick_no || row.contract_no || ''))).size,
+    line_count: grouped ? rows.reduce((sum, row) => sum + numeric(row.line_count), 0) : rows.length,
+    quantity: 0,
+    order_quantity: 0,
+    sales_quantity: 0,
+    delivered_quantity: 0,
+    remaining_quantity: 0,
+    amount: 0,
+    order_amount: 0,
+    sales_amount: 0,
+    return_amount: 0,
+    net_sales_amount: 0,
+    cost_amount: 0,
+    profit_amount: 0,
+    invoiced_amount: 0,
+    uninvoiced_amount: 0,
+    exception_count: 0
+  };
+  for (const row of rows) {
+    for (const field of ['quantity', 'order_quantity', 'sales_quantity', 'delivered_quantity', 'remaining_quantity', 'amount', 'order_amount', 'sales_amount', 'return_amount', 'net_sales_amount', 'cost_amount', 'profit_amount', 'invoiced_amount', 'uninvoiced_amount']) summary[field] += numeric(row[field]);
+    if (row.exception_reason) summary.exception_count += 1;
+  }
+  if (!summary.quantity) summary.quantity = summary.order_quantity || summary.sales_quantity;
+  if (!summary.sales_amount) summary.sales_amount = rows.reduce((sum, row) => sum + numeric(row.shipment_amount), 0);
+  if (!summary.return_amount) summary.return_amount = rows.reduce((sum, row) => sum + numeric(row.return_amount), 0);
+  if (!summary.net_sales_amount) summary.net_sales_amount = summary.sales_amount - summary.return_amount;
+  return summary;
+}
+
+async function loadSalesScheduleReport(req, context, fromDate, toDate, limit) {
+  const where = ['p.tenant_id=?', 'p.company_id=?', 'p.source_system=?', 'p.source_database=?'];
+  const params = [context.tenant_id, context.company_id, context.source_system, context.source_database];
+  if (fromDate) { where.push('p.scheduled_date>=?'); params.push(fromDate); }
+  if (toDate) { where.push('p.scheduled_date<=?'); params.push(toDate); }
+  addReportFilter(where, params, req.query.customer_code, 'p.customer_code');
+  addReportFilter(where, params, req.query.item_code, 'p.item_code');
+  addReportFilter(where, params, req.query.warehouse_code, 'p.warehouse_code');
+  if (trim(req.query.order_id)) { where.push('p.order_id=?'); params.push(Number(req.query.order_id)); }
+  const [rows] = await pool.query(`
+    SELECT p.id AS schedule_id,p.schedule_no,p.scheduled_date,p.quantity,p.fulfilled_quantity,p.status,
+      p.order_id,d.document_no AS order_no,p.customer_code,p.item_code,p.warehouse_code,
+      p.order_item_id AS item_id
+    FROM erp_sales_delivery_schedules p
+    JOIN sales_documents d ON d.id=p.order_id AND d.tenant_id=p.tenant_id AND d.company_id=p.company_id
+      AND d.source_system=p.source_system AND d.source_database=p.source_database
+    WHERE ${where.join(' AND ')}
+    ORDER BY p.scheduled_date DESC,p.schedule_no
+    LIMIT ?`, [...params, limit]);
+  return rows.map(row => ({ ...row, scheduled_date: normalizeDateValue(row.scheduled_date), remaining_schedule_quantity: Math.max(numeric(row.quantity) - numeric(row.fulfilled_quantity), 0), source_database: context.source_database, company_id: context.company_id, tenant_id: context.tenant_id, source_system: context.source_system, source_key: `${context.source_database}|sales_order|${row.order_id}|${row.item_id}` }));
+}
+
+async function loadSalesPickReport(req, context, fromDate, toDate, limit) {
+  const where = ['p.tenant_id=?', 'p.company_id=?', 'p.source_system=?', 'p.source_database=?'];
+  const params = [context.tenant_id, context.company_id, context.source_system, context.source_database];
+  if (fromDate) { where.push('p.pick_date>=?'); params.push(fromDate); }
+  if (toDate) { where.push('p.pick_date<=?'); params.push(toDate); }
+  addReportFilter(where, params, req.query.customer_code, 'd.customer_code');
+  addReportFilter(where, params, req.query.item_code, 'pi.item_code');
+  addReportFilter(where, params, req.query.warehouse_code, 'p.warehouse_code');
+  if (trim(req.query.order_id)) { where.push('p.order_id=?'); params.push(Number(req.query.order_id)); }
+  const [rows] = await pool.query(`
+    SELECT p.id AS pick_list_id,p.pick_no,p.pick_date,p.status,p.order_id,d.document_no AS order_no,d.customer_code,
+      p.warehouse_code,pi.order_item_id AS item_id,pi.item_code,pi.quantity,pi.picked_quantity
+    FROM erp_sales_pick_lists p
+    JOIN sales_documents d ON d.id=p.order_id AND d.tenant_id=p.tenant_id AND d.company_id=p.company_id
+      AND d.source_system=p.source_system AND d.source_database=p.source_database
+    LEFT JOIN erp_sales_pick_list_items pi ON pi.pick_list_id=p.id
+    WHERE ${where.join(' AND ')}
+    ORDER BY p.pick_date DESC,p.pick_no,pi.id
+    LIMIT ?`, [...params, limit]);
+  return rows.map(row => ({ ...row, pick_date: normalizeDateValue(row.pick_date), quantity: numeric(row.quantity), picked_quantity: numeric(row.picked_quantity), remaining_pick_quantity: Math.max(numeric(row.quantity) - numeric(row.picked_quantity), 0), source_database: context.source_database, company_id: context.company_id, tenant_id: context.tenant_id, source_system: context.source_system, source_key: `${context.source_database}|sales_order|${row.order_id}|${row.item_id || ''}` }));
+}
+
+async function loadSalesOrderChangeReport(req, context, fromDate, toDate, limit) {
+  const where = ['c.tenant_id=?', 'c.company_id=?', 'c.source_system=?', 'c.source_database=?'];
+  const params = [context.tenant_id, context.company_id, context.source_system, context.source_database];
+  if (fromDate) { where.push('c.change_date>=?'); params.push(fromDate); }
+  if (toDate) { where.push('c.change_date<=?'); params.push(toDate); }
+  addReportFilter(where, params, req.query.customer_code, 'd.customer_code');
+  addReportFilter(where, params, req.query.item_code, 'i.item_code');
+  const [rows] = await pool.query(`
+    SELECT c.id AS change_id,c.change_no,c.change_date,c.status,c.reason,c.old_quantity,c.new_quantity,c.old_unit_price,c.new_unit_price,c.new_expected_date,
+      d.id AS document_id,d.document_no,d.document_date,d.customer_code,i.id AS item_id,i.item_code
+    FROM sales_order_changes c
+    JOIN sales_document_items i ON i.id=c.order_item_id
+    JOIN sales_documents d ON d.id=i.document_id AND d.tenant_id=c.tenant_id AND d.company_id=c.company_id
+      AND d.source_system=c.source_system AND d.source_database=c.source_database
+    WHERE ${where.join(' AND ')}
+    ORDER BY c.change_date DESC,c.change_no
+    LIMIT ?`, [...params, limit]);
+  return rows.map(row => ({ ...row, change_date: normalizeDateValue(row.change_date), document_date: normalizeDateValue(row.document_date), new_expected_date: normalizeDateValue(row.new_expected_date), source_database: context.source_database, company_id: context.company_id, tenant_id: context.tenant_id, source_system: context.source_system, source_key: `${context.source_database}|sales_order_change|${row.change_id}|${row.item_id}` }));
+}
+
+async function loadSalesContractReport(req, context, fromDate, toDate, limit) {
+  const where = ['c.tenant_id=?', 'c.company_id=?', 'c.source_system=?', 'c.source_database=?'];
+  const params = [context.tenant_id, context.company_id, context.source_system, context.source_database];
+  if (fromDate) { where.push('c.contract_date>=?'); params.push(fromDate); }
+  if (toDate) { where.push('c.contract_date<=?'); params.push(toDate); }
+  addReportFilter(where, params, req.query.customer_code, 'c.customer_code');
+  addReportFilter(where, params, req.query.item_code, 'ci.item_code');
+  const [rows] = await pool.query(`
+    SELECT c.id AS contract_id,c.contract_no,c.contract_date,c.status,c.customer_code,c.currency_code,
+      ci.id AS item_id,ci.line_no,ci.item_code,ci.item_name,ci.quantity,ci.converted_quantity,ci.unit_price,ci.amount,ci.expected_date
+    FROM erp_sales_contracts c
+    JOIN erp_sales_contract_items ci ON ci.contract_id=c.id
+    WHERE ${where.join(' AND ')}
+    ORDER BY c.contract_date DESC,c.contract_no,ci.line_no
+    LIMIT ?`, [...params, limit]);
+  return rows.map(row => ({ ...row, contract_date: normalizeDateValue(row.contract_date), expected_date: normalizeDateValue(row.expected_date), quantity: numeric(row.quantity), converted_quantity: numeric(row.converted_quantity), remaining_quantity: Math.max(numeric(row.quantity) - numeric(row.converted_quantity), 0), unit_price: numeric(row.unit_price), amount: numeric(row.amount), source_database: context.source_database, company_id: context.company_id, tenant_id: context.tenant_id, source_system: context.source_system, source_key: `${context.source_database}|sales_contract|${row.contract_id}|${row.item_id}` }));
+}
+
+function reportSourceDefinitions(report) {
+  const tables = report.mode === 'schedule'
+    ? 'erp_sales_delivery_schedules + sales_documents'
+    : report.mode === 'pick_list'
+      ? 'erp_sales_pick_lists + erp_sales_pick_list_items + sales_documents'
+      : report.mode === 'order_change_detail'
+        ? 'sales_order_changes + sales_documents + sales_document_items'
+        : report.mode === 'contract_detail'
+          ? 'erp_sales_contracts + erp_sales_contract_items'
+          : report.mode === 'shipped_not_invoiced'
+            ? 'sales_documents + sales_document_items + finance_vouchers + finance_voucher_sources'
+            : 'sales_documents + sales_document_items + ERP 主檔對照';
+  const trace = report.mode === 'schedule'
+    ? 'source_database + order_id + order_item_id + schedule_no'
+    : report.mode === 'pick_list'
+      ? 'source_database + order_id + order_item_id + pick_no'
+      : report.mode === 'order_change_detail'
+        ? 'source_database + change_id + order_item_id + change_no'
+        : report.mode === 'contract_detail'
+          ? 'source_database + contract_id + item_id + contract_no'
+          : 'source_database + document_id + item_id + document_no + line_no';
+  return [{
+    source: report.report_name,
+    tables,
+    evidence: '《iSM-訂單管理系統》正式報表名稱／目標 ERP 結構',
+    trace,
+    rule: report.note
+  }];
+}
+
+function reportColumnsAsObjects(report) {
+  return reportColumns(report).map(([key, label]) => ({ key, label }));
+}
+
+async function buildSalesReportRows(req, context, report, fromDate, toDate, limit) {
+  if (report.mode === 'unavailable') return [];
+  if (report.mode === 'schedule') return loadSalesScheduleReport(req, context, fromDate, toDate, limit);
+  if (report.mode === 'pick_list') return loadSalesPickReport(req, context, fromDate, toDate, limit);
+  if (report.mode === 'order_change_detail') return loadSalesOrderChangeReport(req, context, fromDate, toDate, limit);
+  if (report.mode === 'contract_detail') return loadSalesContractReport(req, context, fromDate, toDate, limit);
+
+  let rows = await loadSalesReportBaseRows(req, context, report, fromDate, toDate, limit);
+  if (report.mode === 'price_exception') {
+    rows = rows.map(row => ({
+      ...row,
+      exception_reason: [numeric(row.unit_price) <= EPSILON ? '單價小於等於 0' : '', trim(row.price_source_kind) ? '' : '缺少計價來源'].filter(Boolean).join('；')
+    })).filter(row => row.exception_reason);
+  }
+  if (report.mode === 'customer_order_summary') {
+    return reportGroup(rows, ['customer_code', 'customer_name', 'currency_code'], ['order_quantity', 'delivered_quantity', 'remaining_quantity', 'order_amount', 'delivered_amount', 'remaining_amount']);
+  }
+  if (report.mode === 'customer_sales_summary') {
+    return reportGroup(rows.map(row => ({ ...row, sales_quantity: row.shipment_quantity, sales_amount: row.shipment_amount, net_sales_amount: row.shipment_amount - row.return_amount })), ['customer_code', 'customer_name', 'currency_code'], ['sales_quantity', 'sales_amount', 'return_quantity', 'return_amount', 'net_sales_amount']);
+  }
+  if (report.mode === 'order_profit') {
+    const grouped = reportGroup(rows, ['document_id', 'document_no', 'document_date', 'customer_code', 'customer_name', 'currency_code'], ['order_quantity', 'delivered_quantity', 'remaining_quantity', 'order_amount', 'cost_amount', 'cost_covered_line']);
+    return grouped.map(row => ({
+      ...row,
+      profit_amount: numeric(row.order_amount) - numeric(row.cost_amount),
+      cost_coverage_rate: row.line_count ? Number(((numeric(row.cost_covered_line) / numeric(row.line_count)) * 100).toFixed(4)) : 0
+    }));
+  }
+  if (report.mode === 'department_sales_period') {
+    const prepared = rows.map(row => ({ ...row, period_code: String(row.document_date || '').slice(0, 7), sales_quantity: row.shipment_quantity, sales_amount: row.shipment_amount, net_sales_amount: row.shipment_amount - row.return_amount }));
+    return reportGroup(prepared, ['period_code', 'department_code', 'department_name', 'currency_code'], ['sales_quantity', 'sales_amount', 'return_quantity', 'return_amount', 'net_sales_amount']);
+  }
+  if (report.mode === 'return_reason') {
+    const prepared = rows.map(row => ({ ...row, reason: trim(row.note) || '未填寫原因', quantity: row.return_quantity, amount: row.return_amount }));
+    return reportGroup(prepared, ['reason', 'currency_code'], ['quantity', 'amount']);
+  }
+  if (report.mode === 'contract_shipment_detail') {
+    return rows.map(row => ({ ...row, contract_source_status: row.contract_id ? '有合約來源' : '獨立銷貨起點' }));
+  }
+  return rows;
 }
 
 function buildInventoryFilters(req, alias, categoryAlias = 'im') {
@@ -549,6 +1004,53 @@ async function loadReceivableAnalysis(req, context, fromDate, toDate, limit) {
 }
 
 export function registerSalesAnalysisRoutes(app) {
+  app.get('/api/sales-workflow/report-center', async (req, res, next) => {
+    try {
+      await ensureTargetSalesWorkflowSchema();
+      await ensureTargetFinanceWorkflowSchema();
+      const sourceDatabase = sourceDbFromRequest(req);
+      const context = contextFor(sourceDatabase);
+      const reportKey = trim(req.query.report_key || req.query.report || 'customer-order-statistics');
+      const report = salesReportByKey.get(reportKey);
+      if (!report) throw badRequest(`不支援的 iSM 銷售報表：${reportKey}`);
+      const fromDate = optionalDate(req.query.from_date || req.query.date_from);
+      const toDate = optionalDate(req.query.to_date || req.query.date_to);
+      if (fromDate && toDate && fromDate > toDate) throw badRequest('銷售報表日期起日不可晚於迄日');
+      const limit = clampLimit(req.query.limit);
+      const rows = await buildSalesReportRows(req, context, report, fromDate, toDate, limit);
+      const summary = summarizeSalesReportRows(rows);
+      if (report.mode === 'order_profit') {
+        summary.cost_coverage_rate = summary.line_count ? Number(((rows.reduce((sum, row) => sum + numeric(row.cost_covered_line), 0) / summary.line_count) * 100).toFixed(4)) : 0;
+      }
+      res.json({ ok: true, data: {
+        report_key: report.key,
+        report_name: report.report_name,
+        section: report.section,
+        status: report.status,
+        status_label: reportStatusLabel(report.status),
+        availability: report.mode === 'unavailable' ? 'planned' : 'queryable',
+        note: report.note,
+        source_database: sourceDatabase,
+        company_id: context.company_id,
+        tenant_id: context.tenant_id,
+        source_system: context.source_system,
+        target_database: sourceDatabases[sourceDatabase]?.target_database || null,
+        from_date: fromDate,
+        to_date: toDate,
+        limit,
+        columns: reportColumnsAsObjects(report),
+        rows,
+        summary,
+        catalog: salesReportCatalog.map(item => ({ key: item.key, report_name: item.report_name, section: item.section, status: item.status, status_label: reportStatusLabel(item.status), note: item.note })),
+        source_definitions: reportSourceDefinitions(report),
+        excluded_scope: ['製造', 'BOM', '成本計算模組；訂單利潤報表目前只列可取得的明細成本，不宣稱完整毛利'],
+        reconciliation: '報表中心固定使用登入工作階段的公司別與 source_database；每列保留來源鍵，不跨公司、不混用 SH／SC。來源不足的文件報表維持尚未完成狀態，不以合併頁結果冒充正式報表。'
+      }});
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get('/api/sales-workflow/analysis', async (req, res, next) => {
     try {
       await ensureTargetSalesWorkflowSchema();
