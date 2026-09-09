@@ -331,7 +331,7 @@ const ledgerPipeNodes = {
   accounts: { label:'會計科目設定作業', note:'G02 核心可維護／核准；iSM 完整科目樹與公司規則仍需補強', status:'partial', kind:'setup', screen:'accounting-accounts' },
   systemParams: { label:'會計系統參數設定作業', note:'G01 核心可維護／核准；iSM 完整參數群仍需補強', status:'partial', kind:'setup', screen:'accounting-system-params' },
   autoJournal: { label:'自動分錄系統', note:'由銷售、採購、應收、應付、票據與銀行來源產生分錄底稿', status:'done', kind:'external', screen:'accounting-auto-rules' },
-  treasury: { label:'票據資金管理系統', note:'銀行存提款、票據事件、對帳與資金餘額可追溯', status:'done', kind:'external', screen:'bank-ledger' },
+  treasury: { label:'票據資金管理系統', note:'銀行存提款、票據事件、對帳與資金餘額可追溯', status:'done', kind:'external', screen:'treasury-pipe' },
   fixedAssets: { label:'固定資產管理系統', note:'G04 核心卡片／折舊／底稿已完成；處分、移轉、減損與多折舊法仍需補強', status:'partial', kind:'external', screen:'accounting-fixed-assets' },
   budget: { label:'預算管理', note:'G03 核心預算版本／多行明細／實際比較已完成；完整控制仍需補強', status:'partial', kind:'management', screen:'accounting-budget' },
   draft: { label:'會計傳票建立作業', note:'由來源產生底稿／傳票明細，支援多行科目與來源鍵', status:'done', kind:'operation', screen:'accounting-drafts' },
@@ -437,8 +437,8 @@ modules.push({id:'ACP',name:'應付管理',screens:[
 ]});
 modules.push({id:'ACT',name:'會計總帳',screens:[
   ['ledger-pipe','會計總帳水管圖'],['document-natures','單據／分錄性質'],['common-parameters','會計系統參數查詢'],
-  ['accounting-system-params','會計系統參數設定作業'],['accounting-accounts','會計科目設定作業'],['treasury-pipe','銀行／票據資金水管圖'],
-  ['bank-ledger','銀行存款／對帳（跨模組聯動）'],['finance-flow','財務流程圖'],['accounting-clearing','立沖帳查詢'],
+  ['accounting-system-params','會計系統參數設定作業'],['accounting-accounts','會計科目設定作業'],
+  ['finance-flow','財務流程圖'],['accounting-clearing','立沖帳查詢'],
   ['accounting-budget','預算管理'],['accounting-drafts','會計傳票／分錄底稿'],['general-ledger','會計傳票／總帳'],
   ['accounting-periods','會計期間／指定關帳'],['accounting-opening-balances','期初未結帳款'],['accounting-year-close','月底／年度結轉'],
   ['accounting-fixed-assets','固定資產管理'],['accounting-profit-center','利潤中心管理'],['accounting-financial-statements','公司別目標財務報表'],
@@ -446,6 +446,10 @@ modules.push({id:'ACT',name:'會計總帳',screens:[
 ]});
 modules.push({id:'AUT',name:'自動分錄',screens:[
   ['accounting-auto-rules','自動分錄規則設定'],['accounting-drafts','自動分錄底稿（跨模組承接）'],['general-ledger','自動分錄總帳結果（跨模組承接）']
+]});
+// 銀行／票據資金是獨立主題；水管圖與銀行對帳 SHEET 不再混在會計總帳模組。
+modules.push({id:'TRS',name:'票據資金管理',screens:[
+  ['treasury-pipe','銀行／票據資金水管圖'],['bank-ledger','銀行存款／對帳']
 ]});
 modules.push({id:'RPT',name:'流程稽核',screens:[['operations-health','營運健康度'],['sales-flow-audit','銷售流程稽核'],['purchase-flow-audit','採購流程稽核'],['operations-reports','配銷／財務報表']]});
 modules.push({id:'ARCH',name:'架構與流程',screens:[['architecture-flow','系統架構與流程圖']]});
@@ -558,7 +562,7 @@ function renderScreen() {
   if (state.screen.startsWith('inventory-') && ['inventory-document-types','inventory-transactions','inventory-transfers','inventory-temporary','inventory-stocktake','inventory-posting','inventory-reversals','inventory-new-balance','inventory-new-ledger'].includes(state.screen)) return renderInventoryWorkflow(state.screen);
   if (state.module === 'PUR') return renderProcurementScreen(state.screen);
   if (state.module === 'SAL') return renderSalesScreen(state.screen);
-  if (['ACR','ACP','ACT','AUT'].includes(state.module)) return renderFinanceScreen(state.screen);
+  if (['ACR','ACP','ACT','AUT','TRS'].includes(state.module)) return renderFinanceScreen(state.screen);
   if (state.screen === 'operations-reports') return renderOperationsReports();
   if (state.module === 'RPT') return renderFlowAuditScreen(state.screen);
   if (state.module === 'ARCH') return renderArchitectureScreen();
@@ -1552,7 +1556,8 @@ function bindTreasuryPipeLinks(){
 function renderTreasuryPipe(){
   const arrow='<span class="treasury-pipe-horizontal-arrow" aria-hidden="true">→</span>';
   const body=`<div class="treasury-pipe-intro"><div class="desc">依《iSM-財務實作演練班》與銀行／票據作業規則整理資金主線：存提款→票據託收／兌現／退票／註銷→逐筆對帳→餘額→資金報表。應收／應付票據共用資金事件歷程，但仍依目前公司別、幣別與來源單據分開處理。每個節點都可點選進入現有 SHEET；管帳、管錢與對帳責任分開標示。</div><div class="sales-pipe-legend"><span class="done">已完成且可操作</span><span class="partial">部分完成／待補</span><span class="planned">尚未完成／占位頁</span></div></div><div class="treasury-pipe-board"><div class="sales-pipe-system">銀行／票據資金管理<small>ACR／ACP／ACT｜存提款 → 票據票況 → 對帳 → 餘額 → 資金報表</small></div><div class="treasury-pipe-prereq"><div class="treasury-pipe-section-label">前置資料與規則</div>${treasuryPipeNode('accounts')}${treasuryPipeNode('rules')}${treasuryPipeNode('sources')}</div><div class="treasury-pipe-flow-caption">主流程：收付款或票據狀態事件先形成銀行／資金交易；交易過帳後更新餘額，逐筆對帳完成後才列為已對帳</div><div class="treasury-pipe-mainline">${treasuryPipeNode('deposits')}${arrow}<div class="treasury-pipe-note-group"><div class="treasury-pipe-group-label">票據託收／兌現／退票／註銷</div><div class="treasury-pipe-note-items">${treasuryPipeNode('arNotes')}${treasuryPipeNode('apNotes')}</div></div>${arrow}${treasuryPipeNode('reconcile')}${arrow}${treasuryPipeNode('balance')}${arrow}${treasuryPipeNode('reports')}</div><div class="treasury-pipe-branch-grid"><div class="treasury-pipe-branch-card"><span>權責分離與作業入口</span><div class="treasury-pipe-branch-items">${treasuryPipeNode('cash')}${treasuryPipeNode('accounting')}${treasuryPipeNode('reconciliation')}</div></div><div class="treasury-pipe-branch-card treasury-pipe-branch-card--audit"><span>事件／報表／稽核</span><div class="treasury-pipe-branch-items">${treasuryPipeNode('audit')}${treasuryPipeNode('accounts')}${treasuryPipeNode('reports')}</div></div></div></div><div class="desc">權責規則對照：管錢負責建立／過帳存提款、收付款與票據資金事件；管帳負責分錄底稿、科目與總帳來源；對帳人員負責逐筆核對對帳單、差異與完成狀態。票據狀態變更需保留日期、人員、銀行交易與分錄底稿歷程；兌現、退票與註銷不可跳過既有資金事件。銀行帳上餘額、未兌現票據、未對帳交易、資金預估與異常報表均依目前登入公司別查詢，SH／SC 原始資料維持唯讀。</div>`;
-  finShell('銀行／票據資金水管圖', body);
+  const normalizedBody=body.replace('應收／應付票據共用資金事件歷程，但仍依目前公司別、幣別與來源單據分開處理。','本頁是獨立「票據資金管理」模組；應收／應付票據由各帳款模組提供來源，透過節點連回本模組，但仍依目前公司別、幣別與來源單據分開處理。').replace('銀行／票據資金管理<small>ACR／ACP／ACT｜','票據資金管理<small>TRS｜');
+  finShell('銀行／票據資金水管圖', normalizedBody);
   $('#canvas .screen')?.classList.add('treasury-pipe-screen');
   bindTreasuryPipeLinks();
 }
@@ -1719,7 +1724,8 @@ function renderFinanceFlow(){
     </div>
     <div class="panel finance-flow-roadmap"><div class="panel-head">下一階段開發順序（已確認項目）</div><div class="panel-body"><div class="desc">本 SHEET 與「ERP 系統流程與開發狀態圖」共用清單；橘色代表部分完成，紅色虛線代表尚未完成。完成驗證後會移到下方的已完成內容區，不會再重複列為待辦。</div><div class="architecture-roadmap">${roadmapHtml}</div></div></div>
     <div class="panel finance-flow-scope"><div class="panel-head">本次流程圖範圍與開發狀態</div><div class="panel-body"><div class="row c3"><div><strong>已具備</strong><br>銷售／採購一對多來源追蹤、驗收合格量入庫、銷貨確認出庫、銷退回庫與訂單解結、銷退後原應收沖帳／已收轉客戶待抵／退款登錄、應收餘額與結帳狀態同步、直接／手動／自動結帳、來源 9 其他、發票補登／作廢／重開、多幣別匯差與兌換科目、部分收付款沖銷、期間攔截、分錄底稿產生／維護／核准／拋轉／還原、借貸平衡與已過帳總帳彙總；銀行存提款、票據狀態歷程、票況分錄底稿、逐筆對帳、銀行餘額回寫與管帳／管錢／對帳權限分離；期初導入、月底快照、年度結轉、試算表、總帳明細與期初期末核對；進貨到貨／驗收／驗退／退回／計價／付款量分離、運費／保險／其他費用分攤、退貨負向應付、合併應付、付款回寫與暫入歸還卡控；立沖可用／已用／剩餘與明細、預收／預付／溢收／溢付分批轉抵／退款、客戶兼廠商同公司同來源同幣別對沖及對應分錄；SC 2025 只讀損益表、資產負債表與現金流量預覽。</div><div><strong>部分完成</strong><br>G01～G05 目標端核心已可操作；完整 iSM 參數群／科目樹、預算執行控制、固定資產異動與多折舊法、利潤中心正式自動分攤仍需補強，已列於架構圖的「下一階段開發建議」。</div><div><strong>尚未完成</strong><br>上述 G01～G05 文件延伸作業尚未全部落地；待確認既有欄位與規則後再逐項補齊，不會直接改寫 SH／SC 或跳過核准流程。</div></div></div></div>`;
-  finShell('財務相關流程圖',body);
+  const normalizedBody=body.replace('財務四模組與資金中控<small>ACR／ACP／ACT／AUT → GL</small>','財務作業模組與資金中控<small>ACR／ACP／ACT／AUT／TRS → GL</small>');
+  finShell('財務相關流程圖',normalizedBody);
   document.querySelectorAll('[data-finance-screen]').forEach(button=>button.onclick=()=>navigateToScreen(button.dataset.financeScreen));
 }
 function flowAuditSourceOptions(){const rows=(companyContexts||[]).filter(x=>x.source_database);const list=rows.length?rows:[{source_database:currentDatabase,company_name:currentDatabase,company_code:currentDatabase}];return [...new Map(list.map(x=>[x.source_database,x])).values()].map(x=>`<option value="${esc(x.source_database)}" ${x.source_database===currentDatabase?'selected':''}>${esc(x.company_name||x.source_database)}｜${esc(x.source_database)}</option>`).join('');}
