@@ -269,8 +269,8 @@ const receivablePipeNodes = {
   notes: { label:'應收票據／票據資金管理（跨模組聯動）', note:'收票、託收、兌現、退票、註銷與狀態／分錄歷程', status:'done', kind:'external', screen:'ar-notes' },
   bank: { label:'銀行存款／對帳（跨模組聯動）', note:'收款入帳、逐筆對帳、銀行餘額與資金來源', status:'done', kind:'external', screen:'bank-ledger' },
   accounting: { label:'自動分錄／會計總帳（跨模組聯動）', note:'結帳、收款、匯差與待抵／退款來源可追至底稿／總帳', status:'done', kind:'external', screen:'accounting-drafts' },
-  status: { label:'客戶帳齡分析表（共用報表中心承接）', note:'未結、逾期、已立帳未收、結帳狀態與剩餘金額', status:'partial', kind:'report', screen:'ar-aging' },
-  reports: { label:'應收帳款管理報表（共用報表中心承接）', note:`文件報表群：${receivableReportNames.join('、')}；目前由共用報表中心承接，尚未拆成同名獨立 SHEET`, status:'partial', kind:'report', screen:'ar-reports' },
+  status: { label:'客戶帳齡分析表（共用報表中心承接）', note:'未結、逾期、已立帳未收、結帳狀態與剩餘金額；已納入應收集中報表中心', status:'done', kind:'report', screen:'ar-reports' },
+  reports: { label:'應收帳款管理報表（共用報表中心承接）', note:`文件報表群：${receivableReportNames.join('、')}；已在同一報表中心逐項切換，補公司、日期、客戶、業務員、發票與來源鍵維度`, status:'done', kind:'report', screen:'ar-reports' },
   cleanup: { label:'單據清除作業（文件落差占位）', note:'文件列為獨立作業；目前不提供刪除，待確認與資料品質／受控更正的合併方式', status:'planned', kind:'management', screen:'ar-gaps' },
   monthClose: { label:'月底結轉管理作業（文件落差占位）', note:'月統計重計與月底結轉待與會計期間／年度結轉確認合併方式', status:'planned', kind:'closing', screen:'ar-gaps' }
 };
@@ -1804,7 +1804,7 @@ const operationsReportDefinitions=[
   ['supplier-arrivals','廠商預計進料'],['item-arrivals','品號／庫別預計進料'],['work-order-arrivals','製令預計進料'],
   ['open-documents','未交／未結案'],['aging','應收／應付帳齡'],['cash-forecast','資金預估'],['note-status','票據票況']
 ];
-const operationsReportSummaryLabels={row_count:'明細筆數',supplier_count:'廠商數',purchase_order_count:'採購單數',pending_quantity:'待進料量',pending_amount:'待進料金額',overdue_quantity:'逾期待進料量',overdue_order_count:'逾期採購單數',closed_with_remaining_count:'結案仍有未交筆數',item_warehouse_count:'品號／庫別數',current_quantity:'目前庫存量',current_amount:'目前庫存金額',item_count:'品號數',quote_count:'報價單數',order_count:'訂單數',shipment_count:'銷貨單數',unconverted_requisition_count:'未轉採購請購',unconverted_quote_count:'未轉訂單報價',open_row_count:'未交／未結案筆數',remaining_quantity:'剩餘數量',remaining_amount:'剩餘金額',ar_balance:'應收餘額',ap_balance:'應付餘額',overdue_balance:'逾期餘額',overdue_count:'逾期筆數',unsettled_count:'未兌現／未付款筆數',unsettled_amount:'未兌現／未付款金額',event_count:'資金事件筆數',expected_in:'預計流入',expected_out:'預計流出',actual_in:'實際流入',actual_out:'實際流出',target_table:'標準製令表',legacy_source_row_count:'原始製令資料筆數'};
+const operationsReportSummaryLabels={row_count:'明細筆數',matched_row_count:'符合條件筆數',supplier_count:'廠商數',customer_count:'客戶數',salesperson_count:'業務員數',salesperson_unassigned_count:'未指定業務員筆數',source_key_count:'來源鍵數',purchase_order_count:'採購單數',pending_quantity:'待進料量',pending_amount:'待進料金額',overdue_quantity:'逾期待進料量',overdue_order_count:'逾期採購單數',closed_with_remaining_count:'結案仍有未交筆數',item_warehouse_count:'品號／庫別數',current_quantity:'目前庫存量',current_amount:'目前庫存金額',item_count:'品號數',quote_count:'報價單數',order_count:'訂單數',shipment_count:'銷貨單數',unconverted_requisition_count:'未轉採購請購',unconverted_quote_count:'未轉訂單報價',open_row_count:'未交／未結案筆數',remaining_quantity:'剩餘數量',remaining_amount:'剩餘金額',original_amount:'原始金額',adjustment_amount:'調整金額',settled_amount:'已沖金額',balance_amount:'剩餘金額',base_balance_amount:'本位剩餘金額',settled_count:'已結清筆數',invoice_issue_count:'發票異常筆數',uninvoiced_count:'未開票筆數',relation_count:'關係筆數',active_relation_count:'有效關係筆數',overdue_balance:'逾期餘額',overdue_count:'逾期筆數',unsettled_count:'未兌現／未付款筆數',unsettled_amount:'未兌現／未付款金額',event_count:'資金事件筆數',expected_in:'預計流入',expected_out:'預計流出',actual_in:'實際流入',actual_out:'實際流出',target_table:'標準製令表',legacy_source_row_count:'原始製令資料筆數'};
 function operationsReportValue(value,key){
   if(value===null||value===undefined||value==='')return '—';
   if(['overdue','closed_with_remaining','unclosed','is_unsettled'].includes(key))return Number(value)?'是':'否';
@@ -2024,7 +2024,8 @@ function renderArchitectureScreen(){
     ['N17','採購管理水管圖／SHEET排序與節點連結','已完成並收納於本區：依《iSM-採購管理系統》系統主流程圖與功能圖重排 PUR 分頁，主線為單據性質／供應商前置→請購→採購→到貨／進貨→驗收→進貨確認／庫存過帳→計價→應付／付款；採購變更、驗退件退回、採購退貨、跟催、未交與進貨明細以支線呈現。每個現有節點可依登入權限導向對應 SHEET；文件要求但目前沒有獨立 SHEET 的品號／廠商特價、管理維護與專用報表群，已明確標示為紅色占位並列入下一階段建議，未自行新增資料表。','done'],
     ['N18','庫存管理水管圖／SHEET排序與節點連結','已完成並收納於本區：依《iSM-庫存管理系統》將現有 INV SHEET 依文件順序重排，主線呈現品號／單據性質前置→調整／轉撥／異動建立→異動明細維護→月底處理→庫存管理報表；庫存開帳、驗收／過帳、完整可用量、異動台帳、反過帳／更正，以及暫出／暫入、盤點與銷售／採購聯動列為支線。每個現有節點可依登入權限導向對應 SHEET；文件要求但目前沒有獨立 SHEET 的批號管理、月底成本計價／存貨結轉與專用報表群，已明確標示為紅色占位並列入下一階段建議，未自行新增資料表。','done'],
     ['N19','應收管理水管圖／SHEET排序與節點連結','已完成並收納於本區：依《iSM-應收管理系統》主系統架構圖與目錄重排 ACR 應收分頁，正式名稱採會計科目設定作業、單據性質設定作業、客戶資料建立作業、結帳單自動結帳作業、結帳單建立作業、收款單建立作業；銷貨／銷退、應收帳款／立帳、待抵／退款、票據、銀行、分錄與總帳明確標示跨模組承接。文件報表群、單據清除、月統計重計與月底結轉以共用承接／占位頁呈現，所有節點可點選導向目前 SHEET；新落差已移入「下一階段開發建議」，ACR-PIPE 不再重複列於已確認待辦。','done'],
-    ['AR-G01','應收：結帳單自動結帳與建立作業共用承接','已完成並收納於本區：依使用者確認維持共用承接，不拆兩套資料表或資料流程。兩個文件節點保留各自名稱與水管圖導向；共用同一來源選取、公司別單別規則、直接／自動／手動產生方式、結帳日規則、核准 API、發票／多幣別欄位與目標 ERP 來源鍵，僅以作業模式及結帳日條件區分。','done'],
+  ['AR-G01','應收：結帳單自動結帳與建立作業共用承接','已完成並收納於本區：依使用者確認維持共用承接，不拆兩套資料表或資料流程。兩個文件節點保留各自名稱與水管圖導向；共用同一來源選取、公司別單別規則、直接／自動／手動產生方式、結帳日規則、核准 API、發票／多幣別欄位與目標 ERP 來源鍵，僅以作業模式及結帳日條件區分。','done'],
+  ['AR-G02','應收：報表群集中承接與維度補強','已完成並收納於本區：確認採用單一「應收帳款管理報表（共用報表中心承接）」SHEET，保留文件列出的 13 個報表名稱並可在中心內逐項切換；以既有 finance_open_items、finance_vouchers、finance_voucher_sources、sales_documents、收款沖銷與客戶兼廠商關係資料組成唯讀查詢，不新增資料表。已補目前公司／來源、日期起訖／截至日、客戶、業務員、發票號碼／狀態、來源種類／單別／單號／來源鍵、幣別、原幣／本位幣、已沖／剩餘、逾期與帳齡等維度；業務員與發票資料缺漏會明確列為差異，不以猜測補值。','done'],
     ['N20','應付管理水管圖／SHEET排序與節點連結','已完成並收納於本區：依《iSM-應付管理系統》與財務演練文件建立獨立 ACP 水管圖，正式主線為進貨／退貨→應付立帳→應付憑單建立／合併計價→付款單建立／沖銷→待付／票據；計價／付款量、費用、驗退件退回、暫入歸還、銀行與會計列為支線，所有節點可開啟現有 SHEET 並固定目前登入公司別。文件另列的自動結帳、自動付款與專用報表仍以橘色共用承接標示，已移入下一階段開發建議，不與本次水管圖完成項目混淆。','done'],
     ['N21','銀行／票據資金水管圖／SHEET排序與節點連結','已完成並收納於本區：建立獨立資金水管圖，主線為存提款→應收／應付票據託收／兌現／退票／註銷→逐筆對帳→銀行／票據餘額→資金／票據報表；前置帳戶、幣別、期初與權責規則，以及管帳／管錢／對帳分工、事件歷程與異常稽核列為支線。每個節點可依登入權限導向對應 SHEET，資金分頁已依資金主流程排序。','done'],
     ['N22','會計總帳水管圖／SHEET排序與節點連結','已完成並收納於本區：依《iSM-會計總帳管理系統》主架構重排為中央「預算→會計傳票建立→傳票過帳→月底結轉→指定關帳→帳務管理報表」，左側接自動分錄／票據資金／固定資產，右側接立沖帳／利潤中心；每個節點可依登入權限導向對應 SHEET，ACT 分頁已依總帳流程排序。預算、固定資產、利潤中心的核心作業已完成並移至四個獨立財務模組，尚餘的 iSM 完整規則保留在下一階段開發建議。','done'],
@@ -2037,7 +2038,6 @@ function renderArchitectureScreen(){
     ['SAL-G02-R1','SAL-G02 後續：單據清除的受控替代流程','管理維護與四個只讀查詢已完成；文件仍列單據清除，但目前依安全規則維持關閉。後續若要開放，需先定義作廢／沖回／封存替代方案、下游關聯、期間、核准、權限與清除前稽核，不直接刪除歷史資料。','planned'],
     ['SAL-G03-R1','SAL-G03 後續：特價產生與正式報表版面','計價資料明細已可查目標計價版本、級距與事件；文件另列客戶商品特價產生、商品價格檢查及正式列印格式，尚未在既有資料結構中形成獨立作業。後續先確認 COPMB／COPMC 對照與欄位，再補正式版面，不新增資料表。','partial'],
     ['SAL-G04-R1','SAL-G04 後續：文件專用報表剩餘欄位與版型','20 筆回歸與報表中心核心承接已完成；訂單利潤完整成本、客戶訂單 F/O、訂金結帳狀況、正式 PDF／列印版、正式銷退原因代碼，以及部分 iSM 專用欄位仍是文件落差。製造／成本與需新增結構的項目，先確認既有欄位與取得同意後再做。','partial'],
-    ['AR-G02','應收：報表群逐一拆分與維度補強','文件列應收帳款對帳單、客戶／業務員帳款明細與帳齡、分戶帳、銷貨發票差異、逾期、未結案、客戶廠商關係及電子發票憑證列印等報表；目前由共用報表中心、應收查詢與流程稽核承接，尚未形成同名獨立 SHEET。先確認集中報表中心或逐張拆分，再補業務員、發票與來源鍵維度。','partial'],
     ['AR-G03','應收：單據清除、月統計重計與月底結轉','文件列「單據清除作業」、「應收帳款月統計資料重計作業」及「應收帳款月底結轉作業」；目前不開放直接刪除，月統計與結轉由共用報表／會計期間流程承接，尚需確認受控更正、快照、子帳與總帳核對規則。','planned'],
     ['G01-R1','G01 後續：會計系統參數完整規則','G01 目標端核心維護／核准已完成；仍需依《iSM-會計總帳管理系統》逐項對照完整參數群、參數互斥／必填規則、單據性質取值與跨模組生效攔截，確認既有目標欄位後再補強。','partial'],
     ['G02-R1','G02 後續：科目樹與分錄性質完整對照','G02 目標端科目版本與基本階層已完成；仍需依公司別補完整科目樹、分錄性質／單據性質對應、科目停用影響分析、立沖科目規則與權限稽核，不混用 SH／SC。','partial'],
@@ -2103,24 +2103,37 @@ function renderAdvancesOffset(){
   crossForm.onsubmit=async event=>{event.preventDefault();try{const data=Object.fromEntries(new FormData(crossForm));await postJson('/api/finance-workflow/cross-offsets',data);toast('已完成對沖並產生分錄底稿');crossForm.reset();crossForm.elements.offset_date.value=today;crossForm.elements.currency_code.value='TWD';syncCross();load();}catch(e){toast(e.message,true);}};
   load();
 }
+let receivableReportRequestSeq=0;
 function renderReceivableReportHub(){
-  const links=[
-    ['應收帳款對帳單','依客戶／日期／單別核對應收與結帳來源','operations-reports'],
-    ['客戶帳款明細表','目前由共用配銷／財務報表中心承接','operations-reports'],
-    ['客戶帳齡分析表','依截至日呈現未收、逾期與帳齡區間','ar-aging'],
-    ['業務員帳款明細表','目前由共用報表中心承接，待補業務員維度','operations-reports'],
-    ['業務員帳齡分析表','目前由共用報表中心承接，待補業務員維度','operations-reports'],
-    ['業務員收款明細表','目前由共用報表中心承接，待補業務員維度','operations-reports'],
-    ['應收帳款分戶帳','由應收帳款／立帳與流程稽核來源承接','ar-open'],
-    ['銷貨發票差異明細表','結帳／發票來源與銷貨來源核對','operations-reports'],
-    ['逾期應收帳款明細表','目前由客戶帳齡與流程稽核承接','ar-aging'],
-    ['應收帳款對帳單總表','目前由共用報表中心承接','operations-reports'],
-    ['未結案應收明細表','目前由客戶帳齡與流程稽核承接','ar-aging'],
-    ['客戶廠商關係明細表','由立沖／預收預付／對沖頁面承接','advances-offset'],
-    ['電子發票憑證列印','由結帳單建立作業的發票欄位與憑證資料承接','ar-source']
+  const end=procurementToday(),start='2000-01-01';
+  const reports=[
+    ['statement','應收帳款對帳單','客戶／日期／來源逐筆核對'],
+    ['customer_detail','客戶帳款明細表','客戶原始、已沖、剩餘與來源鍵'],
+    ['customer_aging','客戶帳齡分析表','截至日未收與帳齡區間'],
+    ['salesperson_detail','業務員帳款明細表','銷貨來源業務員與應收'],
+    ['salesperson_aging','業務員帳齡分析表','業務員截至日帳齡'],
+    ['salesperson_collection','業務員收款明細表','業務員已沖收款與來源'],
+    ['ledger','應收帳款分戶帳','應收立帳、發票、收款與餘額'],
+    ['invoice_difference','銷貨發票差異明細表','銷貨／銷退與發票核對'],
+    ['overdue','逾期應收帳款明細表','截至日逾期且未結'],
+    ['statement_total','應收帳款對帳單總表','客戶／幣別彙總'],
+    ['open','未結案應收明細表','仍有剩餘的應收來源'],
+    ['party_relation','客戶廠商關係明細表','同公司、同來源關係'],
+    ['e_invoice','電子發票憑證列印','結帳憑單發票資料'],
   ];
-  finShell('應收帳款管理報表（共用報表中心承接）',`<div class="desc">以下名稱依《iSM-應收管理系統》報表管理章節逐一列出。現階段沒有為每一張報表另造資料表或 API；先以既有共用報表、應收帳款查詢與流程稽核承接，並保留來源、公司別、日期起訖與截至日條件。點選「開啟承接頁」可進入目前對應 SHEET；尚待拆分的業務員／發票差異維度列入下一階段開發建議。</div><div class="panel"><div class="panel-head">文件報表／目前承接 SHEET 對照</div><div class="panel-body"><div class="table-wrap"><table class="grid"><thead><tr><th>文件定義報表</th><th>目前承接方式</th><th>狀態</th><th>導向</th></tr></thead><tbody>${links.map(([name,note,screen])=>`<tr><td>${esc(name)}</td><td>${esc(note)}</td><td><span class="flow-recommendation-status partial">共用承接／待逐項拆分</span></td><td><button class="btn small" type="button" data-receivable-report-screen="${esc(screen)}">開啟承接頁</button></td></tr>`).join('')}</tbody></table></div></div></div><div class="desc">原始 SH／SC 只讀；報表查詢一律固定目前登入公司上下文，不允許從畫面改查其他公司資料來源。</div>`);
-  document.querySelectorAll('[data-receivable-report-screen]').forEach(button=>button.onclick=()=>navigateToScreen(button.dataset.receivableReportScreen));
+  const reportOptions=reports.map(([key,name])=>`<option value="${key}">${name}</option>`).join('');
+  const reportCards=reports.map(([key,name,note])=>`<button class="receivable-report-card" type="button" data-ar-report-kind="${key}"><strong>${esc(name)}</strong><small>${esc(note)}</small><em>集中中心承接</em></button>`).join('');
+  finShell('應收帳款管理報表（共用報表中心承接）',`<div class="desc">依《iSM-應收管理系統》報表章節保留 13 個正式報表名稱；目前採「一個應收報表中心、報表內逐項切換」的承接方式，不另造同名資料表或孤立 SHEET。查詢資料只來自目前登入公司的目標 ERP，原始 SH／SC 維持唯讀。</div><div class="panel"><div class="panel-head">文件報表群／集中承接</div><div class="panel-body"><div class="receivable-report-catalog">${reportCards}</div></div></div><div class="panel"><div class="panel-head">報表查詢條件</div><div class="panel-body"><form id="receivableReportFilter" class="form"><div class="row c4"><div class="field"><label>報表</label><select name="report_kind">${reportOptions}</select></div><div class="field"><label>公司別／資料來源（固定）</label><input value="${esc(currentCompanyContext?.company_name||currentDatabase)}／${esc(currentDatabase)}" disabled></div>${field('from_date','日期起日','date',`value="${start}" required`)}${field('to_date','日期迄日','date',`value="${end}" required`)}${field('as_of_date','截至日（帳齡／逾期）','date',`value="${end}" required`)}${field('customer_code','客戶代號')} ${field('salesperson_code','業務員代號')} ${field('invoice_no','發票號碼')} ${selectField('invoice_status','發票狀態','<option value="">全部</option><option value="none">未登錄</option><option value="pending">待補登</option><option value="issued">已開立</option><option value="received">已收取</option><option value="voided">已作廢</option><option value="missing">銷貨來源未找到</option>')} ${field('source_key','來源鍵（可輸入片段）')} ${field('document_type','來源單別')} ${field('currency_code','幣別')}</div><button class="btn primary" type="submit">查詢應收報表</button></form></div></div><div id="receivableReportMeta"></div><div id="receivableReportWarnings"></div><div class="panel"><div class="panel-head">報表摘要</div><div class="panel-body" id="receivableReportSummary"><div class="empty-hint">請選擇條件查詢。</div></div></div><div class="panel"><div class="panel-head">明細（依選定報表呈現）</div><div class="panel-body"><div class="table-wrap"><table class="grid receivable-report-grid"><thead id="receivableReportHead"></thead><tbody id="receivableReportRows"></tbody></table></div></div></div>`);
+  const query=()=>{const data=Object.fromEntries(new FormData($('#receivableReportFilter')));return new URLSearchParams({...data,source_database:currentDatabase,limit:'500'}).toString();};
+  const renderPayload=payload=>{
+    const company=payload.company||{},range=payload.range||{},filters=payload.filters||{};
+    $('#receivableReportMeta').innerHTML=`<div class="report-meta"><span>公司／來源：${esc(company.company_id||'')}／${esc(payload.source_database||currentDatabase)}</span><span>目標資料庫：${esc(company.target_database||targetDatabaseLabel())}</span><span>日期：${esc(range.from_date||filters.from_date||'')} ～ ${esc(range.to_date||filters.to_date||'')}</span><span>截至日：${esc(range.as_of_date||filters.as_of_date||'')}</span><span>報表：${esc(payload.requested_report_label||'')}</span><span>集中報表中心／唯讀</span></div>`;
+    const warnings=payload.warnings||[];$('#receivableReportWarnings').innerHTML=warnings.length?`<div class="report-warning"><strong>檢核提醒</strong>${warnings.map(item=>`<div>${esc(item)}</div>`).join('')}</div>`:'';
+    $('#receivableReportSummary').innerHTML=operationsReportSummary(payload.summary||{});
+    const columns=payload.columns||[],rows=payload.rows||[];$('#receivableReportHead').innerHTML=columns.map(column=>`<th>${esc(column.label||column.key)}</th>`).join('');$('#receivableReportRows').innerHTML=rows.map(row=>`<tr>${columns.map(column=>`<td>${operationsReportValue(row[column.key],column.key)}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${Math.max(columns.length,1)}" class="empty-hint">查無符合目前公司、日期與維度條件的資料</td></tr>`;
+  };
+  const load=async()=>{const requestId=++receivableReportRequestSeq;$('#receivableReportWarnings').innerHTML='';$('#receivableReportSummary').innerHTML='<div class="empty-hint">查詢中…</div>';try{const payload=await api(`/api/reports/receivable-center?${query()}`);if(requestId===receivableReportRequestSeq)renderPayload(payload);}catch(error){if(requestId!==receivableReportRequestSeq)return;$('#receivableReportWarnings').innerHTML=`<div class="report-warning error"><strong>載入失敗</strong><div>${esc(error.message)}</div></div>`;$('#receivableReportSummary').innerHTML='';$('#receivableReportHead').innerHTML='';$('#receivableReportRows').innerHTML='';}};
+  $('#receivableReportFilter').onsubmit=event=>{event.preventDefault();load();};document.querySelectorAll('[data-ar-report-kind]').forEach(button=>button.onclick=()=>{$('#receivableReportFilter').elements.report_kind.value=button.dataset.arReportKind;load();});load();
 }
 
 function renderReceivableGapHub(){
@@ -2129,7 +2142,6 @@ function renderReceivableGapHub(){
     ['應收帳款月統計資料重計作業','文件列為月底前置；先與應收帳款管理報表合併承接，確認重算範圍與快照規則','planned','待確認合併方式'],
     ['應收帳款月底結轉作業','先與會計期間／月底結轉管理合併，補應收子帳與總帳期末核對','planned','待確認合併方式'],
     ['結帳單樹狀資訊查詢','先由流程稽核、來源追蹤與結帳單建立作業承接，確認是否需要獨立樹狀查詢 SHEET','partial','共用承接'],
-    ['應收帳款管理報表群','官方 13 張報表先由共用報表中心承接，報表名稱與來源對照已列於報表頁','partial','共用承接']
   ];
   finShell('應收文件落差／合併方案（占位）',`<div class="desc">此頁只記錄《iSM-應收管理系統》有列出、但目前沒有同名獨立 SHEET 的功能。依既定規則先提出合併方式，不刪除來源、不新增資料表；確認後再列入下一階段開發順序。</div><div class="panel"><div class="panel-head">文件作業與目前承接方案</div><div class="panel-body"><div class="table-wrap"><table class="grid"><thead><tr><th>文件作業</th><th>目前差異／建議承接</th><th>狀態</th><th>目前決策</th></tr></thead><tbody>${gaps.map(([name,note,status,decision])=>`<tr><td>${esc(name)}</td><td>${esc(note)}</td><td><span class="flow-recommendation-status ${status}">${status==='planned'?'尚未完成':'部分完成'}</span></td><td>${esc(decision)}</td></tr>`).join('')}</tbody></table></div></div></div><div class="desc">本頁不執行清除、重算或結轉，只保留文件對照與待確認方案。</div>`);
 }

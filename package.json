@@ -31,6 +31,7 @@
     "verify:sales-customer-credit": "node scripts/verify-sales-customer-credit.mjs",
     "verify:sales-phase2": "node scripts/verify-sales-phase2.mjs",
     "verify:sales-g02-g04": "node scripts/verify-sales-g02-g04.mjs",
+    "verify:receivable-reports": "node scripts/verify-receivable-reports.mjs",
     "simulate:sh:august": "node scripts/simulate-sh-august-financials.mjs",
     "backup:github": "powershell -ExecutionPolicy Bypass -File scripts/backup-github.ps1"
   },
