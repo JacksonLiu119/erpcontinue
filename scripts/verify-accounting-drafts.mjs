@@ -109,7 +109,7 @@ try {
   const clearingLine = detail.lines.find(row => Number(row.required_clearing) === 1);
   assert(clearingLine && clearingLine.clearing_type === 'AR' && String(clearingLine.clearing_ref).includes(DOCS[0]), '立沖必填欄位未帶入來源', clearingLine);
 
-  const sourceRows = await api(`/accounting/sources?source_database=${SOURCE}&limit=100`);
+  const sourceRows = await api(`/accounting/sources?source_database=${SOURCE}&date_from=${DATE}&date_to=${DATE}&limit=100`);
   assert(Number(sourceRows.find(row => Number(row.id) === openIds[2])?.remaining_amount) === 30, '來源清單未呈現目前可立帳餘額', sourceRows.find(row => Number(row.id) === openIds[2]));
   assert(!sourceRows.some(row => openIds.slice(0, 2).includes(Number(row.id))), '已鎖定來源仍出現在待拋轉清單');
   await expectError(() => api('/accounting/journals/transfer', 'POST', { source_database: SOURCE, open_item_id: openIds[0], memo: MARKER }), '舊直接拋轉路徑繞過來源鎖定');
@@ -129,13 +129,13 @@ try {
   const [[journalTotals]] = await target.query(`SELECT COUNT(*) line_count,COALESCE(SUM(debit_amount),0) debit_total,COALESCE(SUM(credit_amount),0) credit_total
     FROM accounting_journal_lines WHERE journal_id=?`, [posted.journal_id]);
   assert(Number(journalTotals.line_count) === 2 && Math.abs(Number(journalTotals.debit_total) - Number(journalTotals.credit_total)) < 0.000001, '正式傳票借貸不平衡', journalTotals);
-  const afterPostSources = await api(`/accounting/sources?source_database=${SOURCE}&limit=100`);
+  const afterPostSources = await api(`/accounting/sources?source_database=${SOURCE}&date_from=${DATE}&date_to=${DATE}&limit=100`);
   assert(!afterPostSources.some(row => openIds.slice(0, 2).includes(Number(row.id))), '已拋轉來源重新出現在清單');
 
   const restored = await api('/accounting/drafts/generate', 'POST', { source_database: SOURCE, source_refs: [openIds[2]], draft_date: DATE, memo: MARKER });
   const restoredResult = await api(`/accounting/drafts/${restored.id}/restore`, 'POST', { source_database: SOURCE, reason: MARKER });
   assert(restoredResult.status === 'restored' && restoredResult.source_locked === false, '底稿還原未釋放來源鎖定', restoredResult);
-  const afterRestoreSources = await api(`/accounting/sources?source_database=${SOURCE}&limit=100`);
+  const afterRestoreSources = await api(`/accounting/sources?source_database=${SOURCE}&date_from=${DATE}&date_to=${DATE}&limit=100`);
   assert(afterRestoreSources.some(row => Number(row.id) === openIds[2]), '還原後來源未回到可產生底稿清單');
   await expectError(() => api(`/accounting/drafts/${generated.id}/restore`, 'POST', { source_database: SOURCE, reason: MARKER }), '已拋轉底稿還原');
 
