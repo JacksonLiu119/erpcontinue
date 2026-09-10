@@ -15,8 +15,57 @@ async function authenticatedApi(path, options = {}) {
   return body.data;
 }
 
-function showLogin(message = '') { $('#loginGate').hidden = false; $('#loginStatus').textContent = message; }
-function hideLogin() { $('#loginGate').hidden = true; $('#loginStatus').textContent = ''; }
+function setLogoutControlVisible(visible) {
+  const button = $('#logoutButton');
+  if (button) button.hidden = !visible;
+}
+
+function showLogin(message = '') {
+  $('#loginGate').hidden = false;
+  $('#loginStatus').textContent = message;
+  setLogoutControlVisible(false);
+}
+
+function hideLogin() {
+  $('#loginGate').hidden = true;
+  $('#loginStatus').textContent = '';
+  setLogoutControlVisible(true);
+}
+
+async function logoutCurrentUser() {
+  const token = authToken;
+  const button = $('#logoutButton');
+  if (button) button.disabled = true;
+  try {
+    if (token) {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+    }
+  } catch (_) {
+    // 伺服器無回應時仍清除本機工作階段，避免卡在舊帳號。
+  }
+  authToken = '';
+  currentUser = null;
+  localStorage.removeItem('erp-auth-token');
+  localStorage.removeItem('erp-auth-user');
+  localStorage.removeItem('erp-active-role-id');
+  localStorage.removeItem('erp-source-database');
+  localStorage.removeItem('erp-company-context');
+  localStorage.removeItem('erp-department-code');
+  currentDatabase = 'SH';
+  currentDepartmentCode = '';
+  currentCompanyContextKey = '';
+  currentCompanyContext = null;
+  companyContexts = [];
+  const userLabel = $('#currentUserLabel');
+  const userAvatar = $('#currentUserAvatar');
+  if (userLabel) userLabel.textContent = '尚未登入';
+  if (userAvatar) userAvatar.textContent = '--';
+  if (button) button.disabled = false;
+  showLogin('已登出，請重新登入。');
+}
 
 async function beginAuthenticatedApp() {
   try {
@@ -96,5 +145,7 @@ $('#loginForm').onsubmit = async event => {
     await beginAuthenticatedApp();
   } catch (error) { $('#loginStatus').textContent = error.message; }
 };
+
+$('#logoutButton')?.addEventListener('click', logoutCurrentUser);
 
 if (authToken) beginAuthenticatedApp(); else showLogin();
