@@ -16,7 +16,7 @@ const featureAliases = {
   'inventory-batch':'inventory-transactions', 'inventory-month-close':'inventory-transactions', 'inventory-special-reports':'operations-reports',
   'purchase-basic-gaps':'procurement-document-types', 'purchase-maintenance-gaps':'purchase-progress', 'purchase-report-gaps':'purchase-progress',
   'receipt-pricing':'receipt-entry',
-  'finance-flow':'finance-workflow', 'ar-source':'finance-workflow', 'ar-open':'finance-workflow', 'ar-credits':'finance-workflow', 'ar-receipt':'finance-workflow',
+  'finance-flow':'finance-workflow', 'accounting-auto-pipe':'accounting-auto-rules', 'ar-source':'finance-workflow', 'ar-open':'finance-workflow', 'ar-credits':'finance-workflow', 'ar-receipt':'finance-workflow',
   'ar-notes':'finance-workflow', 'ar-aging':'finance-workflow', 'ap-source':'finance-workflow',
   'ap-open':'finance-workflow', 'ap-payment':'finance-workflow', 'ap-notes':'finance-workflow', 'advances-offset':'finance-workflow',
   'ap-aging':'finance-workflow', 'bank-ledger':'finance-reconcile', 'general-ledger':'accounting-general-ledger', 'accounting-financial-preview':'accounting-general-ledger', 'accounting-financial-statements':'accounting-general-ledger', 'accounting-budget':'accounting-general-ledger', 'accounting-fixed-assets':'accounting-general-ledger', 'accounting-profit-center':'accounting-general-ledger', 'accounting-system-params':'accounting-general-ledger', 'accounting-accounts':'accounting-general-ledger', 'accounting-g01':'accounting-general-ledger', 'accounting-g02':'accounting-general-ledger', 'accounting-g03':'accounting-general-ledger', 'accounting-g04':'accounting-general-ledger', 'accounting-g05':'accounting-general-ledger', 'operations-reports':'operations-reports'
@@ -94,6 +94,13 @@ function canViewFeature(screen) {
       'accounting-opening-balances','accounting-auto-rules',
       'accounting-system-params','accounting-accounts',
       'operations-health','operations-reports'
+    ].includes(row.feature_code) && Number(row.can_view));
+  }
+  if (screen === 'accounting-auto-pipe') {
+    return accessState.permissions.some(row => [
+      'accounting-auto-rules','accounting-drafts','accounting-general-ledger',
+      'finance-workflow','finance-bookkeeping','operations-reports','operations-health',
+      'sales-pipe','purchase-pipe','inventory-pipe'
     ].includes(row.feature_code) && Number(row.can_view));
   }
   const code = featureAliases[screen] || screen;
