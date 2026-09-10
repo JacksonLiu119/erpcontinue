@@ -6648,6 +6648,43 @@ function registerFinanceWorkflowRoutes(app){
   app.post('/api/finance-workflow/banks/reconciliations/:id/complete',async(req,res,next)=>{try{await ensureFinance();const id=Number(req.params.id),out=await tx(async conn=>{const db=String(req.body?.source_database||req.query.source_database||'SH').toUpperCase(),c=ctx(db);const[[r]]=await conn.query("SELECT * FROM finance_bank_reconciliations WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND status='draft' FOR UPDATE",[id,c.tenant_id,c.company_id,c.source_system,db]);if(!r)throw badRequest('找不到目前公司的待完成對帳單');await assertOpenAccountingPeriod(conn,c,r.reconciliation_date);const[items]=await conn.query('SELECT i.id,i.bank_transaction_id,i.matched_amount,i.status AS item_status,t.transaction_no,t.status AS transaction_status,t.reconciled FROM finance_bank_reconciliation_items i JOIN finance_bank_transactions t ON t.id=i.bank_transaction_id WHERE i.reconciliation_id=? FOR UPDATE',[id]);if(!items.length)throw badRequest('完成對帳前至少要選擇一筆交易');for(const item of items){if(item.transaction_status!=='posted')throw badRequest(`交易 ${item.transaction_no} 尚未過帳，不能對帳`);if(item.item_status==='matched'&&Number(item.matched_amount)>0&&Number(item.reconciled))continue;const[[used]]=await conn.query(`SELECT r.id FROM finance_bank_reconciliation_items i JOIN finance_bank_reconciliations r ON r.id=i.reconciliation_id WHERE i.bank_transaction_id=? AND r.status IN ('completed','difference') AND r.id<>? LIMIT 1`,[item.bank_transaction_id,id]);if(used)throw badRequest(`交易 ${item.transaction_no} 已在其他對帳單完成`);}const matchedIds=items.filter(item=>item.item_status==='matched'&&Number(item.matched_amount)>0).map(item=>item.bank_transaction_id);if(matchedIds.length)await conn.query(`UPDATE finance_bank_transactions SET reconciled=1,reconciled_at=NOW() WHERE id IN (${matchedIds.map(()=>'?').join(',')}) AND reconciled=0`,matchedIds);const status=Math.abs(Number(r.difference_amount))<0.000001?'completed':'difference';await conn.query('UPDATE finance_bank_reconciliations SET status=?,completed_by=?,completed_at=NOW() WHERE id=?',[status,req.auth.id,id]);return{id,status,matched_count:matchedIds.length,difference_amount:Number(r.difference_amount)};});res.json({ok:true,data:out});}catch(e){next(e);}});
 }
 
+// 《iSM-自動分錄系統》AJSI01 的設定以既有 accounting_system_parameters 保存，
+// 不另建表；AJSI02～AJSI24 的文件節點則用這份目錄對照既有單據／分錄規則。
+// 這些是目標 ERP 的預設值，會依目前登入的公司／資料來源建立，絕不寫入 SH／SC 原始庫。
+const autoJournalSettingDefaults = [
+  { code:'AUT_AJSI01_ACCOUNTING_CLASSIFICATION', name:'會計分類方式', value:'1', dataType:'text', note:'1～4；依文件控制庫存／銷售／銷退科目取值' },
+  { code:'AUT_AJSI01_POSTING_METHOD', name:'拋轉方式', value:'draft_only', dataType:'text', note:'draft_only＝拋轉自動分錄底稿；draft_and_voucher＝底稿及會計傳票' },
+  { code:'AUT_AJSI01_SAME_ACCOUNT_AGGREGATION', name:'同底稿科目彙總', value:'1', dataType:'boolean', note:'同一底稿的相同科目是否彙總成一筆' },
+  { code:'AUT_AJSI01_DRAFT_OPENING_METHOD', name:'底稿產生方式', value:'aggregate', dataType:'text', note:'aggregate＝彙總；per_document＝逐張' },
+  { code:'AUT_AJSI01_DEPARTMENT_CONTROL', name:'部門控制', value:'0', dataType:'boolean', note:'啟用後分錄來源需帶入目前授權部門' },
+  { code:'AUT_AJSI01_DEBIT_SUMMARY_SOURCE', name:'借方摘要來源', value:'document_no', dataType:'text', note:'單別單號／異動日期／備註／部門名稱' },
+  { code:'AUT_AJSI01_CREDIT_SUMMARY_SOURCE', name:'貸方摘要來源', value:'document_no', dataType:'text', note:'單別單號／異動日期／備註／部門名稱' },
+  { code:'AUT_AJSI01_TRANSFER_JOURNAL_TYPE', name:'轉帳傳票單別', value:'91', dataType:'text', note:'文件預設 91 轉帳傳票' },
+  { code:'AUT_AJSI01_TRANSFER_JOURNAL_NATURE', name:'轉帳傳票性質', value:'general', dataType:'text', note:'文件預設一般' }
+];
+
+const autoJournalNatureCatalog = [
+  ['AJSI02','分錄性質設定-庫存異動單','INV','inventory_movement','main','庫存異動單據'],
+  ['AJSI03','分錄性質設定-銷貨單','AR','shipment','main','銷貨單'],
+  ['AJSI04','分錄性質設定-銷退單','AR','sales_return','main','銷退單'],
+  ['AJSI05','分錄性質設定-銷貨成本','AR','shipment','cost','銷貨成本'],
+  ['AJSI06','分錄性質設定-銷退成本','AR','sales_return','cost','銷退成本'],
+  ['AJSI07','分錄性質設定-結帳單','AR','settlement','main','結帳單'],
+  ['AJSI08','分錄性質設定-收款單','AR','settlement','main','收款單'],
+  ['AJSI09','分錄性質設定-進貨單','AP','purchase_receipt','main','進貨單'],
+  ['AJSI10','分錄性質設定-退貨單','AP','purchase_return','main','退貨單'],
+  ['AJSI11','分錄性質設定-應付憑單','AP','purchase_receipt','main','應付憑單'],
+  ['AJSI12','分錄性質設定-付款單','AP','settlement','main','付款單'],
+  ['AJSI13','分錄性質設定-領料單','MOC','material_issue','main','領料單'],
+  ['AJSI14','分錄性質設定-退料單','MOC','material_return','main','退料單'],
+  ['AJSI15','分錄性質設定-生產入庫單','MOC','production_receipt','main','生產入庫單'],
+  ['AJSI16','分錄性質設定-託外進貨費用','MOC','outsourcing_receipt','expense','託外進貨費用'],
+  ['AJSI17','分錄性質設定-託外進貨成本','MOC','outsourcing_receipt','cost','託外進貨成本'],
+  ['AJSI18','分錄性質設定-託外退費用','MOC','outsourcing_return','expense','託外退費用'],
+  ['AJSI19','分錄性質設定-託外退成本','MOC','outsourcing_return','cost','託外退成本'],
+  ['AJSI24','分錄性質設定-成本開帳/調整單','INV','cost_opening_adjustment','main','成本開帳／調整單']
+].map(([code,label,moduleCode,documentKind,entryRole,sourceLabel]) => ({ code,label,module_code:moduleCode,document_kind:documentKind,entry_role:entryRole,source_label:sourceLabel }));
+
 const defaultAccountingAutoRules = [
   ['AR-SHIPMENT-MAIN','AR','shipment','*','main','1101','應收帳款','4101','銷貨收入','銷貨立帳'],
   ['AR-RETURN-MAIN','AR','sales_return','*','main','4101','銷貨收入','1101','應收帳款','銷退沖減應收'],
@@ -6722,6 +6759,7 @@ function registerAccountingWorkflowRoutes(app) {
     if (!source) throw badRequest(`找不到資料來源：${db}`);
     return { tenant_id:source.tenant_id||'default', company_id:source.company_id||db, source_system:source.source_system||source.adapter_code||'ism-sh', source_database:db };
   };
+  const contextParams = c => [c.tenant_id,c.company_id,c.source_system,c.source_database];
   async function seedAccounts(conn, row) {
     for (const [code,name,type] of accounts) await conn.query(`INSERT IGNORE INTO accounting_accounts
       (tenant_id,company_id,source_system,account_code,account_name,account_type) VALUES(?,?,?,?,?,?)`,
@@ -6993,14 +7031,101 @@ function registerAccountingWorkflowRoutes(app) {
     }
     return result;
   }
-  async function autoDraftLines(conn, context, items) {
+  const autoJournalSettingsByCode = new Map(autoJournalSettingDefaults.map(row => [row.code,row]));
+  const autoJournalSettingAliases = {
+    accounting_classification:'AUT_AJSI01_ACCOUNTING_CLASSIFICATION',
+    posting_method:'AUT_AJSI01_POSTING_METHOD',
+    same_account_aggregation:'AUT_AJSI01_SAME_ACCOUNT_AGGREGATION',
+    aggregate_accounts:'AUT_AJSI01_SAME_ACCOUNT_AGGREGATION',
+    draft_opening_method:'AUT_AJSI01_DRAFT_OPENING_METHOD',
+    department_control:'AUT_AJSI01_DEPARTMENT_CONTROL',
+    debit_summary_source:'AUT_AJSI01_DEBIT_SUMMARY_SOURCE',
+    credit_summary_source:'AUT_AJSI01_CREDIT_SUMMARY_SOURCE',
+    transfer_journal_type:'AUT_AJSI01_TRANSFER_JOURNAL_TYPE',
+    transfer_journal_nature:'AUT_AJSI01_TRANSFER_JOURNAL_NATURE'
+  };
+  async function autoJournalSettingEvent(conn,c,id,kind,before,after,reason,userId) {
+    await conn.query(`INSERT INTO accounting_system_parameter_events
+      (parameter_id,tenant_id,company_id,source_system,source_database,event_kind,before_json,after_json,reason,user_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?)`, [id,...contextParams(c),kind,before ? JSON.stringify(before) : null,after ? JSON.stringify(after) : null,trim(reason)||null,userId||null]);
+  }
+  async function ensureAutoJournalSettings(conn,c,userId=null) {
+    for (const setting of autoJournalSettingDefaults) {
+      const [[existing]] = await conn.query(`SELECT id FROM accounting_system_parameters
+        WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND parameter_code=? LIMIT 1`,
+        [...contextParams(c),setting.code]);
+      if (existing) continue;
+      const [result] = await conn.query(`INSERT INTO accounting_system_parameters
+        (tenant_id,company_id,source_system,source_database,parameter_code,parameter_name,parameter_value,data_type,
+         version_no,status,note,created_by,approved_by,approved_at)
+        VALUES(?,?,?,?,?,?,?,?,1,'approved',?,?,?,NOW())`,
+        [...contextParams(c),setting.code,setting.name,setting.value,setting.dataType,setting.note,userId||null,userId||null]);
+      await autoJournalSettingEvent(conn,c,result.insertId,'seeded',null,{...setting,version_no:1,status:'approved'},'建立 AJSI01 目標端預設參數',userId);
+    }
+  }
+  async function readAutoJournalSettings(conn,c,userId=null) {
+    await ensureAutoJournalSettings(conn,c,userId);
+    const [rows] = await conn.query(`SELECT * FROM accounting_system_parameters
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+        AND parameter_code LIKE 'AUT_AJSI01_%' AND status='approved'
+      ORDER BY parameter_code,version_no DESC`, contextParams(c));
+    const latest = new Map();
+    for (const row of rows) if (!latest.has(row.parameter_code)) latest.set(row.parameter_code,row);
+    const get = (code,fallback) => String(latest.get(code)?.parameter_value ?? fallback);
+    const classification=get('AUT_AJSI01_ACCOUNTING_CLASSIFICATION','1');
+    const postingMethod=get('AUT_AJSI01_POSTING_METHOD','draft_only');
+    const draftOpeningMethod=get('AUT_AJSI01_DRAFT_OPENING_METHOD','aggregate');
+    if(!['1','2','3','4'].includes(classification))throw badRequest('AJSI01 會計分類方式只能是 1～4');
+    if(!['draft_only','draft_and_voucher'].includes(postingMethod))throw badRequest('AJSI01 拋轉方式設定不正確');
+    if(!['aggregate','per_document'].includes(draftOpeningMethod))throw badRequest('AJSI01 底稿產生方式只能是彙總或逐張');
+    const booleanValue=code=>get(code,'0')==='1';
+    return {
+      rows:[...latest.values()],
+      accounting_classification:classification,
+      posting_method:postingMethod,
+      aggregate_accounts:booleanValue('AUT_AJSI01_SAME_ACCOUNT_AGGREGATION'),
+      draft_opening_method:draftOpeningMethod,
+      department_control:booleanValue('AUT_AJSI01_DEPARTMENT_CONTROL'),
+      debit_summary_source:get('AUT_AJSI01_DEBIT_SUMMARY_SOURCE','document_no'),
+      credit_summary_source:get('AUT_AJSI01_CREDIT_SUMMARY_SOURCE','document_no'),
+      transfer_journal_type:get('AUT_AJSI01_TRANSFER_JOURNAL_TYPE','91'),
+      transfer_journal_nature:get('AUT_AJSI01_TRANSFER_JOURNAL_NATURE','general')
+    };
+  }
+  function autoJournalSettingInput(body={}) {
+    const input=body.settings && typeof body.settings==='object' && !Array.isArray(body.settings) ? body.settings : body;
+    const changes=[];
+    for(const [rawKey,rawValue] of Object.entries(input||{})){
+      const key=autoJournalSettingsByCode.has(rawKey) ? rawKey : autoJournalSettingAliases[String(rawKey).toLowerCase()];
+      const definition=key ? autoJournalSettingsByCode.get(key) : null;
+      if(!definition)continue;
+      let value=String(rawValue ?? '').trim();
+      if(key==='AUT_AJSI01_ACCOUNTING_CLASSIFICATION'&&!['1','2','3','4'].includes(value))throw badRequest('會計分類方式只能是 1～4');
+      if(key==='AUT_AJSI01_POSTING_METHOD'&&!['draft_only','draft_and_voucher'].includes(value))throw badRequest('拋轉方式只能是底稿或底稿及會計傳票');
+      if(key==='AUT_AJSI01_SAME_ACCOUNT_AGGREGATION'||key==='AUT_AJSI01_DEPARTMENT_CONTROL'){
+        if(!['0','1','true','false'].includes(value.toLowerCase()))throw badRequest(`${definition.name}只能是 0／1`);
+        value=['1','true'].includes(value.toLowerCase())?'1':'0';
+      }
+      if(key==='AUT_AJSI01_DRAFT_OPENING_METHOD'&&!['aggregate','per_document'].includes(value))throw badRequest('底稿產生方式只能是 aggregate 或 per_document');
+      if(key.includes('SUMMARY_SOURCE')&&!['document_no','document_date','memo','department_name'].includes(value))throw badRequest('摘要來源設定不正確');
+      if(!value)throw badRequest(`${definition.name}不可空白`);
+      changes.push({...definition,value});
+    }
+    if(!changes.length)throw badRequest('請至少提供一項 AJSI01 設定');
+    return changes;
+  }
+  async function autoDraftLines(conn, context, items, options = {}) {
+    const aggregateAccounts = options.aggregateAccounts !== false;
     const groups = [];
     const costGroups = [];
     const addGroup = (accountType, flowKind, flowType, amount, partyCode, source, entryRole = 'main') => {
       const value = Number(amount);
       if (!Number.isFinite(value) || Math.abs(value) <= 0.000001) return;
       const sign = value < 0 ? 'negative' : 'positive';
-      const key = [entryRole,accountType,flowKind,flowType || '*',sign,partyCode || ''].join('|');
+      const sourceToken = source && !aggregateAccounts
+        ? [source.id || source.source_id || '',source.source_document_id || '',source.source_document_item_id || '',source.document_no || source.source_document_no || ''].join(':')
+        : '';
+      const key = [entryRole,accountType,flowKind,flowType || '*',sign,partyCode || '',sourceToken].join('|');
       const target = entryRole === 'cost' ? costGroups : groups;
       let current = target.find(row => row.key === key);
       if (!current) {
@@ -7052,7 +7177,7 @@ function registerAccountingWorkflowRoutes(app) {
     };
     for (const group of groups) await toLines(group);
     for (const group of costGroups) await toLines(group);
-    return summarizeDraftLines(rawLines);
+    return aggregateAccounts ? summarizeDraftLines(rawLines) : rawLines;
   }
   async function assertDraftSourcesLocked(conn, draft, { forUpdate = true } = {}) {
     const [sources] = await conn.query(`SELECT s.*,f.document_no,f.status source_status,f.account_type,
@@ -7112,10 +7237,10 @@ function registerAccountingWorkflowRoutes(app) {
     const draftNo = await nextWorkflowNumber(conn,'accounting_drafts','draft_no','AD',date);
     const [header] = await conn.query(`INSERT INTO accounting_drafts
       (tenant_id,company_id,source_system,source_database,draft_no,draft_date,source_kind,source_id,source_document_no,account_type,party_code,
-       debit_account_code,debit_account_name,credit_account_code,credit_account_name,amount,status,source_locked,source_locked_at,source_locked_by,created_by)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?)`,
+       debit_account_code,debit_account_name,credit_account_code,credit_account_name,amount,status,source_locked,source_locked_at,source_locked_by,memo,created_by)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,?)`,
       [context.tenant_id,context.company_id,context.source_system,context.source_database,draftNo,date,sourceKind,sourceId,sourceDocumentNo,accountType,partyCode,
-        firstDebit.account_code,firstDebit.account_name,firstCredit.account_code,firstCredit.account_name,debitTotal,sources.length ? 1 : 0,sources.length ? new Date() : null,sources.length ? userId : null,userId]);
+        firstDebit.account_code,firstDebit.account_name,firstCredit.account_code,firstCredit.account_name,debitTotal,sources.length ? 1 : 0,sources.length ? new Date() : null,sources.length ? userId : null,memo || null,userId]);
     for (const line of lines) await conn.query(`INSERT INTO accounting_draft_lines
       (draft_id,line_no,account_code,account_name,debit_amount,credit_amount,party_code,description,required_clearing,clearing_type,clearing_ref)
       VALUES(?,?,?,?,?,?,?,?,?,?,?)`, [header.insertId,line.line_no,line.account_code,line.account_name,line.debit_amount,line.credit_amount,line.party_code,line.description,line.required_clearing,line.clearing_type,line.clearing_ref]);
@@ -7142,6 +7267,135 @@ function registerAccountingWorkflowRoutes(app) {
     await assertDraftClearingBalances(conn,draft,checked.lines);
     return checked;
   }
+  // AUT-G01：AJSI01 參數以既有 G01 版本表保存；新增設定只產生草稿，
+  // 必須透過既有 G01 核准 API 才會成為生效版本。
+  app.get('/api/accounting/auto-settings', async (req,res,next)=>{try{
+    await ensureTargetFinanceWorkflowSchema();
+    const db=requestDatabase(req),c=contextFor(db);
+    const effective=await tx(async conn=>readAutoJournalSettings(conn,c,req.auth?.id||null));
+    const [settings]=await pool.query(`SELECT * FROM accounting_system_parameters
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+        AND parameter_code LIKE 'AUT_AJSI01_%' ORDER BY parameter_code,version_no DESC`,contextParams(c));
+    res.json({ok:true,data:{source_database:db,settings,effective,nature_catalog:autoJournalNatureCatalog}});
+  }catch(e){next(e);}});
+  app.post('/api/accounting/auto-settings', async (req,res,next)=>{try{
+    await ensureTargetFinanceWorkflowSchema();
+    const db=requestDatabase(req),c=contextFor(db),changes=autoJournalSettingInput(req.body||{});
+    const effectiveFrom=req.body?.effective_from?validDate(req.body.effective_from):null;
+    const effectiveTo=req.body?.effective_to?validDate(req.body.effective_to):null;
+    if(effectiveFrom&&effectiveTo&&effectiveFrom>effectiveTo)throw badRequest('AJSI01 生效起日不可晚於迄日');
+    const out=await tx(async conn=>{
+      const created=[];
+      for(const change of changes){
+        const [[version]]=await conn.query(`SELECT COALESCE(MAX(version_no),0) version_no FROM accounting_system_parameters
+          WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND parameter_code=?`,[...contextParams(c),change.code]);
+        const versionNo=Number(version.version_no||0)+1;
+        const [result]=await conn.query(`INSERT INTO accounting_system_parameters
+          (tenant_id,company_id,source_system,source_database,parameter_code,parameter_name,parameter_value,data_type,
+           effective_from,effective_to,version_no,status,note,created_by)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,'draft',?,?)`,[...contextParams(c),change.code,change.name,change.value,change.dataType,effectiveFrom,effectiveTo,versionNo,trim(req.body?.note)||change.note,req.auth.id]);
+        const after={...change,version_no:versionNo,status:'draft',effective_from:effectiveFrom,effective_to:effectiveTo};
+        await autoJournalSettingEvent(conn,c,result.insertId,'create',null,after,trim(req.body?.reason)||'建立 AUT-G01 AJSI01 設定草稿',req.auth.id);
+        created.push({id:result.insertId,...after});
+      }
+      return created;
+    });
+    res.status(201).json({ok:true,data:{source_database:db,status:'draft',settings:out}});
+  }catch(e){if(e.code==='ER_DUP_ENTRY')e=badRequest('AJSI01 設定版本已存在，請重新整理後再試');next(e);}});
+
+  // AUT-G02：AJSR01～AJSR03 共用報表 API。報表只讀目標 ERP，
+  // 以來源帳款、底稿、底稿來源及正式傳票的既有關聯組成，不新增報表表格。
+  app.get('/api/accounting/auto-reports', async (req,res,next)=>{try{
+    await ensureTargetFinanceWorkflowSchema();
+    const db=requestDatabase(req),c=contextFor(db),report=trim(req.query.report||'status').toLowerCase();
+    const from=validDate(req.query.date_from||req.query.from_date||'1900-01-01'),to=validDate(req.query.date_to||req.query.to_date||new Date().toISOString().slice(0,10));
+    if(from>to)throw badRequest('報表日期起日不可晚於迄日');
+    const status=trim(req.query.status),accountType=trim(req.query.account_type).toUpperCase(),limit=Math.min(Math.max(Number(req.query.limit)||500,1),2000);
+    let rows=[];
+    if(report==='draft'||report==='draft_detail'||report==='ajs r01'.replaceAll(' ','')){
+      const params=[...contextParams(c),from,to];let filter='d.tenant_id=? AND d.company_id=? AND d.source_system=? AND d.source_database=? AND d.draft_date BETWEEN ? AND ?';
+      if(status){filter+=' AND d.status=?';params.push(status);}
+      rows=(await pool.query(`SELECT d.id,d.draft_no,d.draft_date,d.source_kind,d.source_id,d.source_document_no,d.account_type,d.party_code,d.status,d.source_locked,d.memo,
+          (SELECT COUNT(*) FROM accounting_draft_lines l WHERE l.draft_id=d.id) line_count,
+          (SELECT COALESCE(SUM(l.debit_amount),0) FROM accounting_draft_lines l WHERE l.draft_id=d.id) debit_total,
+          (SELECT COALESCE(SUM(l.credit_amount),0) FROM accounting_draft_lines l WHERE l.draft_id=d.id) credit_total,
+          (SELECT COUNT(*) FROM accounting_draft_sources s WHERE s.draft_id=d.id) source_count
+        FROM accounting_drafts d
+        WHERE ${filter} ORDER BY d.draft_date DESC,d.id DESC LIMIT ?`,[...params,limit]))[0];
+    }else if(report==='source'||report==='source_document'||report==='ajs r02'.replaceAll(' ','')){
+      const params=[...contextParams(c),from,to];let filter='d.tenant_id=? AND d.company_id=? AND d.source_system=? AND d.source_database=? AND d.draft_date BETWEEN ? AND ?';
+      if(status){filter+=' AND d.status=?';params.push(status);}
+      rows=(await pool.query(`SELECT s.id,s.draft_id,d.draft_no,d.draft_date,d.status draft_status,d.source_locked,
+          s.source_kind,s.source_id,s.source_document_no,s.source_amount,s.locked_amount,
+          f.account_type,f.document_date,f.party_code,f.status source_status,
+          j.journal_no,j.status journal_status
+        FROM accounting_draft_sources s JOIN accounting_drafts d ON d.id=s.draft_id
+        LEFT JOIN finance_open_items f ON f.id=s.source_id AND s.source_kind='finance_open_item'
+        LEFT JOIN accounting_journals j ON j.tenant_id=d.tenant_id AND j.company_id=d.company_id AND j.source_system=d.source_system AND j.source_database=d.source_database AND j.source_kind='accounting_draft' AND j.source_id=d.id
+        WHERE ${filter} ORDER BY d.draft_date DESC,s.id DESC LIMIT ?`,[...params,limit]))[0];
+    }else if(report==='status'||report==='document_status'||report==='ajs r03'.replaceAll(' ','')){
+      const params=[...contextParams(c),from,to];let filter='f.tenant_id=? AND f.company_id=? AND f.source_system=? AND f.source_database=? AND f.document_date BETWEEN ? AND ? AND f.status IN (\'open\',\'partial\')';
+      if(accountType&&['AR','AP'].includes(accountType)){filter+=' AND f.account_type=?';params.push(accountType);}
+      rows=(await pool.query(`SELECT f.id,f.account_type,f.document_no,f.document_date,f.due_date,f.party_code,f.currency_code,f.original_amount,
+          COALESCE(NULLIF(f.base_balance_amount,0),f.balance_amount,f.original_amount) remaining_amount,f.source_kind,f.source_document_no,f.status source_status,
+          ds.draft_no,ds.draft_status,ds.draft_locked,ds.draft_date,ds.journal_no,ds.journal_status,
+          CASE WHEN ds.draft_no IS NULL THEN '未產生' WHEN ds.journal_no IS NOT NULL THEN '已拋轉傳票' ELSE ds.draft_status END generation_status
+        FROM finance_open_items f
+        LEFT JOIN (SELECT s.source_id,d.draft_no,d.status draft_status,d.source_locked draft_locked,d.draft_date,j.journal_no,j.status journal_status
+          FROM accounting_draft_sources s JOIN accounting_drafts d ON d.id=s.draft_id
+          LEFT JOIN accounting_journals j ON j.tenant_id=d.tenant_id AND j.company_id=d.company_id AND j.source_system=d.source_system AND j.source_database=d.source_database AND j.source_kind='accounting_draft' AND j.source_id=d.id
+          WHERE s.source_kind='finance_open_item' AND d.status IN ('draft','approved','posted')) ds ON ds.source_id=f.id
+        WHERE ${filter} ORDER BY f.document_date DESC,f.id DESC LIMIT ?`,[...params,limit]))[0];
+    }else throw badRequest('AUT 報表只能是 draft、source 或 status');
+    const summary={row_count:rows.length,draft_count:rows.filter(row=>row.draft_no).length,posted_count:rows.filter(row=>row.journal_no||row.journal_status==='posted').length,unprocessed_count:rows.filter(row=>row.generation_status==='未產生').length};
+    res.json({ok:true,data:{report,date_from:from,date_to:to,source_database:db,filters:{status:status||null,account_type:accountType||null},summary,rows}});
+  }catch(e){next(e);}});
+
+  // AUT-G02：依 AJSI01 的「逐張／彙總」及「同科目彙總」設定產生底稿；
+  // 舊版同一路徑保留在後方，這個較早註冊的路由會先執行並維持相容回傳欄位。
+  app.post('/api/accounting/drafts/generate', async(req,res,next)=>{try{
+    await ensureTargetFinanceWorkflowSchema();
+    const b=req.body||{},db=requestDatabase(req),c=contextFor(db),ids=sourceReferencesFromBody(b);
+    const out=await tx(async conn=>{
+      const settings=await readAutoJournalSettings(conn,c,req.auth?.id||null),items=await loadOpenItemsForDraft(conn,ids,c);
+      const mode=trim(b.draft_mode||b.opening_method)||settings.draft_opening_method;
+      if(!['aggregate','per_document'].includes(mode))throw badRequest('底稿產生方式只能是彙總或逐張');
+      const date=validDate(b.draft_date||dateText(items[0].document_date)||new Date().toISOString().slice(0,10));
+      for(const item of items)assertChronologicalDate(date,item.document_date,'底稿日期');
+      await assertOpenAccountingPeriod(conn,c,date);
+      const createOne=async itemSet=>{
+        const lines=await autoDraftLines(conn,c,itemSet,{aggregateAccounts:settings.aggregate_accounts});
+        if(!lines.length)throw badRequest('來源帳款沒有可產生的自動分錄');
+        const checked=await normalizeDraftLines(conn,lines,{context:c});
+        const sources=itemSet.map(row=>({source_kind:'finance_open_item',source_id:row.id,document_no:row.document_no,original_amount:row.original_amount,locked_amount:sourceAmountOf(row)}));
+        return insertDraft(conn,{context:c,date,sourceKind:'finance_open_item',sourceId:itemSet[0].id,sourceDocumentNo:itemSet.map(row=>row.document_no).join(',').slice(0,80),accountType:itemSet[0].account_type,partyCode:itemSet[0].party_code,memo:trim(b.memo)||'自動產生會計分錄底稿',lines:checked.lines,sources,userId:req.auth.id});
+      };
+      const drafts=[];
+      if(mode==='per_document'){
+        // 同一交易內逐張產生；編號規則依序取號，避免並行取號造成相同底稿號碼。
+        for(const item of items) drafts.push(await createOne([item]));
+      }else drafts.push(await createOne(items));
+      const first=drafts[0];
+      return {...first,drafts,draft_count:drafts.length,generation_mode:mode,posting_method:settings.posting_method,same_account_aggregation:settings.aggregate_accounts};
+    });
+    res.status(201).json({ok:true,data:out});
+  }catch(e){next(e);}});
+
+  // AUT-G03：清除只允許未核准的底稿，保留底稿／來源／事件資料；已過帳
+  // 傳票一律走下方受控沖回，不提供刪除原傳票的捷徑。
+  app.post('/api/accounting/drafts/:id/clear', async(req,res,next)=>{try{
+    await ensureTargetFinanceWorkflowSchema();
+    const db=requestDatabase(req),c=contextFor(db),id=Number(req.params.id),reason=trim(req.body?.reason);
+    if(!reason)throw badRequest('自動分錄清除必須輸入原因');
+    const out=await tx(async conn=>{
+      const draft=await loadDraftHeader(conn,id,c,'draft',true);if(!draft)throw badRequest('只有草稿底稿可以清除，核准後請走還原或沖回');
+      await conn.query("UPDATE accounting_drafts SET status='restored',source_locked=0,restore_reason=?,restored_by=?,restored_at=NOW() WHERE id=?",[reason,req.auth.id,id]);
+      await conn.query(`INSERT INTO accounting_draft_events(draft_id,event_kind,before_status,after_status,reason,user_id) VALUES(?,'cleared','draft','restored',?,?)`,[id,reason,req.auth.id]);
+      return {id,status:'restored',source_locked:false,event_kind:'cleared'};
+    });
+    res.json({ok:true,data:out});
+  }catch(e){next(e);}});
+
   app.get('/api/accounting/drafts', async (req,res,next)=>{try{await ensureTargetFinanceWorkflowSchema();const db=requestDatabase(req),c=contextFor(db);const[rows]=await pool.query(`SELECT d.*,
       (SELECT COUNT(*) FROM accounting_draft_lines l WHERE l.draft_id=d.id) line_count,
       (SELECT COALESCE(SUM(l.debit_amount),0) FROM accounting_draft_lines l WHERE l.draft_id=d.id) debit_total,
@@ -7450,6 +7704,35 @@ function registerAccountingWorkflowRoutes(app) {
     });
     res.status(201).json({ok:true,data:out});
   } catch(e){if(e.code==='ER_DUP_ENTRY')e=badRequest('此帳款或收付款單已拋轉會計');next(e);} });
+  // AUT-G03／AJSB22：正式傳票不可直接還原或刪除。建立反向底稿後，
+  // 仍須依「維護既有行次 → 核准 → 拋轉」完成沖回；原傳票保持已過帳與可追溯。
+  app.post(['/api/accounting/journals/:id/reverse','/api/accounting/journals/:id/restore'], async (req,res,next) => { try {
+    await ensureTargetFinanceWorkflowSchema();
+    const id=Number(req.params.id),db=requestDatabase(req),c=contextFor(db),reason=trim(req.body?.reason)||'建立會計傳票沖回底稿';
+    const out=await tx(async conn=>{
+      const [[journal]]=await conn.query(`SELECT * FROM accounting_journals
+        WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND status='posted' FOR UPDATE`,
+        [id,c.tenant_id,c.company_id,c.source_system,db]);
+      if(!journal)throw badRequest('只有目前公司的已過帳傳票可以建立沖回底稿');
+      const [[existing]]=await conn.query(`SELECT id,draft_no,status FROM accounting_drafts
+        WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND source_kind='journal_reversal' AND source_id=? AND status IN ('draft','approved','posted') LIMIT 1`,
+        [c.tenant_id,c.company_id,c.source_system,db,id]);
+      if(existing)throw badRequest(`原傳票已有沖回底稿 ${existing.draft_no}（${existing.status}）`);
+      const reversalDate=validDate(req.body?.reversal_date||dateText(journal.journal_date));
+      await assertOpenAccountingPeriod(conn,c,reversalDate);
+      const [sourceLines]=await conn.query('SELECT * FROM accounting_journal_lines WHERE journal_id=? ORDER BY line_no',[id]);
+      if(sourceLines.length<2)throw badRequest('原傳票沒有足夠明細，不能建立沖回底稿');
+      const rawLines=sourceLines.map((line,index)=>({
+        line_no:index+1,account_code:line.account_code,account_name:line.account_name,
+        debit_amount:Number(line.credit_amount||0),credit_amount:Number(line.debit_amount||0),
+        party_code:line.party_code,description:`沖回 ${journal.journal_no}／${line.description||''}`.slice(0,500)
+      }));
+      const checked=await normalizeDraftLines(conn,rawLines,{preserveLineNo:true,context:c});
+      const draft=await insertDraft(conn,{context:c,date:reversalDate,sourceKind:'journal_reversal',sourceId:id,sourceDocumentNo:journal.journal_no,accountType:null,partyCode:null,memo:reason,lines:checked.lines,sources:[],userId:req.auth.id});
+      return {...draft,original_journal_no:journal.journal_no};
+    });
+    res.status(201).json({ok:true,data:{...out,original_journal_id:id,original_journal_no:out.original_journal_no||null,action:'reverse'} });
+  }catch(e){next(e);}});
   app.post('/api/accounting/journals/:id/post', async (req,res,next) => { try {
     await ensureTargetFinanceWorkflowSchema();
     const id=Number(req.params.id);

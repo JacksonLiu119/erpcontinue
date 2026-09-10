@@ -199,6 +199,8 @@ const routeCapability = [
   [/^\/finance-workflow\//, 'finance-workflow'],
   [/^\/accounting\/g0[1-5](?:\/|$)/, 'accounting-general-ledger'],
   [/^\/accounting\/(periods)/, 'accounting-periods'],
+  [/^\/accounting\/auto-settings(?:\/|$)/, 'accounting-auto-rules'],
+  [/^\/accounting\/auto-reports(?:\/|$)/, 'accounting-drafts'],
   [/^\/accounting\/(auto-rules)/, 'accounting-auto-rules'],
   [/^\/accounting\/clearing/, 'accounting-clearing'],
   [/^\/accounting\/(opening-batches)/, 'accounting-opening-balances'],
