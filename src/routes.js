@@ -8008,6 +8008,40 @@ function registerAccountingWorkflowRoutes(app) {
 function registerAccountingManagementRoutes(app) {
   const accountTypes = new Set(['asset','liability','equity','revenue','expense']);
   const parameterTypes = new Set(['text','number','boolean','date','account']);
+  // ACTI01 的文件欄位以實際文件代碼保存，避免把文件規則藏在自訂名稱中。
+  // 這裡只描述可由既有 accounting_system_parameters／accounting_accounts
+  // 表承接的規則；沒有對應欄位的部門管理與傳票使用限制，稽核會明確列為警示，
+  // 不自行新增欄位或猜測值。
+  const g01ParameterCatalog = Object.freeze([
+    { code:'MC001', name:'輸入時檢查借貸平衡', dataType:'text', required:true,
+      allowedValues:Object.freeze({ '1':'須輸入至借貸平衡為止才可存檔', '2':'僅予以警告，但仍可接受存檔' }),
+      document:'ACTI01', documentField:'MC001', sourcePage:'26',
+      description:'決定傳票存檔時，借貸未平衡是阻擋或僅警告。' },
+    { code:'MC002', name:'輸入時是否可修改總號', dataType:'text', required:true,
+      allowedValues:Object.freeze({ '1':'必須輸入總號欄位', '2':'不須輸入總號欄位，由系統自動編號' }),
+      document:'ACTI01', documentField:'MC002', sourcePage:'27',
+      description:'決定傳票總號由人工輸入或由系統自動編號。' },
+    { code:'MC003', name:'列印時依借貸方排列', dataType:'boolean', required:true,
+      allowedValues:Object.freeze({ '0':'否', '1':'是' }),
+      document:'ACTI01', documentField:'MC003', sourcePage:'27',
+      description:'列印傳票時是否依借方／貸方排列。' },
+    { code:'CURRENT_PROFIT_ACCOUNT', name:'本期損益科目', dataType:'account', required:true,
+      allowedValues:null, accountRule:'balance_sheet_detail',
+      document:'ACTI01', documentField:'本期損益', sourcePage:'27',
+      description:'期末損益結轉使用的本期損益科目；文件要求為資產負債類、獨立科目且不作部門管理。' },
+    { code:'PRIOR_PROFIT_ACCOUNT', name:'上期損益科目', dataType:'account', required:true,
+      allowedValues:null, accountRule:'balance_sheet_detail',
+      document:'ACTI01', documentField:'上期損益科目', sourcePage:'27',
+      description:'資產負債表使用的上期損益／保留盈餘科目；文件要求為資產負債類、帳戶科目且不作部門管理。' }
+  ]);
+  const g01ParameterByCode = new Map(g01ParameterCatalog.map(rule => [rule.code, rule]));
+  const g01RuleFor = code => g01ParameterByCode.get(String(code || '').trim().toUpperCase()) || null;
+  const g01CatalogView = rule => ({
+    code:rule.code, name:rule.name, data_type:rule.dataType, required:rule.required,
+    allowed_values:rule.allowedValues, account_rule:rule.accountRule || null,
+    document:rule.document, document_field:rule.documentField, source_page:rule.sourcePage,
+    description:rule.description
+  });
   const gAccountSeeds = [
     ['1001','銀行存款','asset','debit'],['1101','應收帳款','asset','debit'],
     ['1121','應收票據','asset','debit'],['1122','應收票據託收','asset','debit'],
@@ -8073,7 +8107,7 @@ function registerAccountingManagementRoutes(app) {
   async function accountMap(conn, c, codes) {
     const list = [...new Set(codes.map(trim).filter(Boolean))];
     if (!list.length) return new Map();
-    const [rows] = await conn.query(`SELECT account_code,account_name,account_type,normal_balance,is_active,status
+    const [rows] = await conn.query(`SELECT account_code,account_name,account_type,normal_balance,is_active,status,is_detail,effective_from,effective_to
       FROM accounting_accounts WHERE tenant_id=? AND company_id=? AND source_system=?
       AND account_code IN (${list.map(() => '?').join(',')})`,
       [c.tenant_id,c.company_id,c.source_system,...list]);
@@ -8114,10 +8148,13 @@ function registerAccountingManagementRoutes(app) {
   }
 
   function parameterPayload(body) {
-    const code = trim(body.parameter_code), name = trim(body.parameter_name);
+    const rawCode = trim(body.parameter_code), name = trim(body.parameter_name);
+    const rule = g01RuleFor(rawCode);
+    const code = rule?.code || rawCode;
     const dataType = trim(body.data_type || 'text').toLowerCase();
     if (!code || !name || !/^[A-Za-z0-9_.-]{1,60}$/.test(code)) throw badRequest('參數代碼與名稱不可空白，代碼限英數字、底線、點或連字號');
     if (!parameterTypes.has(dataType)) throw badRequest('參數資料型態只能是 text、number、boolean、date 或 account');
+    if (rule && dataType !== rule.dataType) throw badRequest(`${rule.code}（${rule.name}）資料型態必須是 ${rule.dataType}`);
     let value = body.parameter_value ?? body.value ?? '';
     if (dataType === 'number') value = String(decimal(value,'參數值'));
     if (dataType === 'boolean') {
@@ -8127,9 +8164,27 @@ function registerAccountingManagementRoutes(app) {
     }
     if (dataType === 'date') value = validDate(value);
     if (dataType === 'account' && !trim(value)) throw badRequest('科目型參數必須指定科目代號');
+    if (rule?.allowedValues && !Object.prototype.hasOwnProperty.call(rule.allowedValues,String(value))) {
+      throw badRequest(`${rule.code}（${rule.name}）值只能是 ${Object.entries(rule.allowedValues).map(([key,label]) => `${key}：${label}`).join('／')}`);
+    }
     const effectiveFrom = dateOrNull(body.effective_from,'生效起日'), effectiveTo = dateOrNull(body.effective_to,'生效迄日');
     assertDateRange(effectiveFrom,effectiveTo);
-    return { code, name, value:String(value), dataType, effectiveFrom, effectiveTo, note:optionalText(body.note) };
+    return { code, name, value:String(value), dataType, effectiveFrom, effectiveTo, note:optionalText(body.note), ruleCode:rule?.code || null };
+  }
+
+  async function assertG01AccountParameter(conn, c, code, value) {
+    const rule = g01RuleFor(code);
+    if (!rule?.accountRule) return;
+    const accountCode = trim(value), map = await accountMap(conn,c,[accountCode]), account = map.get(accountCode);
+    if (!account || !Number(account.is_active) || String(account.status || 'approved') !== 'approved') {
+      throw badRequest(`${rule.code}（${rule.name}）指定的科目 ${accountCode || '—'} 不存在、停用或尚未核准`);
+    }
+    if (!['asset','liability','equity'].includes(String(account.account_type))) {
+      throw badRequest(`${rule.code}（${rule.name}）必須指定資產負債／權益類科目，不能使用收入或費用科目`);
+    }
+    if (Number(account.is_detail) !== 1) {
+      throw badRequest(`${rule.code}（${rule.name}）必須指定明細／獨立科目`);
+    }
   }
 
   // G01 會計系統參數設定作業（對應 ACTI01／期間與參數前置設定）。
@@ -8140,16 +8195,24 @@ function registerAccountingManagementRoutes(app) {
       ORDER BY parameter_code,version_no DESC`, contextParams(c));
     res.json({ok:true,data:rows.map(stateOf),source_database:c.source_database});
   } catch (e) { next(e); } });
-  // G01-R1：依既有參數版本表做可讀稽核；不猜測文件未提供的參數值，
-  // 只檢查資料型態、值、期間、科目參照與同代碼有效期間重疊。
+  // G01-R1：ACTI01 文件規則目錄。只讀取目前公司上下文，供畫面與稽核使用。
+  app.get('/api/accounting/g01/catalog', async (req,res,next) => { try {
+    await ensureTargetFinanceWorkflowSchema(); const c=contextOf(req);
+    res.json({ok:true,data:{source_database:c.source_database,company_id:c.company_id,source_system:c.source_system,
+      source_document:'iSM-會計總帳管理系統.pdf',existing_tables:['accounting_system_parameters','accounting_accounts'],read_only:true,
+      catalog:g01ParameterCatalog.map(g01CatalogView)}});
+  } catch (e) { next(e); } });
+  // G01-R1：依文件目錄與既有參數／科目表做可讀稽核；不建立種子資料，
+  // 不猜測文件未提供的參數值，缺少必要設定直接列出原因與待處理狀態。
   app.get('/api/accounting/g01/audit', async (req,res,next) => { try {
     await ensureTargetFinanceWorkflowSchema(); const c=contextOf(req);
-    await tx(async conn=>ensureGAccounts(conn,c));
+    const asOfDate=dateOrNull(req.query.as_of_date,'檢核基準日') || new Date().toISOString().slice(0,10);
     const [rows]=await pool.query(`SELECT id,parameter_code,parameter_name,parameter_value,data_type,effective_from,effective_to,
         version_no,status,approved_at,note FROM accounting_system_parameters
       WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
       ORDER BY parameter_code,version_no`,contextParams(c));
-    const [accounts]=await pool.query(`SELECT account_code,is_active,status FROM accounting_accounts WHERE tenant_id=? AND company_id=? AND source_system=?`,[c.tenant_id,c.company_id,c.source_system]);
+    const [accounts]=await pool.query(`SELECT account_code,account_name,account_type,normal_balance,is_active,status,is_detail,effective_from,effective_to
+      FROM accounting_accounts WHERE tenant_id=? AND company_id=? AND source_system=?`,[c.tenant_id,c.company_id,c.source_system]);
     const accountMap=new Map(accounts.map(row=>[String(row.account_code),row]));
     const issues=[];
     const add=(severity,code,row,message)=>issues.push({severity,issue_code:code,parameter_id:row?.id||null,parameter_code:row?.parameter_code||null,message});
@@ -8159,6 +8222,20 @@ function registerAccountingManagementRoutes(app) {
       if(!value)add('error','EMPTY_VALUE',row,'參數值不可空白');
       if(!validTypes.has(type))add('error','INVALID_DATA_TYPE',row,'參數資料型態不在允許範圍');
       if(type==='account'&&(!accountMap.has(value)||!Number(accountMap.get(value).is_active)||String(accountMap.get(value).status||'approved')!=='approved') )add('error','INVALID_ACCOUNT',row,`參數科目 ${value||'—'} 不存在、停用或尚未核准`);
+      const rule=g01RuleFor(row.parameter_code);
+      if(rule&&type!==rule.dataType)add('error','DOCUMENT_DATA_TYPE',row,`${rule.code}（${rule.name}）依 ACTI01 文件必須使用 ${rule.dataType}`);
+      if(rule?.allowedValues&&!Object.prototype.hasOwnProperty.call(rule.allowedValues,value))add('error','INVALID_OPTION',row,`${rule.code}（${rule.name}）值不在文件允許選項：${Object.entries(rule.allowedValues).map(([key,label])=>`${key}：${label}`).join('／')}`);
+      if(rule?.accountRule){
+        const account=accountMap.get(value);
+        if(account){
+          if(!['asset','liability','equity'].includes(String(account.account_type)))add('error','ACCOUNT_CLASS',row,`${rule.name} 必須使用資產負債／權益類科目`);
+          if(Number(account.is_detail)!==1)add('error','ACCOUNT_NOT_DETAIL',row,`${rule.name} 必須使用明細／獨立科目`);
+          const accountFrom=dateText(account.effective_from),accountTo=dateText(account.effective_to);
+          if((accountFrom&&accountFrom>asOfDate)||(accountTo&&accountTo<asOfDate))add('error','ACCOUNT_NOT_EFFECTIVE',row,`${rule.name} 指定科目在檢核基準日 ${asOfDate} 不在啟用期間`);
+          // accounting_accounts 沒有部門管理／傳票可用性欄位，不能把文件要求偽裝成已完成。
+          add('warning','ACCOUNT_USAGE_CONTROL_UNREPRESENTED',row,`${rule.name} 的「不作部門管理／不可直接作傳票」目前沒有既有欄位可檢核，僅完成科目類別、明細、核准與啟用期間檢查`);
+        }
+      }
       if(row.effective_from&&row.effective_to&&dateText(row.effective_from)>dateText(row.effective_to))add('error','DATE_RANGE',row,'生效起日不可晚於迄日');
     }
     const groups=new Map();
@@ -8171,8 +8248,35 @@ function registerAccountingManagementRoutes(app) {
       return leftFrom<=rightTo&&rightFrom<=leftTo;
     };
     for(const list of groups.values())for(let i=0;i<list.length;i++)for(let j=i+1;j<list.length;j++)if(overlaps(list[i],list[j]))add('error','OVERLAPPING_VERSION',list[i],`與版本 v${list[j].version_no} 的生效期間重疊`);
+    const effectiveAt=row=>String(row.status)==='approved'
+      &&(!dateText(row.effective_from)||dateText(row.effective_from)<=asOfDate)
+      &&(!dateText(row.effective_to)||dateText(row.effective_to)>=asOfDate);
+    const ruleResults=g01ParameterCatalog.map(rule=>{
+      const matching=rows.filter(row=>g01RuleFor(row.parameter_code)?.code===rule.code);
+      const approved=matching.filter(effectiveAt).sort((a,b)=>Number(b.version_no||0)-Number(a.version_no||0));
+      const selected=approved[0]||null, draft=matching.filter(row=>String(row.status)==='draft').sort((a,b)=>Number(b.version_no||0)-Number(a.version_no||0))[0]||null;
+      if(!selected){
+        if(draft)add('warning','PENDING_APPROVAL',draft,`${rule.code}（${rule.name}）已有草稿但尚未核准或尚未到生效日`);
+        add('error','MISSING_REQUIRED_PARAMETER',null,`${rule.code}（${rule.name}）在 ${asOfDate} 沒有目前有效的已核准設定`);
+      }
+      const selectedIssues=selected?issues.filter(issue=>Number(issue.parameter_id)===Number(selected.id)):[];
+      const status=selected?(selectedIssues.some(issue=>issue.severity==='error')?'invalid':'configured'):(draft?'pending':'missing');
+      return {code:rule.code,name:rule.name,status,required:rule.required,data_type:rule.dataType,document_field:rule.documentField,source_page:rule.sourcePage,
+        parameter_id:selected?.id||draft?.id||null,parameter_value:selected?.parameter_value??draft?.parameter_value??null,
+        version_no:selected?.version_no??draft?.version_no??null,parameter_status:selected?.status??draft?.status??null,
+        effective_from:selected?.effective_from??draft?.effective_from??null,effective_to:selected?.effective_to??draft?.effective_to??null,
+        message:status==='configured'?'目前有效的已核准設定':status==='invalid'?'目前設定不符合文件規則':status==='pending'?'已有草稿，等待核准或生效':'尚未建立目前有效的已核准設定',
+        allowed_values:rule.allowedValues,account_rule:rule.accountRule||null,description:rule.description};
+    });
     const counts=issues.reduce((out,issue)=>(out[issue.severity]=(out[issue.severity]||0)+1,out),{});
-    res.json({ok:true,data:{source_database:c.source_database,company_id:c.company_id,summary:{parameter_count:rows.length,active_parameter_count:rows.filter(row=>String(row.status)==='approved').length,issue_count:issues.length,error_count:counts.error||0,warning_count:counts.warning||0,healthy:issues.every(issue=>issue.severity!=='error')},rows,issues}});
+    res.json({ok:true,data:{source_database:c.source_database,company_id:c.company_id,source_system:c.source_system,as_of_date:asOfDate,
+      source_document:'iSM-會計總帳管理系統.pdf',catalog:g01ParameterCatalog.map(g01CatalogView),rule_results:ruleResults,
+      summary:{parameter_count:rows.length,active_parameter_count:rows.filter(row=>String(row.status)==='approved').length,
+        effective_parameter_count:rows.filter(effectiveAt).length,required_count:g01ParameterCatalog.length,
+        configured_count:ruleResults.filter(item=>item.status==='configured').length,
+        missing_count:ruleResults.filter(item=>['missing','pending'].includes(item.status)).length,
+        invalid_count:ruleResults.filter(item=>item.status==='invalid').length,
+        issue_count:issues.length,error_count:counts.error||0,warning_count:counts.warning||0,healthy:issues.every(issue=>issue.severity!=='error')},rows,issues}});
   } catch(e){next(e);} });
   app.get('/api/accounting/g01/parameters/:id', async (req,res,next) => { try {
     await ensureTargetFinanceWorkflowSchema(); const c=contextOf(req), id=Number(req.params.id);
@@ -8185,7 +8289,7 @@ function registerAccountingManagementRoutes(app) {
     await ensureTargetFinanceWorkflowSchema(); const c=contextOf(req), payload=parameterPayload(req.body || {});
     const out=await tx(async conn=>{
       await ensureGAccounts(conn,c);
-      if (payload.dataType==='account') await requireAccounts(conn,c,[payload.value],'參數科目');
+      if (payload.dataType==='account') { await requireAccounts(conn,c,[payload.value],'參數科目'); await assertG01AccountParameter(conn,c,payload.code,payload.value); }
       const [[version]] = await conn.query(`SELECT COALESCE(MAX(version_no),0) version_no FROM accounting_system_parameters WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND parameter_code=?`, [...contextParams(c),payload.code]);
       const versionNo=Number(version.version_no||0)+1;
       const [result] = await conn.query(`INSERT INTO accounting_system_parameters
@@ -8202,7 +8306,7 @@ function registerAccountingManagementRoutes(app) {
       const [[before]] = await conn.query(`SELECT * FROM accounting_system_parameters WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? FOR UPDATE`, [id,...contextParams(c)]);
       if (!before) throw notFound('找不到目前公司／資料來源的會計系統參數');
       if (String(before.parameter_code)!==payload.code) throw badRequest('參數代碼不可修改，請建立新版本');
-      await ensureGAccounts(conn,c); if(payload.dataType==='account') await requireAccounts(conn,c,[payload.value],'參數科目');
+      await ensureGAccounts(conn,c); if(payload.dataType==='account') { await requireAccounts(conn,c,[payload.value],'參數科目'); await assertG01AccountParameter(conn,c,payload.code,payload.value); }
       const versionNo=Number(before.version_no||1)+1;
       await conn.query(`UPDATE accounting_system_parameters SET parameter_name=?,parameter_value=?,data_type=?,effective_from=?,effective_to=?,version_no=?,status='draft',approved_by=NULL,approved_at=NULL,note=?,created_by=? WHERE id=?`, [payload.name,payload.value,payload.dataType,payload.effectiveFrom,payload.effectiveTo,versionNo,payload.note,req.auth.id,id]);
       const [[after]] = await conn.query('SELECT * FROM accounting_system_parameters WHERE id=?',[id]);
@@ -8216,7 +8320,7 @@ function registerAccountingManagementRoutes(app) {
     const out=await tx(async conn=>{
       const [[before]] = await conn.query(`SELECT * FROM accounting_system_parameters WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND status='draft' FOR UPDATE`, [id,...contextParams(c)]);
       if(!before) throw badRequest('只有目前公司／來源的 G01 草稿可以核准');
-      await ensureGAccounts(conn,c); if(String(before.data_type)==='account') await requireAccounts(conn,c,[before.parameter_value],'參數科目');
+      await ensureGAccounts(conn,c); if(String(before.data_type)==='account') { await requireAccounts(conn,c,[before.parameter_value],'參數科目'); await assertG01AccountParameter(conn,c,before.parameter_code,before.parameter_value); }
       await conn.query(`UPDATE accounting_system_parameters SET status='superseded' WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? AND parameter_code=? AND status='approved'`, [...contextParams(c),before.parameter_code]);
       await conn.query(`UPDATE accounting_system_parameters SET status='approved',approved_by=?,approved_at=NOW() WHERE id=?`,[req.auth.id,id]);
       const [[after]] = await conn.query('SELECT * FROM accounting_system_parameters WHERE id=?',[id]);

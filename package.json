@@ -20,6 +20,7 @@
     "verify:accounting-drafts": "node scripts/verify-accounting-drafts.mjs",
     "verify:auto-journal-g01-g03": "node scripts/verify-auto-journal-g01-g03.mjs",
     "verify:auto-journal-r1": "node scripts/verify-auto-journal-r1.mjs",
+    "verify:accounting-g01-r1": "node scripts/verify-accounting-g01-r1.mjs",
     "verify:accounting-g01-g05": "node scripts/verify-accounting-g01-g05.mjs",
     "verify:accounting-g01-g05-r1": "node scripts/verify-accounting-g01-g05.mjs",
     "verify:bank-note-reconciliation": "node scripts/verify-bank-note-reconciliation.mjs",
