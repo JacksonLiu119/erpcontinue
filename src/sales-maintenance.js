@@ -4,7 +4,7 @@ import {
   ensureTargetFinanceWorkflowSchema,
   ensureTargetSalesPhase2Schema
 } from './db.js';
-import { hasDepartmentAccess } from './auth.js';
+import { hasDepartmentAccess, recordAccessAudit } from './auth.js';
 
 const EPS = 0.000001;
 
@@ -240,6 +240,12 @@ function accountingMonthBounds(value) {
   return { period_code: postingDate.slice(0, 7), start_date: `${postingDate.slice(0, 7)}-01`, end_date: end };
 }
 
+function storedDate(value, label = '日期') {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+  const result = String(value ?? '').trim();
+  return date(result.slice(0, 10), label, true);
+}
+
 async function assertOpenAccountingPeriod(conn, context, postingDate) {
   const bounds = accountingMonthBounds(postingDate);
   let [[period]] = await conn.query(`SELECT * FROM accounting_periods
@@ -259,6 +265,21 @@ async function assertOpenAccountingPeriod(conn, context, postingDate) {
     ]);
   }
   if (!period || period.status !== 'open') throw badRequest(`會計期間 ${bounds.period_code} 已關帳或不存在，禁止訂單維護過帳`);
+  return period;
+}
+
+// 管理維護的受控作廢／封存不能因為查不到期間就自動開一個新期間。
+// 既有過帳流程仍沿用上面的相容邏輯；這裡採嚴格檢查，讓預覽與執行結果一致。
+async function assertExistingOpenAccountingPeriod(conn, context, postingDate) {
+  const bounds = accountingMonthBounds(storedDate(postingDate, '過帳日期'));
+  const [[period]] = await conn.query(`SELECT * FROM accounting_periods
+    WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+      AND start_date<=? AND end_date>=? FOR UPDATE`, [
+    ...contextValues(context), bounds.start_date, bounds.end_date
+  ]);
+  if (!period || period.status !== 'open') {
+    throw badRequest(`會計期間 ${bounds.period_code} 未開放或已關帳，禁止受控作廢／封存`);
+  }
   return period;
 }
 
@@ -310,6 +331,210 @@ function orderBefore(order) {
     inventory_status: order.inventory_status,
     items: order.items.map(item => ({ id: Number(item.id), quantity: Number(item.quantity || 0), related_quantity: Number(item.related_quantity || 0), unit_price: Number(item.unit_price || 0) }))
   };
+}
+
+function archiveDate(value) {
+  return date(value || new Date().toISOString().slice(0, 10), '作廢／封存日期', true);
+}
+
+function archiveReason(label, count, message) {
+  return count ? `${message}（${count} 筆）` : '';
+}
+
+async function buildOrderArchiveImpact(conn, context, order, controlledDate) {
+  const itemIds = order.items.map(item => Number(item.id)).filter(id => Number.isInteger(id) && id > 0);
+  const itemPlaceholders = itemIds.length ? itemIds.map(() => '?').join(',') : '0';
+  const checks = [];
+  const blockingReasons = [];
+  const addCheck = (code, label, rows, message) => {
+    const list = Array.isArray(rows) ? rows : [];
+    const passed = list.length === 0;
+    checks.push({ code, label, passed, count: list.length, details: list.slice(0, 20) });
+    if (!passed) blockingReasons.push(archiveReason(label, list.length, message));
+    return list;
+  };
+  const addStatusCheck = (code, label, passed, message, details = null) => {
+    checks.push({ code, label, passed: Boolean(passed), count: passed ? 0 : 1, details: details ? [details] : [] });
+    if (!passed) blockingReasons.push(message);
+  };
+
+  addStatusCheck('ORDER_STATUS', '訂單狀態', ['draft', 'approved'].includes(String(order.status)),
+    `目前訂單狀態為 ${order.status}，只能封存草稿或已核准且尚未履約的訂單`, { status: order.status });
+  addStatusCheck('ORDER_ITEMS', '訂單明細', itemIds.length > 0, '訂單沒有明細，禁止受控作廢／封存');
+
+  const deliveredQuantity = order.items.reduce((sum, item) => sum + Number(item.related_quantity || 0), 0);
+  addStatusCheck('DELIVERED_QUANTITY', '已交量', deliveredQuantity <= EPS,
+    `訂單已有 ${deliveredQuantity} 已交量，必須先走銷貨沖回／受控解結／重開`, { delivered_quantity: deliveredQuantity });
+
+  let downstreamDocuments = [];
+  if (itemIds.length) {
+    [downstreamDocuments] = await conn.query(`SELECT sd.id,sd.document_kind,sd.document_no,sd.document_date,sd.status,
+        sd.inventory_status,si.id item_id,si.source_item_id,si.quantity
+      FROM sales_documents sd JOIN sales_document_items si ON si.document_id=sd.id
+      WHERE ${contextParams(context, 'sd').join(' AND ')}
+        AND si.source_item_id IN (${itemPlaceholders})
+        AND sd.document_kind IN ('shipment','sales_return')
+        AND sd.status<>'voided'
+      ORDER BY sd.document_date,sd.id,si.line_no,si.id`, [...contextValues(context), ...itemIds]);
+  }
+  addCheck('DOWNSTREAM_DOCUMENTS', '銷貨／銷退下游單據', downstreamDocuments,
+    '已有銷貨／銷退下游單據，禁止級聯清除；請先依沖回與重開流程處理');
+
+  const [deliverySchedules] = await conn.query(`SELECT id,schedule_no,order_item_id,scheduled_date,quantity,fulfilled_quantity,status
+    FROM erp_sales_delivery_schedules s
+    WHERE ${contextParams(context, 's').join(' AND ')} AND s.order_id=? AND s.status<>'cancelled'
+    ORDER BY s.scheduled_date,s.id`, [...contextValues(context), order.id]);
+  addCheck('DELIVERY_SCHEDULES', '交期排程', deliverySchedules,
+    '仍有有效交期排程，請先取消或完成排程後再封存');
+
+  const [pickLists] = await conn.query(`SELECT id,pick_no,warehouse_code,pick_date,status
+    FROM erp_sales_pick_lists p
+    WHERE ${contextParams(context, 'p').join(' AND ')} AND p.order_id=? AND p.status<>'cancelled'
+    ORDER BY p.pick_date,p.id`, [...contextValues(context), order.id]);
+  addCheck('PICK_LISTS', '揀貨單', pickLists,
+    '仍有有效揀貨單，請先取消或完成揀貨流程後再封存');
+
+  const [procurementDemands] = await conn.query(`SELECT id,demand_no,order_item_id,quantity,status,procurement_document_id
+    FROM erp_sales_procurement_demands d
+    WHERE ${contextParams(context, 'd').join(' AND ')} AND d.order_id=? AND d.status<>'cancelled'
+    ORDER BY d.id`, [...contextValues(context), order.id]);
+  addCheck('PROCUREMENT_DEMANDS', '缺料採購需求', procurementDemands,
+    '仍有有效缺料採購需求，請先取消或完成正式轉採購後再封存');
+
+  let pendingChanges = [];
+  if (itemIds.length) {
+    [pendingChanges] = await conn.query(`SELECT id,change_no,order_item_id,change_date,new_quantity,new_unit_price,status
+      FROM sales_order_changes c
+      WHERE ${contextParams(context, 'c').join(' AND ')}
+        AND c.order_item_id IN (${itemPlaceholders}) AND c.status='draft'
+      ORDER BY c.change_date,c.id`, [...contextValues(context), ...itemIds]);
+  }
+  addCheck('PENDING_CHANGES', '待核准訂單變更', pendingChanges,
+    '仍有待核准訂單變更，請先核准或作廢變更草稿後再封存');
+
+  const financeLinkConditions = itemIds.length
+    ? '(vs.source_document_id=? OR vs.source_document_item_id IN (' + itemPlaceholders + '))'
+    : 'vs.source_document_id=?';
+  const financeLinkParams = itemIds.length
+    ? [...contextValues(context), order.id, ...itemIds]
+    : [...contextValues(context), order.id];
+  const [financeLinks] = await conn.query(`SELECT DISTINCT vs.id,vs.source_kind,vs.source_document_id,vs.source_document_item_id,
+      v.id AS voucher_id,v.voucher_no,v.voucher_date,v.status AS voucher_status
+    FROM finance_voucher_sources vs JOIN finance_vouchers v ON v.id=vs.voucher_id
+    WHERE ${contextParams(context, 'v').join(' AND ')} AND v.status<>'voided'
+      AND ${financeLinkConditions}
+    ORDER BY v.voucher_date,v.id`, financeLinkParams);
+  addCheck('FINANCE_LINKS', '財務憑證來源', financeLinks,
+    '已有未作廢財務憑證來源，禁止直接封存；請先依財務沖回／更正流程處理');
+
+  const [creditApprovals] = await conn.query(`SELECT id,document_no,status,requested_at
+    FROM sales_credit_approval_requests r
+    WHERE ${contextParams(context, 'r').join(' AND ')} AND r.document_id=? AND r.status='pending'
+    ORDER BY r.requested_at,r.id`, [...contextValues(context), order.id]);
+  addCheck('CREDIT_APPROVALS', '待核准信用放行', creditApprovals,
+    '仍有待核准信用放行申請，請先完成核准或駁回後再封存');
+
+  const orderDate = storedDate(order.document_date, '訂單日期');
+  const dates = [...new Set([orderDate, controlledDate].filter(Boolean))];
+  const periodChecks = [];
+  for (const postingDate of dates) {
+    const bounds = accountingMonthBounds(postingDate);
+    const [[period]] = await conn.query(`SELECT period_code,status,start_date,end_date
+      FROM accounting_periods
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+        AND start_date<=? AND end_date>=?
+      LIMIT 1`, [...contextValues(context), bounds.start_date, bounds.end_date]);
+    const passed = period?.status === 'open';
+    periodChecks.push({ date: postingDate, period_code: bounds.period_code, status: period?.status || 'missing', passed });
+    if (!passed) blockingReasons.push(`會計期間 ${bounds.period_code} 未開放或已關帳，禁止受控作廢／封存`);
+  }
+  checks.push({ code: 'ACCOUNTING_PERIOD', label: '會計期間', passed: periodChecks.every(row => row.passed), count: periodChecks.filter(row => !row.passed).length, details: periodChecks });
+
+  return {
+    order_id: Number(order.id), document_no: order.document_no, document_date: orderDate,
+    status: order.status, controlled_date: controlledDate, can_archive: blockingReasons.length === 0,
+    blocking_reasons: [...new Set(blockingReasons.filter(Boolean))], checks,
+    effects: {
+      target_action: 'sales_documents.status=voided',
+      source_database: 'SH／SC 原始資料維持唯讀',
+      inventory: '不改變庫存、不建立庫存異動',
+      finance: '不改變應收／應付、不建立財務沖銷',
+      downstream: '不級聯修改下游單據',
+      audit: '保留原單、明細、訂單版本與控制事件'
+    },
+    counts: {
+      item_count: itemIds.length, delivered_quantity: deliveredQuantity,
+      downstream_document_count: downstreamDocuments.length, delivery_schedule_count: deliverySchedules.length,
+      pick_list_count: pickLists.length, procurement_demand_count: procurementDemands.length,
+      pending_change_count: pendingChanges.length, finance_link_count: financeLinks.length,
+      pending_credit_approval_count: creditApprovals.length
+    }
+  };
+}
+
+async function archiveCheck(req, res, next) {
+  try {
+    await ensureTargetSalesPhase2Schema();
+    await ensureTargetFinanceWorkflowSchema();
+    const context = contextOf(req);
+    const orderId = integer(req.params.id, '訂單 ID', null, 1, Number.MAX_SAFE_INTEGER);
+    const controlledDate = archiveDate(req.query.archive_date);
+    const order = await loadOrderForControl(pool, context, orderId, false);
+    const department = order.items.map(item => item.department_code).find(Boolean) || null;
+    const departmentAllowed = await hasDepartmentAccess(userId(req), req.auth?.role_code, context.source_database, department);
+    const impact = await buildOrderArchiveImpact(pool, context, order, controlledDate);
+    if (!departmentAllowed) {
+      impact.can_archive = false;
+      impact.blocking_reasons.push(`訂單所屬部門不在目前帳號授權範圍：${department || '未設定部門'}`);
+      impact.checks.push({ code: 'DEPARTMENT_SCOPE', label: '部門權限', passed: false, count: 1, details: [{ department_code: department }] });
+    } else {
+      impact.checks.push({ code: 'DEPARTMENT_SCOPE', label: '部門權限', passed: true, count: 0, details: [{ department_code: department }] });
+    }
+    impact.blocking_reasons = [...new Set(impact.blocking_reasons)];
+    impact.can_archive = impact.blocking_reasons.length === 0;
+    res.json({ ok: true, data: { ...impact, company_id: context.company_id, source_database: context.source_database, target_database: context.target_database } });
+  } catch (error) { next(error); }
+}
+
+async function archiveOrder(req, res, next) {
+  try {
+    await ensureTargetSalesPhase2Schema();
+    await ensureTargetFinanceWorkflowSchema();
+    const context = contextOf(req);
+    const orderId = integer(req.params.id, '訂單 ID', null, 1, Number.MAX_SAFE_INTEGER);
+    const reason = requiredText(req.body?.reason, '作廢／封存原因');
+    const controlledDate = archiveDate(req.body?.archive_date);
+    const result = await tx(async conn => {
+      const order = await loadOrderForControl(conn, context, orderId, true);
+      const department = order.items.map(item => item.department_code).find(Boolean) || null;
+      await assertDepartment(req, context, department);
+      const orderDate = storedDate(order.document_date, '訂單日期');
+      await assertExistingOpenAccountingPeriod(conn, context, orderDate);
+      if (orderDate !== controlledDate) await assertExistingOpenAccountingPeriod(conn, context, controlledDate);
+      const impact = await buildOrderArchiveImpact(conn, context, order, controlledDate);
+      if (!impact.can_archive) throw badRequest(`訂單不可受控作廢／封存：${impact.blocking_reasons.join('；')}`);
+      const before = orderBefore(order);
+      const note = `受控作廢／封存：${reason}`;
+      const [updated] = await conn.query(`UPDATE sales_documents SET status='voided',
+          note=TRIM(CONCAT(COALESCE(note,''),CASE WHEN COALESCE(note,'')='' THEN '' ELSE '；' END,?))
+        WHERE id=? AND ${contextParams(context).join(' AND ')} AND document_kind='sales_order' AND status=?`,
+        [note, order.id, ...contextValues(context), order.status]);
+      if (!updated.affectedRows) throw badRequest('訂單狀態已變更，請重新查詢後再執行');
+      for (const item of order.items) {
+        await recordVersion(conn, context, order, item, 'voided', reason, userId(req), 'controlled_archive');
+      }
+      if (!order.items.length) await recordVersion(conn, context, order, null, 'voided', reason, userId(req), 'controlled_archive');
+      const after = { ...before, status: 'voided', controlled_date: controlledDate, action: 'controlled_archive', reason, impact };
+      await recordControlEvent(conn, context, order.id, 'CONTROLLED_ARCHIVE', before, after, reason, userId(req));
+      return { id: Number(order.id), document_no: order.document_no, status: 'voided', controlled_date: controlledDate, source_key: `sales_documents:${Number(order.id)}`, message: '訂單已受控作廢／封存；原單、明細、版本與控制事件均保留，未級聯修改下游資料' };
+    });
+    await recordAccessAudit({
+      actorUserId: req.auth?.id, targetUserId: req.auth?.id, actionCode: 'SALES_ORDER_CONTROLLED_ARCHIVE',
+      entityType: 'sales_order', entityId: result.id, sourceKey: context.source_database,
+      reason, ipAddress: req.ip, userAgent: req.get('user-agent')
+    });
+    res.json({ ok: true, data: result });
+  } catch (error) { next(error); }
 }
 
 async function recalculateOrder(req, res, next) {
@@ -624,6 +849,8 @@ export function registerSalesMaintenanceRoutes(app) {
     } catch (error) { next(error); }
   });
 
+  app.get('/api/sales-workflow/maintenance/orders/:id/archive-check', archiveCheck);
   app.post('/api/sales-workflow/maintenance/orders/:id/recalculate', recalculateOrder);
   app.post('/api/sales-workflow/maintenance/orders/:id/close', closeOrder);
+  app.post('/api/sales-workflow/maintenance/orders/:id/archive', archiveOrder);
 }
