@@ -23,6 +23,7 @@
     "verify:accounting-g01-r1": "node scripts/verify-accounting-g01-r1.mjs",
     "verify:accounting-g01-g05": "node scripts/verify-accounting-g01-g05.mjs",
     "verify:accounting-g01-g05-r1": "node scripts/verify-accounting-g01-g05.mjs",
+    "verify:accounting-g03-r1": "node scripts/verify-accounting-g03-r1.mjs",
     "verify:bank-note-reconciliation": "node scripts/verify-bank-note-reconciliation.mjs",
     "verify:accounting-period-rollforward": "node scripts/verify-accounting-period-rollforward.mjs",
     "verify:advances-offset": "node scripts/verify-advances-offset.mjs",
