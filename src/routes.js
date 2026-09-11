@@ -9,6 +9,7 @@ import { registerSalesAnalysisRoutes } from './sales-analysis.js';
 import { registerSalesPhase2Routes } from './sales-phase2.js';
 import { registerSalesMaintenanceRoutes } from './sales-maintenance.js';
 import { registerProcurementReportRoutes } from './procurement-reports.js';
+import { registerReceivableMaintenanceRoutes } from './receivable-maintenance.js';
 
 const listTables = {
   customers: ['id', 'code', 'name', 'tax_id', 'contact_name', 'phone', 'email', 'address', 'credit_limit', 'is_active'],
@@ -1054,6 +1055,7 @@ export function registerApi(app) {
   registerSalesForecastRoutes(app);
   registerFlowAuditRoutes(app);
   registerFinanceWorkflowRoutes(app);
+  registerReceivableMaintenanceRoutes(app);
   registerAccountingWorkflowRoutes(app);
   registerAccountingManagementRoutes(app);
   registerSourceFinancialPreviewRoutes(app);

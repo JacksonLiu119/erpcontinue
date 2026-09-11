@@ -15,7 +15,14 @@ const __dirname = path.dirname(__filename);
 
 app.use(express.json({ limit: '2mb' }));
 app.get('/admin', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'admin.html')));
-app.use(express.static(path.join(__dirname, '..', 'public')));
+// The local ERP is updated while the user is testing workflows.  Prevent the
+// browser from retaining an older app.js/styles.css after a code change; data
+// APIs remain the source of truth and are not cached by this static setting.
+app.use(express.static(path.join(__dirname, '..', 'public'), {
+  setHeaders(res, filePath) {
+    if (/\.(?:js|css)$/.test(filePath)) res.setHeader('Cache-Control', 'no-store');
+  }
+}));
 
 app.get('/health', async (_req, res, next) => {
   try {

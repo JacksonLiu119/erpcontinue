@@ -17,7 +17,7 @@ const featureAliases = {
   'purchase-basic-gaps':'procurement-document-types', 'purchase-maintenance-gaps':'purchase-progress', 'purchase-report-gaps':'purchase-progress',
   'receipt-pricing':'receipt-entry',
   'finance-flow':'finance-workflow', 'accounting-auto-pipe':'accounting-auto-rules', 'ar-source':'finance-workflow', 'ar-open':'finance-workflow', 'ar-credits':'finance-workflow', 'ar-receipt':'finance-workflow',
-  'ar-auto-close':'finance-workflow', 'ar-notes':'finance-cash', 'ar-aging':'finance-workflow', 'ar-reports':'finance-workflow', 'ap-source':'finance-workflow',
+  'ar-auto-close':'finance-workflow', 'ar-notes':'finance-cash', 'ar-aging':'finance-workflow', 'ar-reports':'finance-workflow', 'ar-gaps':'finance-workflow', 'ap-source':'finance-workflow',
   'ap-open':'finance-workflow', 'ap-payment':'finance-workflow', 'ap-notes':'finance-cash', 'advances-offset':'finance-workflow',
   'ap-aging':'finance-workflow', 'bank-ledger':'finance-reconcile', 'general-ledger':'accounting-general-ledger', 'accounting-financial-preview':'accounting-general-ledger', 'accounting-financial-statements':'accounting-general-ledger', 'accounting-budget':'accounting-general-ledger', 'accounting-fixed-assets':'accounting-general-ledger', 'accounting-profit-center':'accounting-general-ledger', 'accounting-system-params':'accounting-general-ledger', 'accounting-accounts':'accounting-general-ledger', 'accounting-g01':'accounting-general-ledger', 'accounting-g02':'accounting-general-ledger', 'accounting-g03':'accounting-general-ledger', 'accounting-g04':'accounting-general-ledger', 'accounting-g05':'accounting-general-ledger', 'operations-reports':'operations-reports'
 };
