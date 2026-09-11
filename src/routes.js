@@ -8,6 +8,7 @@ import { registerSalesForecastRoutes, resolveSalesForecastOrderLink, refreshSale
 import { registerSalesAnalysisRoutes } from './sales-analysis.js';
 import { registerSalesPhase2Routes } from './sales-phase2.js';
 import { registerSalesMaintenanceRoutes } from './sales-maintenance.js';
+import { registerProcurementReportRoutes } from './procurement-reports.js';
 
 const listTables = {
   customers: ['id', 'code', 'name', 'tax_id', 'contact_name', 'phone', 'email', 'address', 'credit_limit', 'is_active'],
@@ -2029,6 +2030,9 @@ function registerProcurementWorkflowRoutes(app) {
     const source = sourceDatabases[sourceDatabase] || {};
     return { tenant_id:source.tenant_id || sourceDatabase, company_id:source.company_id || sourceDatabase, source_system:source.source_system || 'iSM', source_database:sourceDatabase };
   };
+  registerProcurementReportRoutes(app, {
+    pool, tx, sourceDatabases, sourceDbFromRequest, ensureProcurementSchema, ensureTargetReceiptWorkflowSchema,
+  });
   // 採購流程的日期必須晚於來源單據，且過帳只能發生在開放會計期間。
   // 這層在真正過帳 route 前執行，不改動原始來源資料庫。
   app.use('/api/inventory-workflow/procurement/:kind/:id/post', async (req,res,next) => {

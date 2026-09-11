@@ -14,6 +14,7 @@
     "verify:audit:roots": "node scripts/verify-flow-audit-roots.mjs",
     "verify:document-natures": "node scripts/verify-document-nature-routing.mjs",
     "verify:procurement-closure": "node scripts/verify-procurement-closure.mjs",
+    "verify:procurement-g02-g04": "node scripts/verify-procurement-g02-g04.mjs",
     "verify:sales-return-finance": "node scripts/verify-sales-return-finance.mjs",
     "verify:finance-settlement-modes": "node scripts/verify-finance-settlement-modes.mjs",
     "verify:accounting-drafts": "node scripts/verify-accounting-drafts.mjs",

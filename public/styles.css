@@ -472,3 +472,4 @@ body.architecture-mode .workspace{grid-column:2}
 .auto-journal-pipe-title{border-color:var(--brand);color:#fff;background:linear-gradient(105deg,var(--brand),color-mix(in srgb,var(--brand) 78%,#fff))}
 .auto-journal-pipe-title small{color:color-mix(in srgb,#fff 82%,var(--brand))}
 .auto-journal-pipe-sources{border-left-color:var(--border);border-left-style:solid;background:color-mix(in srgb,var(--soft) 82%,var(--panel))}
+.procurement-report-screen table.grid,.procurement-maintenance-screen table.grid{min-width:1500px}.procurement-report-screen table.grid th,.procurement-maintenance-screen table.grid th{white-space:nowrap}.procurement-report-screen table.grid td,.procurement-maintenance-screen table.grid td{vertical-align:top;white-space:nowrap}.procurement-report-screen .report-meta,.procurement-maintenance-screen .report-meta{margin-top:2px}

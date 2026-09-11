@@ -193,7 +193,7 @@ const purchasePipeNodes = {
   requisitionMaintenance: { label:purchaseManualNames.requisitionMaintenance, note:'PURI06／核准請購、詢價確認、請購資料更新與部分轉單目前合併承接', status:'done', kind:'operation', screen:'requisition-maintenance' },
   order: { label:purchaseManualNames.order, note:'PURI07／建立採購單並依單別核准', status:'done', kind:'operation', screen:'purchase-order-entry' },
   orderChange: { label:purchaseManualNames.orderChange, note:'變更、核准與確認，保留版本', status:'done', kind:'operation', screen:'purchase-order-changes' },
-  arrival: { label:purchaseManualNames.expectedReceipt, note:'文件定義廠商預計進貨表；目前列出採購單分批到貨與未交量', status:'done', kind:'report', screen:'receipt-arrival' },
+  arrival: { label:purchaseManualNames.expectedReceipt, note:'PUR-G02／依預交日呈現採購量、已交量、待驗收量與未交量', status:'partial', kind:'report', screen:'receipt-arrival' },
   receipt: { label:purchaseManualNames.receipt, note:'PURI09／核對送貨文件與到貨數量', status:'done', kind:'operation', screen:'receipt-entry' },
   inspection: { label:purchaseManualNames.inspection, note:'PURI13／拆分到貨、合格與驗退數量', status:'done', kind:'operation', screen:'receipt-inspection' },
   rejectedReturn: { label:purchaseManualNames.rejectedReturn, note:'PURI10／記錄退回日期、數量與人員', status:'done', kind:'operation', screen:'receipt-rejected-return' },
@@ -204,12 +204,12 @@ const purchasePipeNodes = {
   payment: { label:'付款／沖銷（跨模組補充）', note:'付款量回寫並可多筆部分沖銷；實際作業由應付管理系統承接', status:'done', kind:'finance', screen:'ap-payment' },
   notes: { label:'應付票據／票況（跨模組補充）', note:'託收／兌現／退票／註銷與票況歷程；實際作業由財務資金模組承接', status:'done', kind:'finance', screen:'ap-notes' },
   inventory: { label:'庫存管理系統', note:'進貨合格量入庫、退貨確認扣庫存', status:'done', kind:'external', screen:'inventory-pipe' },
-  progress: { label:purchaseManualNames.progress, note:'目前由採購進度查詢承接；文件另列廠商／品號／製令預計進貨與交貨排程報表', status:'partial', kind:'report', screen:'purchase-progress' },
-  openOrders: { label:purchaseManualNames.supplierDelivery, note:'依採購單、品號與預交日查剩餘量；目前由未交查詢承接', status:'done', kind:'report', screen:'open-purchase-orders' },
+  progress: { label:purchaseManualNames.progress, note:'PUR-G02／採購單與明細一對多追蹤來源、待驗收量、未交量與未交金額', status:'partial', kind:'report', screen:'purchase-progress' },
+  openOrders: { label:purchaseManualNames.supplierDelivery, note:'PUR-G02／依廠商彙總交貨、逾期與未交狀態', status:'partial', kind:'report', screen:'open-purchase-orders' },
   receiptDetails: { label:purchaseManualNames.receiptReports, note:'目前由進貨入庫明細承接到貨、驗收、退貨、計價與付款追蹤', status:'partial', kind:'report', screen:'purchase-receipts' },
-  reports: { label:purchaseManualNames.receiptReports+'（文件落差占位）', note:'文件另列進貨／退貨明細、彙總、統計、歷史進貨與品質報表；目前沒有完整獨立報表 SHEET', status:'planned', kind:'report', screen:'purchase-report-gaps' },
-  maintenance: { label:purchaseManualNames.maintenance, note:'文件另列統計更新、廠商交貨／品質評等、指定結案與單據清除；目前尚未集中', status:'planned', kind:'management', screen:'purchase-maintenance-gaps' },
-  demandPlanning: { label:purchaseManualNames.demandPlanning, note:'文件流程中的外部補貨來源；本階段先保留節點，不納入製造／MRP', status:'planned', kind:'external', screen:'purchase-maintenance-gaps' }
+  reports: { label:'採購管理報表中心（PUR-G02／G03）', note:'已依文件建立同名報表選擇與共用來源鍵；品質原因與製令預計進貨仍標示未完成', status:'partial', kind:'report', screen:'purchase-report-gaps' },
+  maintenance: { label:purchaseManualNames.maintenance, note:'PUR-G04／已提供已交量重算預覽／受控套用、交貨品質評等與異常檢視；清除仍禁止直接刪除', status:'partial', kind:'management', screen:'purchase-maintenance-gaps' },
+  demandPlanning: { label:purchaseManualNames.demandPlanning, note:'文件流程中的外部補貨來源；本階段先保留節點，不納入製造／MRP', status:'planned', kind:'external', screen:'purchase-demand-gaps' }
 };
 const purchasePipeStatusLabels = { done:'已完成', partial:'部分完成', planned:'尚未完成' };
 
@@ -419,8 +419,9 @@ modules.find(module => module.id === 'PUR').screens = [
   ['open-purchase-orders',purchaseManualNames.supplierDelivery],
   ['purchase-receipts',purchaseManualNames.receiptReports],
   ['purchase-basic-gaps',purchaseManualNames.supplierItem+'（文件落差占位）'],
-  ['purchase-maintenance-gaps',purchaseManualNames.maintenance+'（文件落差占位）'],
-  ['purchase-report-gaps',purchaseManualNames.receiptReports+'（文件落差占位）']
+  ['purchase-maintenance-gaps',purchaseManualNames.maintenance+'（PUR-G04）'],
+  ['purchase-report-gaps','採購管理報表中心（PUR-G02／G03）'],
+  ['purchase-demand-gaps',purchaseManualNames.demandPlanning+'（文件落差占位）']
 ];
 modules.find(module => module.id === 'INV').screens = [
   ['inventory-pipe','庫存管理水管圖'],
@@ -1168,13 +1169,53 @@ function renderPurchasePipe(){
   $('#canvas .screen')?.classList.add('procurement-pipe-screen');
   bindPurchasePipeLinks();
 }
+function purchaseReportValue(value,key=''){
+  if(value===null||value===undefined||value==='')return '—';
+  if(typeof value==='number'&&/amount|rate|price|difference/i.test(key))return Number(value).toFixed(2);
+  if(typeof value==='number'&&/quantity|qty|count|line|order|receipt/i.test(key))return Number(value).toFixed(4).replace(/\.0000$/,'');
+  return String(value);
+}
+function purchaseReportSummaryHtml(summary={}){
+  const labels={row_count:'資料筆數',order_line_count:'採購明細',receipt_line_count:'進貨明細',reconciliation_count:'重算比對',mismatch_count:'量差異常',exception_count:'異常筆數',qty_ordered:'採購量',qty_received:'已交／到貨量',qty_accepted:'驗收合格量',qty_rejected:'驗退量',qty_returned:'退貨量',qty_priced:'計價量',qty_paid:'付款量',remaining_quantity:'未交量',remaining_amount:'未交金額',priced_amount:'計價金額',unpaid_amount:'未付金額'};
+  const keys=Object.keys(labels).filter(key=>summary[key]!==undefined);
+  return `<div class="kpi-grid">${keys.slice(0,12).map(key=>`<div class="kpi"><div class="label">${labels[key]}</div><div class="value">${esc(purchaseReportValue(summary[key],key))}</div></div>`).join('')}</div>`;
+}
+function renderPurchaseReportPayload(payload){
+  const columns=payload.columns||[],rows=payload.rows||[];
+  $('#purchaseReportMeta').innerHTML=`<div class="report-meta"><span>公司／來源：${esc(payload.company_id||'')}／${esc(payload.source_database||currentDatabase)}</span><span>目標資料庫：${esc(payload.target_database||targetDatabaseLabel())}</span><span>資料狀態：${esc(payload.data_state||'')}</span><span>符合筆數：${esc(payload.total_count??rows.length)}</span><span>${esc(payload.report_name||'')}</span></div>`;
+  const issues=payload.issues||[];$('#purchaseReportIssues').innerHTML=issues.length?`<div class="report-warning"><strong>文件／資料落差</strong>${issues.map(x=>`<div>${esc(x)}</div>`).join('')}</div>`:'';
+  $('#purchaseReportSummary').innerHTML=purchaseReportSummaryHtml(payload.summary||{});
+  $('#purchaseReportHead').innerHTML=columns.map(column=>`<th>${esc(column.label||column.key)}</th>`).join('');
+  $('#purchaseReportRows').innerHTML=rows.map(row=>`<tr>${columns.map(column=>`<td>${esc(purchaseReportValue(row[column.key],column.key))}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${Math.max(columns.length,1)}" class="empty-hint">目前公司與日期條件查無資料</td></tr>`;
+}
+function renderPurchaseReportCenter(){
+  const options=[
+    ['g02:progress','採購跟催管理報表'],['g02:supplier_expected','廠商預計進貨表'],['g02:item_expected','品號預計進貨表'],['g02:manufacturing_expected','製令預計進貨表'],['g02:supplier_delivery','廠商採購交貨狀況表'],
+    ['g03:supplier_detail','廠商進貨明細表'],['g03:supplier_summary','廠商進貨彙總表'],['g03:supplier_statistics','廠商進貨統計表'],['g03:item_history_detail','品號歷史進貨記錄表'],['g03:item_history_summary','品號歷史進貨彙總表'],['g03:rejected_open','驗退件未退明細表'],['g03:purchase_detail','採購明細表'],['g03:receipt_detail','進貨明細表'],['g03:rejected_return_detail','驗退件退回明細表'],['g03:return_detail','退貨明細表'],['g03:requisition_detail','廠商／品號別請購明細表'],['g03:invoice_missing','已進貨未收發票明細表']
+  ];
+  procurementShell('採購管理報表中心','PUR-G02／G03',`<div class="desc">依《iSM-採購管理系統》逐一建立同名報表選項。PUR-G02 負責跟催／預計進貨／交貨，PUR-G03 負責進退貨、請購、採購、驗退與未收發票；所有結果固定目前登入公司，保留來源鍵、下一階段與數量／金額。製令預計進貨因目前範圍沒有製造／MRP 目標結構，會明確顯示未完成，不猜測資料。</div><form id="purchaseReportFilter" class="form"><div class="row c4">${selectField('report','文件報表','')}${field('date_from','日期起日','date')}${field('date_to','日期迄日','date')}${field('supplier_code','廠商代號')}${field('item_code','品號')}${field('warehouse_code','庫別')}<div class="field"><label>公司別／資料來源（固定）</label><input value="${esc(currentCompanyContext?.company_name||currentDatabase)}／${esc(currentDatabase)}" disabled></div></div><button class="btn primary" type="submit">查詢採購報表</button></form><div id="purchaseReportMeta"></div><div id="purchaseReportIssues"></div><div class="panel"><div class="panel-head">報表摘要</div><div class="panel-body" id="purchaseReportSummary"><div class="empty-hint">請選擇報表查詢。</div></div></div><div class="panel"><div class="panel-head">明細／彙總結果</div><div class="panel-body"><div class="table-wrap"><table class="grid"><thead id="purchaseReportHead"></thead><tbody id="purchaseReportRows"></tbody></table></div></div></div>`);
+  const form=$('#purchaseReportFilter');form.elements.report.innerHTML=options.map(([value,label],index)=>`<option value="${value}"${index===0?' selected':''}>${label}</option>`).join('');
+  $('#canvas .screen')?.classList.add('procurement-report-screen');
+  const query=()=>{const data=Object.fromEntries(new FormData(form)),[group,report]=String(data.report||'g02:progress').split(':');return {group,report,query:new URLSearchParams({...data,source_database:currentDatabase,limit:'500'}).toString()};};
+  const load=async()=>{const selection=query();try{const payload=await api(`/api/procurement/${selection.group}/reports?${selection.query}`);renderPurchaseReportPayload(payload);}catch(e){$('#purchaseReportIssues').innerHTML=`<div class="report-warning error"><strong>載入失敗</strong><div>${esc(e.message)}</div></div>`;}};
+  form.onsubmit=e=>{e.preventDefault();load();};load();
+}
+function renderPurchaseMaintenance(){
+  procurementShell('其他維護作業（PUR-G04）','PUR-G04',`<div class="desc">依文件的採購已交量重計、統計資料更新、廠商交貨／品質評等與異常檢視建立集中承接頁。預覽只讀；套用重算需輸入原因，已結案／已取消單據只列異常，不自動改狀態。單據清除維持受控沖回／封存規則，不直接刪除。</div><form id="purchaseMaintenanceFilter" class="form"><div class="row c4">${field('date_from','日期起日','date')}${field('date_to','日期迄日','date')}${field('supplier_code','廠商代號')}${field('item_code','品號')}${field('warehouse_code','庫別')}<div class="field"><label>公司別／資料來源（固定）</label><input value="${esc(currentCompanyContext?.company_name||currentDatabase)}／${esc(currentDatabase)}" disabled></div></div><div><button class="btn primary" type="submit">重新整理／預覽重算</button> <button class="btn" type="button" id="purchaseMaintenanceApply">套用已交量重算</button></div></form><div id="purchaseMaintenanceMeta"></div><div id="purchaseMaintenanceSummary"></div><div class="panel"><div class="panel-head">採購已交量重算比對</div><div class="panel-body"><div class="table-wrap"><table class="grid"><thead id="purchaseReconcileHead"></thead><tbody id="purchaseReconcileRows"></tbody></table></div></div></div><div class="panel"><div class="panel-head">廠商交貨／品質評等</div><div class="panel-body"><div class="table-wrap"><table class="grid"><thead id="purchaseRatingHead"></thead><tbody id="purchaseRatingRows"></tbody></table></div></div></div><div class="panel"><div class="panel-head">採購異常檢視</div><div class="panel-body"><div class="table-wrap"><table class="grid"><thead id="purchaseExceptionHead"></thead><tbody id="purchaseExceptionRows"></tbody></table></div></div></div>`);
+  const form=$('#purchaseMaintenanceFilter');
+  $('#canvas .screen')?.classList.add('procurement-maintenance-screen');
+  const query=()=>new URLSearchParams({...Object.fromEntries(new FormData(form)),source_database:currentDatabase,limit:'500'}).toString();
+  const renderTable=(head,body,columns,rows)=>{head.innerHTML=(columns||[]).map(column=>`<th>${esc(column.label||column.key)}</th>`).join('');body.innerHTML=(rows||[]).map(row=>`<tr>${(columns||[]).map(column=>`<td>${esc(purchaseReportValue(row[column.key],column.key))}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${Math.max((columns||[]).length,1)}" class="empty-hint">目前沒有資料</td></tr>`;};
+  let latest=null;
+  const load=async()=>{try{latest=await api(`/api/procurement/g04/maintenance?${query()}`);$('#purchaseMaintenanceMeta').innerHTML=`<div class="report-meta"><span>公司／來源：${esc(latest.company_id||'')}／${esc(latest.source_database||currentDatabase)}</span><span>資料狀態：${esc(latest.data_state||'')}</span><span>已交量差異：${esc(latest.summary?.mismatch_count||0)}</span><span>異常：${esc(latest.summary?.exception_count||0)}</span></div>`;$('#purchaseMaintenanceSummary').innerHTML=purchaseReportSummaryHtml(latest.summary||{});renderTable($('#purchaseReconcileHead'),$('#purchaseReconcileRows'),latest.reconciliation?.columns,latest.reconciliation?.rows);renderTable($('#purchaseRatingHead'),$('#purchaseRatingRows'),latest.supplier_ratings?.columns,latest.supplier_ratings?.rows);renderTable($('#purchaseExceptionHead'),$('#purchaseExceptionRows'),latest.exceptions?.columns,latest.exceptions?.rows);}catch(e){toast(e.message,true);}};
+  form.onsubmit=e=>{e.preventDefault();load();};$('#purchaseMaintenanceApply').onclick=async()=>{if(!latest||!Number(latest.reconciliation?.mismatch_count)){toast('目前沒有可套用的已交量差異');return;}const reason=window.prompt('請輸入套用已交量重算原因');if(!reason)return;if(!window.confirm('套用後只會更新目前公司且未結案／未取消採購單的已交量，確定繼續？'))return;try{const result=await api('/api/procurement/g04/recalculate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...Object.fromEntries(new FormData(form)),source_database:currentDatabase,apply:true,reason})});toast(`已套用 ${result.updated_count||0} 筆；結案／取消單據阻擋 ${result.blocked_count||0} 筆`);load();}catch(e){toast(e.message,true);}};load();
+}
 function renderProcurementPlannedScreen(screen){
   const configs={
      'purchase-basic-gaps': {title:'品號廠商建立作業（文件落差占位）',code:'PUR-BASIC-GAP',desc:'文件基本資料管理包含供應廠商、供應商變更／清單／地址條件、品號廠商建立、品號廠商特價與明細；目前供應商由共用 DB 主檔承接，尚沒有完整獨立的 PUR 品號／廠商維護 SHEET。',decision:'先確認哪些欄位沿用共用廠商／品號主檔，哪些需要採購專屬有效期間、價格與公司別資料；確認前不新增資料表。'},
-     'purchase-maintenance-gaps': {title:'其他維護作業（文件落差占位）',code:'PUR-MAINT-GAP',desc:'文件管理維護作業包含採購已交量重計、統計資料更新、廠商交貨／品質評等、廠商進貨異常、廠商資料／採購狀況／廠商商品交易查詢與單據清除；目前沒有完整集中作業 SHEET。',decision:'先確認重算／更新是否延伸既有流程稽核與報表 API，評等與異常是否共用供應商品質資料；確認後再補功能與權限。'},
-     'purchase-report-gaps': {title:'進退貨管理報表（文件落差占位）',code:'PUR-RPT-GAP',desc:'文件列有採購跟催、廠商／品號／製令預計進貨、進退貨管理、廠商進貨明細／彙總／統計、品號歷史進貨與交貨品質原因等報表；目前由採購進度、未交查詢與進貨入庫明細等共用頁面承接，尚未逐一拆成文件同名 SHEET。',decision:'先確認集中於採購報表中心，或依廠商／品號／品質／歷史拆成多個 SHEET；確認欄位、來源與公司別隔離後再補 API。'}
+     'purchase-demand-gaps': {title:purchaseManualNames.demandPlanning+'（文件落差占位）',code:'PUR-DEMAND-GAP',desc:'文件流程保留批次需求計劃／外部補貨來源；本階段不納入製造／MRP，沒有既有目標結構可安全對應。',decision:'待製造／MRP 範圍與資料結構確認後，再決定與採購預計進貨或庫存需求整合方式。'}
   };
-  const config=configs[screen]||configs['purchase-report-gaps'];
+  const config=configs[screen]||configs['purchase-basic-gaps'];
   procurementShell(config.title,config.code,`<div class="procurement-planned-banner"><strong>目前為文件流程占位</strong><p>${esc(config.desc)}</p><p><b>待確認的合併方式：</b>${esc(config.decision)}</p><button class="btn" id="procurementPlannedBack" type="button">回到採購管理水管圖</button></div><div class="desc">此頁只說明 PDF 定義與目前 SHEET 落差，不會建立資料、變更 SH／SC 原始庫或自動推導未確認的表結構。</div>`);
   $('#procurementPlannedBack').onclick=()=>navigateToScreen('purchase-pipe');
   $('#canvas .screen')?.classList.add('procurement-planned-screen');
@@ -1856,9 +1897,9 @@ const confirmedNextPhaseRoadmap=[
   ['G04-R1','G04 後續：固定資產異動與完整折舊規則','可先使用既有資產卡片、折舊底稿與傳票流程補取得／處分／移轉／減損、多折舊法、期末結轉與權限攔截；原始資產欄位對照另行保留。','partial'],
   ['G05-R1','G05 後續：利潤中心正式分攤與損益分析','可先使用既有利潤中心與分攤比例結構補來源帶入、正式分攤傳票、部門／利潤中心損益、預算比較與更正版本；完成後再用各公司測試資料回歸。','partial'],
   ['INV-G03','庫存：專用報表群與共用報表中心','可先以現有庫存異動、餘額、可用量與預計進料查詢整理文件所列報表群、維度與同名入口；不新增資料表，舊名稱以相容別名處理。','partial'],
-  ['PUR-G02','採購：跟催與預計進貨報表群','可先以現有採購進度、未交量與待進貨資料整理跟催、廠商／品號／製令預計進貨及交貨狀況報表；資料不足時顯示空結果與來源狀態，不直接補造來源資料。','partial'],
-  ['PUR-G03','採購：進退貨與品質報表群','可先以現有進貨、驗收、驗退、退貨與採購追蹤資料整理明細／彙總／統計／歷史進貨及驗退未退報表；欄位不足以空值與異常原因呈現，不新增資料表。','partial'],
-  ['PUR-G04','採購：管理維護與資料更新作業','可先使用現有一對多數量、事件歷程與受控更正流程補採購已交量重算、統計更新、交貨／品質評等及異常查詢；單據清除維持受控替代，不直接刪除。','planned'],
+  ['PUR-G02','採購：跟催與預計進貨報表群','已完成同名報表 API／報表中心：採購跟催、廠商預計進貨、品號預計進貨與廠商採購交貨狀況均依採購單一對多明細計算到貨、待驗收、未交量與未交金額，並保留來源鍵與下一階段；製令預計進貨因本階段不含製造／MRP，仍明確列為未完成。','partial'],
+  ['PUR-G03','採購：進退貨與品質報表群','已完成文件列示的廠商進貨明細／彙總／統計、品號歷史進貨、驗退件未退／退回、採購、進貨、退貨、請購及已進貨未收發票報表承接，並統一呈現到貨／驗收／驗退／退貨／計價／付款量、金額、來源鍵與下一階段；正式列印版與更細的品質原因維度仍保留落差。','partial'],
+  ['PUR-G04','採購：管理維護與資料更新作業','已完成即時計算的統計更新承接、採購已交量重算預覽／受控套用、廠商交貨／品質評等與異常檢視；已結案／已取消單據只列異常不自動改狀態，直接清除仍禁止，後續補封存／受控更正事件歷程與權限。','partial'],
 ];
 function renderConfirmedNextPhaseRoadmap(items=confirmedNextPhaseRoadmap){
   return items.length?items.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${esc(no)}</span><div><strong>${esc(title)}</strong><p>${esc(desc)}</p></div></div>`).join(''):'<div class="desc">目前沒有其他已確認的開發項目。</div>';
@@ -2151,9 +2192,9 @@ function renderArchitectureScreen(){
     ['INV-G03','庫存：專用報表群與共用報表中心','文件另列庫存異動、進耗存、預計狀況、ABC、呆滯、週轉率、再補貨、庫齡與專案庫存等報表；目前由共用報表中心與新的 inventory-new-* 查詢承接，舊 inventory-detail／inventory-ledger／inventory-balance／inventory-movement-stats／department-movement-stats 是相容名稱，需先決定保留別名或合併成報表群。','partial'],
     ['INV-G04','庫存：附加主檔與前置作業對照','文件還有庫別、編碼原則、商品條碼、屬性組合與換算單位等作業；目前部分位於 DB／共用設定，需逐項確認現有 SHEET 對應，避免重複建立或漏掉公司別隔離。','partial'],
     ['PUR-G01','採購：品號／廠商特價與基本資料對照','文件列供應商變更、地址條件、品號廠商建立、品號廠商特價與明細；目前供應商與品號由共用 DB 主檔承接，尚未形成完整公司隔離的採購專屬對照。先討論沿用共用主檔或補採購專屬欄位。','planned'],
-    ['PUR-G02','採購：跟催與預計進貨報表群','文件列採購跟催、廠商／品號／製令預計進貨、廠商交貨排程與採購交貨狀況；目前由採購進度與未交查詢承接，需確認集中報表中心或拆成多個 SHEET。','partial'],
-    ['PUR-G03','採購：進退貨與品質報表群','文件列進貨／退貨明細、彙總、統計、品號歷史進貨、廠商／品號不良原因與驗退未退；目前由進貨入庫明細、驗退件退回與採購進度承接，需逐一補齊欄位與來源。','partial'],
-    ['PUR-G04','採購：管理維護與資料更新作業','文件列採購已交量重計、統計資料更新、廠商交貨／品質評等、廠商進貨異常、狀況查詢與單據清除；目前沒有集中維護 SHEET，需先確認重算、更新與受控更正的權責。','planned'],
+    ['PUR-G02','採購：跟催與預計進貨報表群','已完成集中報表中心與同名報表 API，依公司／日期／廠商／品號／庫別查詢，逐筆保留採購來源與下一階段；製令預計進貨因製造／MRP 不在本階段，維持明確未完成。','partial'],
+    ['PUR-G03','採購：進退貨與品質報表群','已完成文件列示的進退貨、歷史、驗退未退／退回、採購／請購、未收發票報表承接；仍需補正式列印／匯出格式、文件未明確的品質原因代碼與更細維度，不能以猜測欄位代替。','partial'],
+    ['PUR-G04','採購：管理維護與資料更新作業','已完成即時計算、已交量重算預覽／受控套用、交貨／品質評等與異常檢視；仍需補受控封存／更正事件歷程、權限分離與單據清除前置備份／稽核，直接刪除維持禁止。','partial'],
     ['PUR-G05','採購：批次需求計劃外部聯動','文件主流程包含批次需求計劃系統作為補貨來源；目前未納入製造／MRP，先保留外部節點，不在本階段建立需求計劃資料結構。','planned'],
       ['ACP-G01','應付：自動結帳／自動付款與專用報表分流','《iSM-應付管理系統》將應付憑單自動結帳作業、自動付款作業及應付憑單憑證、付款單憑證、應付帳款明細／分戶帳、進貨發票金額差異、廠商帳齡、未結案應付、應付帳款總表與模擬付款明細表分開列示；目前節點與共用應付憑單／付款／報表 SHEET 已可追蹤，但仍需確認逐項拆分或集中報表中心的欄位、權限、來源鍵與公司別規則後再補獨立畫面。','partial'],
       ['AUT-G04','自動分錄：製令／託外／成本來源節點','《iSM-自動分錄系統》AJSI13～AJSI19、AJSI24 及其製令／託外／成本來源目前依既定範圍尚未納入，水管圖以紅色虛線占位；需另依製造／成本文件確認既有來源表、科目與過帳規則後，再決定是否進入下一階段。','planned'],
@@ -2504,7 +2545,9 @@ const procurementShell = (title, code, body) => {
 
 function renderProcurementScreen(screen) {
   if (screen==='purchase-pipe') return renderPurchasePipe();
-  if (['purchase-basic-gaps','purchase-maintenance-gaps','purchase-report-gaps'].includes(screen)) return renderProcurementPlannedScreen(screen);
+  if (screen==='purchase-report-gaps') return renderPurchaseReportCenter();
+  if (screen==='purchase-maintenance-gaps') return renderPurchaseMaintenance();
+  if (['purchase-basic-gaps','purchase-demand-gaps'].includes(screen)) return renderProcurementPlannedScreen(screen);
   if (screen==='procurement-document-types') return renderProcurementTypes();
   if (screen==='requisition-entry') return renderProcurementEntry('requisitions');
   if (screen==='requisition-maintenance') return renderRequisitionMaintenance();
@@ -2597,8 +2640,8 @@ async function loadReturnableReceipts(){try{const rows=await api(`/api/procureme
 async function savePurchaseReturn(e){e.preventDefault();try{const data=Object.fromEntries(new FormData(e.currentTarget));data.source_database=currentDatabase;await api('/api/procurement/returns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});toast('退貨／折讓單已建立');loadPurchaseReturns();}catch(x){toast(x.message,true);}}
 async function loadPurchaseReturns(){try{const rows=await api(`/api/procurement/returns?${procurementSource()}`);$('#procurementRows').innerHTML=rows.map(r=>`<tr><td>${esc(r.return_no)}</td><td>${esc(r.return_date)}</td><td>${r.return_type==='return'?'退貨':'折讓'}</td><td>${esc(r.supplier_code)}</td><td>${esc(r.item_code)}</td><td>${esc(r.return_quantity)}</td><td>${esc(r.allowance_amount)}</td><td>${esc(r.status)}</td><td>${r.status==='draft'?`<button class="btn small" data-return-approve="${r.id}">核準</button>`:'已核準'}</td></tr>`).join('')||'<tr><td colspan="9">尚無退貨／折讓單</td></tr>';document.querySelectorAll('[data-return-approve]').forEach(b=>b.onclick=async()=>{try{await api(`/api/procurement/returns/${b.dataset.returnApprove}/approve`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_database:currentDatabase})});toast('核準完成，待庫存過帳後才回沖採購已交量');loadPurchaseReturns();}catch(e){toast(e.message,true);}});}catch(e){toast(e.message,true);}}
 
-function renderProcurementReport(type){const open=type==='open-orders',title=open?'採購未交查詢':'採購進度查詢';procurementShell(title,open?'PUR-OPEN':'PUR-PROGRESS',panelTable(title,['採購單','訂單日','預交日','廠商','品號','品名','採購量','已收量','未交量',open?'未交金額':'進度／結案'],'procurementRows'));$('#procurementReload').onclick=()=>loadProcurementReport(type);loadProcurementReport(type);}
-async function loadProcurementReport(type){try{const rows=await api(`/api/procurement/${type}?${procurementSource()}`);$('#procurementRows').innerHTML=rows.map(r=>`<tr><td>${esc(r.purchase_order_no)}</td><td>${esc(r.order_date)}</td><td>${esc(r.expected_date)}</td><td>${esc(r.supplier_code)}</td><td>${esc(r.item_code)}</td><td>${esc(r.item_name)}</td><td>${esc(r.qty_ordered)}</td><td>${esc(r.qty_received)}</td><td>${esc(r.remaining_quantity)}</td><td>${esc(type==='open-orders'?r.remaining_amount:r.progress_status)}</td></tr>`).join('')||'<tr><td colspan="10">目前沒有資料</td></tr>';}catch(e){toast(e.message,true);}}
+function renderProcurementReport(type){const open=type==='open-orders',title=open?'採購未交查詢':'採購進度查詢';procurementShell(title,open?'PUR-OPEN':'PUR-PROGRESS',panelTable(title,['採購單','訂單日','預交日','廠商','品號','品名','採購量','已交量','待驗收量','未交量','未交金額','狀態／來源'],'procurementRows'));$('#procurementReload').onclick=()=>loadProcurementReport(type);loadProcurementReport(type);}
+async function loadProcurementReport(type){try{const query=new URLSearchParams({source_database:currentDatabase,report:'progress',limit:'100'});if(type==='open-orders')query.set('open_only','1');const payload=await api(`/api/procurement/g02/reports?${query}`),rows=payload.rows||[];$('#procurementRows').innerHTML=rows.map(r=>`<tr><td>${esc(r.purchase_order_no)}</td><td>${esc(r.order_date)}</td><td>${esc(r.expected_date)}</td><td>${esc(r.supplier_code)}</td><td>${esc(r.item_code)}</td><td>${esc(r.item_name)}</td><td>${esc(r.qty_ordered)}</td><td>${esc(r.qty_received)}</td><td>${esc(r.pending_arrival_quantity)}</td><td>${esc(r.remaining_quantity)}</td><td>${esc(r.remaining_amount)}</td><td>${esc(r.progress_status)}<br><small>${esc(r.source_key)}／${esc(r.next_stage)}</small></td></tr>`).join('')||'<tr><td colspan="12">目前沒有資料</td></tr>';}catch(e){toast(e.message,true);}}
 
 function renderInventoryAvailability(){inventoryShell('完整可用量／庫存餘額','INV-ATP',`<div class="desc">計算公式：可用量＝現有量＋待進貨量－待出貨量－安全庫存。受訂量為已核准訂單量，待出貨量為受訂量扣除已銷貨量；只有已驗收且完成入庫過帳的進貨才列入現有量。</div>${panelTable('公司別／品號／庫別可用量',['品號','品名','庫別','安全庫存','現有量','受訂量','待出貨量','待進貨量','可用量','狀態'],'inventoryAvailabilityRows')}`);$('#procurementReload').onclick=loadInventoryAvailability;loadInventoryAvailability();}
 async function loadInventoryAvailability(){try{const result=await api(`/api/inventory-workflow/availability?source_database=${encodeURIComponent(currentDatabase)}&limit=500`),rows=result.data||result;$('#inventoryAvailabilityRows').innerHTML=rows.map(r=>{const available=Number(r.available_quantity||0),beforeSafety=Number(r.available_before_safety||0),safety=Number(r.safety_stock||0),status=available<0?'庫存短缺':beforeSafety<safety?'低於安全庫存':'可供使用';return `<tr><td>${esc(r.item_code)}</td><td>${esc(r.item_name)}</td><td>${esc(r.warehouse_code||'未指定')}</td><td>${esc(r.safety_stock)}</td><td>${esc(r.on_hand_quantity)}</td><td>${esc(r.ordered_quantity)}</td><td>${esc(r.pending_shipment_quantity)}</td><td>${esc(r.pending_receipt_quantity)}</td><td><strong>${esc(r.available_quantity)}</strong></td><td>${status}</td></tr>`;}).join('')||'<tr><td colspan="10" class="empty-hint">目前公司查無庫存、受訂或待進貨資料</td></tr>';}catch(e){$('#inventoryAvailabilityRows').innerHTML=`<tr><td colspan="10" class="empty-hint">載入失敗：${esc(e.message)}</td></tr>`;}}
