@@ -1849,6 +1849,16 @@ function renderAccountingDraftsV2(){
   Promise.all([loadSources(),loadDrafts(),loadJournals()]).then(runReport);
 }
 const confirmedNextPhaseRoadmap=[
+  ['SAL-G02-R1','SAL-G02 後續：單據清除的受控替代流程','可先使用現有目標單據關聯、事件歷程與沖回機制開發作廢／沖回／封存流程；維持禁止直接刪除歷史資料，並把下游關聯、期間、核准與權限檢查做成攔截。','planned'],
+  ['AR-G03','應收：單據清除、月統計重計與月底結轉','可先以現有應收、總帳與期間資料開發受控清除替代、月統計重計、月底快照與核對畫面；不直接刪除來源，後續再以測試資料驗證子帳與總帳差異。','planned'],
+  ['G01-R1','G01 後續：會計系統參數完整規則','可先依既有目標參數與文件定義補參數互斥／必填、單據性質取值、版本與生效攔截；不需等待原始交易資料，來源欄位差異另列查核。','partial'],
+  ['G03-R1','G03 後續：預算控制與完整管理報表','可先使用既有預算版本／明細／比較結構補超預算攔截、年度／月份彙總、版本差異與報表維度；以測試資料驗證，不新增資料表。','partial'],
+  ['G04-R1','G04 後續：固定資產異動與完整折舊規則','可先使用既有資產卡片、折舊底稿與傳票流程補取得／處分／移轉／減損、多折舊法、期末結轉與權限攔截；原始資產欄位對照另行保留。','partial'],
+  ['G05-R1','G05 後續：利潤中心正式分攤與損益分析','可先使用既有利潤中心與分攤比例結構補來源帶入、正式分攤傳票、部門／利潤中心損益、預算比較與更正版本；完成後再用各公司測試資料回歸。','partial'],
+  ['INV-G03','庫存：專用報表群與共用報表中心','可先以現有庫存異動、餘額、可用量與預計進料查詢整理文件所列報表群、維度與同名入口；不新增資料表，舊名稱以相容別名處理。','partial'],
+  ['PUR-G02','採購：跟催與預計進貨報表群','可先以現有採購進度、未交量與待進貨資料整理跟催、廠商／品號／製令預計進貨及交貨狀況報表；資料不足時顯示空結果與來源狀態，不直接補造來源資料。','partial'],
+  ['PUR-G03','採購：進退貨與品質報表群','可先以現有進貨、驗收、驗退、退貨與採購追蹤資料整理明細／彙總／統計／歷史進貨及驗退未退報表；欄位不足以空值與異常原因呈現，不新增資料表。','partial'],
+  ['PUR-G04','採購：管理維護與資料更新作業','可先使用現有一對多數量、事件歷程與受控更正流程補採購已交量重算、統計更新、交貨／品質評等及異常查詢；單據清除維持受控替代，不直接刪除。','planned'],
 ];
 function renderConfirmedNextPhaseRoadmap(items=confirmedNextPhaseRoadmap){
   return items.length?items.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${esc(no)}</span><div><strong>${esc(title)}</strong><p>${esc(desc)}</p></div></div>`).join(''):'<div class="desc">目前沒有其他已確認的開發項目。</div>';
@@ -2126,7 +2136,7 @@ function renderArchitectureScreen(){
   // 使用者已確認的項目進入開發順序；完成後即移到下方「已完成內容」折疊區。
    const roadmap=confirmedNextPhaseRoadmap;
    const completedDisplay=completed.map(([no,title,desc,status])=>[no,title.replaceAll('銷售管理','訂單管理'),desc.replaceAll('銷售管理','訂單管理'),status]);
-  const recommendations=[
+   const recommendations=[
     ['SAL-G02-R1','SAL-G02 後續：單據清除的受控替代流程','管理維護與四個只讀查詢已完成；文件仍列單據清除，但目前依安全規則維持關閉。後續若要開放，需先定義作廢／沖回／封存替代方案、下游關聯、期間、核准、權限與清除前稽核，不直接刪除歷史資料。','planned'],
     ['SAL-G03-R1','SAL-G03 後續：特價產生與正式報表版面','計價資料明細已可查目標計價版本、級距與事件；文件另列客戶商品特價產生、商品價格檢查及正式列印格式，尚未在既有資料結構中形成獨立作業。後續先確認 COPMB／COPMC 對照與欄位，再補正式版面，不新增資料表。','partial'],
     ['SAL-G04-R1','SAL-G04 後續：文件專用報表剩餘欄位與版型','20 筆回歸與報表中心核心承接已完成；訂單利潤完整成本、客戶訂單 F/O、訂金結帳狀況、正式 PDF／列印版、正式銷退原因代碼，以及部分 iSM 專用欄位仍是文件落差。製造／成本與需新增結構的項目，先確認既有欄位與取得同意後再做。','partial'],
@@ -2147,7 +2157,9 @@ function renderArchitectureScreen(){
     ['PUR-G05','採購：批次需求計劃外部聯動','文件主流程包含批次需求計劃系統作為補貨來源；目前未納入製造／MRP，先保留外部節點，不在本階段建立需求計劃資料結構。','planned'],
       ['ACP-G01','應付：自動結帳／自動付款與專用報表分流','《iSM-應付管理系統》將應付憑單自動結帳作業、自動付款作業及應付憑單憑證、付款單憑證、應付帳款明細／分戶帳、進貨發票金額差異、廠商帳齡、未結案應付、應付帳款總表與模擬付款明細表分開列示；目前節點與共用應付憑單／付款／報表 SHEET 已可追蹤，但仍需確認逐項拆分或集中報表中心的欄位、權限、來源鍵與公司別規則後再補獨立畫面。','partial'],
       ['AUT-G04','自動分錄：製令／託外／成本來源節點','《iSM-自動分錄系統》AJSI13～AJSI19、AJSI24 及其製令／託外／成本來源目前依既定範圍尚未納入，水管圖以紅色虛線占位；需另依製造／成本文件確認既有來源表、科目與過帳規則後，再決定是否進入下一階段。','planned'],
-   ];
+    ];
+   const confirmedRoadmapIds=new Set(roadmap.map(([no])=>no));
+   const remainingRecommendations=recommendations.filter(([no])=>!confirmedRoadmapIds.has(no));
   const compactColumn=(title,subtitle,steps)=>`<div class="compact-flow-column"><div class="compact-flow-title">${title}<small>${subtitle}</small></div>${steps.map(([name,note,status,impact],index)=>`${index?'<div class="compact-arrow">↓</div>':''}<div class="compact-node ${status}"><strong>${name}</strong><small>${note}</small>${impact?`<em>${impact}</em>`:''}</div>`).join('')}</div>`;
   const compactFlow=`<div class="architecture-compact">${compactColumn('訂單／銷售','COP → ACR',[
     ['客戶／品號／計價','S01 申請信用、S02 客戶品號與批次價格','done','核准後套用'],['銷售預測','依品號／依類別；版本／期間／明細／結案','done','接單量分開核對'],['報價／合約／獨立起點','公司別單別／核准／轉訂單；合約可一對多','done','S03'],['訂單／變更／交期','公司別單別／分批銷貨／交期排程','done','S04'],['訂單後續工具','重算／結案／揀貨／缺料需求；核准後正式請購／採購與暫出收入認列','done','S06'],['銷貨確認','公司別單別／過帳後出庫','done','庫存－'],['銷售統計／分析','COPR20 與 COP-ANALYSIS；客戶／品號／部門／業務員／期間','done','可追溯'],['銷退／折讓／憑證','銷退回庫、折讓不動庫存；應收來源、列印／匯出','done','S07'],['應收憑單','結帳日、發票與多幣別已完成','done',''],['收款／票據','匯差／託收／兌現／退票／註銷已完成','done','銀行餘額＋歷程']
@@ -2161,7 +2173,7 @@ function renderArchitectureScreen(){
   document.querySelectorAll('.compact-node small').forEach(element=>{if(element.textContent.includes('SC 財報預覽'))element.textContent=element.textContent.replace('SC 財報預覽','公司別三大財報');});
    document.querySelector('.architecture-block .architecture-canvas')?.insertAdjacentHTML('beforebegin','<div class="architecture-pipe-entry"><div><strong>第一階段：訂單管理水管圖</strong><small>依《iSM-訂單管理系統》排序；節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-sales-screen="sales-pipe">開啟訂單管理水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：庫存管理水管圖</strong><small>依《iSM-庫存管理系統》排序；開帳、異動、驗收／過帳、可用量、台帳與更正節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-inventory-screen="inventory-pipe">開啟庫存水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：採購管理水管圖</strong><small>依《iSM-採購管理系統》排序；現有 SHEET 已對應主線，缺少的基本資料、管理維護與專用報表以占位標示並列入建議</small></div><button class="btn primary" type="button" data-purchase-screen="purchase-pipe">開啟採購水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：應收管理水管圖</strong><small>依《iSM-應收管理系統》排序；銷貨／銷退、應收、結帳／發票、收款／沖銷、待抵／退款與追蹤節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-receivable-screen="receivable-pipe">開啟應收水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：應付管理水管圖</strong><small>依《iSM-應付管理系統》排序；進貨／退貨、應付、合併計價、付款／沖銷、待付／票據與費用節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-payable-screen="payable-pipe">開啟應付水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：銀行／票據資金水管圖</strong><small>依財務演練文件排序；存提款、票據票況、逐筆對帳、餘額、資金報表與管帳／管錢／對帳權責可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-treasury-screen="treasury-pipe">開啟銀行／票據資金水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：自動分錄水管圖</strong><small>依《iSM-自動分錄系統》分錄性質設定／分錄底稿管理排序；節點可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-finance-screen="accounting-auto-pipe">開啟自動分錄水管圖</button></div><div class="architecture-pipe-entry"><div><strong>第一階段：會計總帳水管圖</strong><small>依財務演練文件排序；分錄底稿、維護、核准、傳票、總帳、結轉、報表、來源鎖定與期間控制可直接進入對應 SHEET</small></div><button class="btn primary" type="button" data-ledger-screen="ledger-pipe">開啟會計總帳水管圖</button></div>');
   $('#refreshScreen').onclick=renderArchitectureScreen;
-   const recommendationBlock=`<div class="architecture-block"><h3>下一階段開發建議</h3><div class="desc">以下為依《iSM-訂單管理系統》、《iSM-庫存管理系統》、《iSM-採購管理系統》、《iSM-應付管理系統》、《iSM-自動分錄系統》及《iSM-財務實作演練班》比對目前程式後的新落差；尚未確認前只列在本區，不會建立資料表或寫入資料。確認要修改後再移入上方「下一階段開發順序（已確認項目）」。</div><div class="architecture-roadmap">${recommendations.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${no}</span><div><strong>${title}</strong><p>${desc}</p></div></div>`).join('')}</div></div>`;
+   const recommendationBlock=`<div class="architecture-block"><h3>下一階段開發建議</h3><div class="desc">以下為依《iSM-訂單管理系統》、《iSM-庫存管理系統》、《iSM-採購管理系統》、《iSM-應付管理系統》、《iSM-自動分錄系統》及《iSM-財務實作演練班》比對目前程式後、仍需資料／結構／規則確認的新落差；可直接使用既有目標結構開發的項目已移至上方「下一階段開發順序（已確認項目）」。本區不建立資料表、不寫入資料，也不會清除來源資料。</div><div class="architecture-roadmap">${remainingRecommendations.map(([no,title,desc,status])=>`<div class="roadmap-card ${status}"><span class="roadmap-no">${no}</span><div><strong>${title}</strong><p>${desc}</p></div></div>`).join('')||'<div class="desc">目前沒有其他需要等待資料／結構／規則確認的建議。</div>'}</div></div>`;
   $('#canvas .arch-rule-grid')?.insertAdjacentHTML('beforebegin',recommendationBlock);
   bindSalesPipeLinks();
   bindInventoryPipeLinks();
