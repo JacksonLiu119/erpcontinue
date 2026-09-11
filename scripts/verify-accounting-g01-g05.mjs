@@ -11,6 +11,7 @@ const codes = {
   account: `9${stamp}`,
   budget: `V_G03_${stamp}`,
   asset: `FA${stamp}`,
+  asset2: `FA${stamp}B`,
   center: `C${stamp}`,
   allocation: `A${stamp}`
 };
@@ -85,7 +86,7 @@ async function cleanup(db, ids) {
   ids.accountIds.push(...accountRows.map(row => Number(row.id)));
   const [budgetRows] = await db.query('SELECT id FROM accounting_budgets WHERE budget_code=?', [codes.budget]);
   ids.budgetIds.push(...budgetRows.map(row => Number(row.id)));
-  const [assetRows] = await db.query('SELECT id FROM accounting_fixed_assets WHERE asset_no=?', [codes.asset]);
+  const [assetRows] = await db.query('SELECT id FROM accounting_fixed_assets WHERE asset_no IN (?)', [[codes.asset, codes.asset2]]);
   ids.assetIds.push(...assetRows.map(row => Number(row.id)));
   const [centerRows] = await db.query('SELECT id FROM accounting_profit_centers WHERE center_code=?', [codes.center]);
   ids.centerIds.push(...centerRows.map(row => Number(row.id)));
@@ -251,6 +252,57 @@ try {
   assert(assetDetail.depreciations.some(row => String(row.status) === 'posted'), 'G04 資產卡片未回寫已過帳折舊', assetDetail);
   assert(assetDetail.events.some(row => String(row.event_kind) === 'depreciation_post'), 'G04 資產事件未保留折舊過帳', assetDetail);
 
+  const transfer = await expectOk(request, `/accounting/g04/assets/${asset.id}/transfer`, 'POST', {
+    source_database: source,
+    effective_date: testDate,
+    target_department_code: 'G04-VERIFY',
+    target_location: '回歸測試區',
+    reason: marker
+  });
+  assert(transfer.department_code === 'G04-VERIFY' && transfer.location === '回歸測試區', 'G04 受控移轉未回寫部門／地點', transfer);
+
+  const asset2 = await expectOk(request, '/accounting/g04/assets', 'POST', {
+    source_database: source,
+    asset_no: codes.asset2,
+    asset_name: 'G04 回歸減損固定資產',
+    category_code: 'VERIFY',
+    account_code: '1501',
+    account_name: '累計折舊',
+    depreciation_expense_account_code: '5101',
+    depreciation_expense_account_name: '銷貨成本',
+    original_cost: 1200,
+    residual_value: 0,
+    useful_life_months: 12,
+    acquisition_date: '2026-08-01',
+    in_service_date: '2026-08-01',
+    currency_code: 'TWD',
+    note: marker
+  });
+  ids.assetIds.push(asset2.id);
+  await expectOk(request, `/accounting/g04/assets/${asset2.id}/approve`, 'POST', { source_database: source });
+  const disposalProposal = await expectOk(request, `/accounting/g04/assets/${asset.id}/disposal`, 'POST', {
+    source_database: source,
+    disposal_date: testDate,
+    proceeds_amount: 100,
+    reason: marker
+  });
+  assert(disposalProposal.status === 'pending_account_mapping' && disposalProposal.proposal.financial_posting === false, 'G04 處分提案未停在待補科目映射', disposalProposal);
+  const impairmentProposal = await expectOk(request, `/accounting/g04/assets/${asset2.id}/impairment`, 'POST', {
+    source_database: source,
+    impairment_date: testDate,
+    impairment_amount: 50,
+    reason: marker
+  });
+  assert(impairmentProposal.status === 'pending_account_mapping' && impairmentProposal.proposal.financial_posting === false, 'G04 減損提案未停在待補科目映射', impairmentProposal);
+  const g04Report = await expectOk(request, `/accounting/g04/report?source_database=${source}&date_from=2026-01-01&date_to=2026-12-31`);
+  assert(g04Report.rows.some(row => row.asset_no === codes.asset && row.lifecycle_status === 'disposal_pending_account_mapping'), 'G04 報表未呈現處分待補科目狀態', g04Report);
+  assert(g04Report.rows.some(row => row.asset_no === codes.asset2 && row.lifecycle_status === 'impairment_pending_account_mapping'), 'G04 報表未呈現減損待補科目狀態', g04Report);
+  assert(g04Report.summary.proposal_count === 2, 'G04 報表提案數量不正確', g04Report.summary);
+  const g04Rules = await expectOk(request, `/accounting/g04/rules?source_database=${source}`);
+  assert(g04Rules.supported_depreciation_methods.includes('straight_line') && g04Rules.proposal_lifecycle.includes('disposal_proposed'), 'G04 規則能力清單不完整', g04Rules);
+  const afterProposal = await expectOk(request, `/accounting/g04/assets/${asset.id}?source_database=${source}`);
+  assert(afterProposal.status === 'approved' && Number(afterProposal.net_book_value) === Number(assetDetail.net_book_value), 'G04 處分提案不應直接改資產帳面', afterProposal);
+
   const center = await expectOk(request, '/accounting/g05/centers', 'POST', {
     source_database: source,
     center_code: codes.center,
@@ -292,7 +344,7 @@ try {
     source,
     marker,
     modules: ['G01 會計系統參數設定作業', 'G02 會計科目設定作業', 'G03 預算管理', 'G04 固定資產管理系統', 'G05 利潤中心管理'],
-    checked: ['G01 參數版本／生效稽核', 'G02 科目樹／正常餘額稽核', 'G03 多行明細／執行控制與版本去重報表', 'G04 折舊底稿→正式傳票→資產回寫／事件', 'G05 分攤比例與報表', 'SH／SC 公司隔離'],
+    checked: ['G01 參數版本／生效稽核', 'G02 科目樹／正常餘額稽核', 'G03 多行明細／執行控制與版本去重報表', 'G04 折舊底稿→正式傳票→資產回寫／事件、移轉、處分／減損提案與報表', 'G05 分攤比例與報表', 'SH／SC 公司隔離'],
     cross_company_rejected: crossCompanyRejected
   }, null, 2));
 } catch (error) {
