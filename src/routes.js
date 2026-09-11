@@ -8052,6 +8052,16 @@ function registerAccountingManagementRoutes(app) {
         (tenant_id,company_id,source_system,account_code,account_name,account_type,normal_balance,is_detail,status,is_active)
         VALUES(?,?,?,?,?,?,?,1,'approved',1)`,
         [c.tenant_id,c.company_id,c.source_system,code,name,type,normal]);
+      // 舊版以 INSERT IGNORE 建立種子科目時，normal_balance 欄位可能套用
+      // 舊預設值 debit。只校正仍是第一版、未掛上層、未被停用且沒有備註的
+      // 系統種子，不覆寫使用者後續維護的版本或自訂科目。
+      await conn.query(`UPDATE accounting_accounts
+        SET account_name=?,account_type=?,normal_balance=?
+        WHERE tenant_id=? AND company_id=? AND source_system=? AND account_code=?
+          AND status='approved' AND is_active=1 AND COALESCE(version_no,1)=1
+          AND (parent_account_code IS NULL OR parent_account_code='')
+          AND (note IS NULL OR note='')`,
+        [name,type,normal,c.tenant_id,c.company_id,c.source_system,code]);
     }
   }
   async function accountMap(conn, c, codes) {
@@ -8124,6 +8134,40 @@ function registerAccountingManagementRoutes(app) {
       ORDER BY parameter_code,version_no DESC`, contextParams(c));
     res.json({ok:true,data:rows.map(stateOf),source_database:c.source_database});
   } catch (e) { next(e); } });
+  // G01-R1：依既有參數版本表做可讀稽核；不猜測文件未提供的參數值，
+  // 只檢查資料型態、值、期間、科目參照與同代碼有效期間重疊。
+  app.get('/api/accounting/g01/audit', async (req,res,next) => { try {
+    await ensureTargetFinanceWorkflowSchema(); const c=contextOf(req);
+    await tx(async conn=>ensureGAccounts(conn,c));
+    const [rows]=await pool.query(`SELECT id,parameter_code,parameter_name,parameter_value,data_type,effective_from,effective_to,
+        version_no,status,approved_at,note FROM accounting_system_parameters
+      WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=?
+      ORDER BY parameter_code,version_no`,contextParams(c));
+    const [accounts]=await pool.query(`SELECT account_code,is_active,status FROM accounting_accounts WHERE tenant_id=? AND company_id=? AND source_system=?`,[c.tenant_id,c.company_id,c.source_system]);
+    const accountMap=new Map(accounts.map(row=>[String(row.account_code),row]));
+    const issues=[];
+    const add=(severity,code,row,message)=>issues.push({severity,issue_code:code,parameter_id:row?.id||null,parameter_code:row?.parameter_code||null,message});
+    const validTypes=new Set(['text','number','boolean','date','account']);
+    for(const row of rows){
+      const value=String(row.parameter_value??'').trim(),type=String(row.data_type||'').toLowerCase();
+      if(!value)add('error','EMPTY_VALUE',row,'參數值不可空白');
+      if(!validTypes.has(type))add('error','INVALID_DATA_TYPE',row,'參數資料型態不在允許範圍');
+      if(type==='account'&&(!accountMap.has(value)||!Number(accountMap.get(value).is_active)||String(accountMap.get(value).status||'approved')!=='approved') )add('error','INVALID_ACCOUNT',row,`參數科目 ${value||'—'} 不存在、停用或尚未核准`);
+      if(row.effective_from&&row.effective_to&&dateText(row.effective_from)>dateText(row.effective_to))add('error','DATE_RANGE',row,'生效起日不可晚於迄日');
+    }
+    const groups=new Map();
+    for(const row of rows.filter(row=>['draft','approved'].includes(String(row.status)))){
+      const list=groups.get(String(row.parameter_code))||[]; list.push(row); groups.set(String(row.parameter_code),list);
+    }
+    const overlaps=(left,right)=>{
+      const leftFrom=dateText(left.effective_from)||'1900-01-01',leftTo=dateText(left.effective_to)||'9999-12-31';
+      const rightFrom=dateText(right.effective_from)||'1900-01-01',rightTo=dateText(right.effective_to)||'9999-12-31';
+      return leftFrom<=rightTo&&rightFrom<=leftTo;
+    };
+    for(const list of groups.values())for(let i=0;i<list.length;i++)for(let j=i+1;j<list.length;j++)if(overlaps(list[i],list[j]))add('error','OVERLAPPING_VERSION',list[i],`與版本 v${list[j].version_no} 的生效期間重疊`);
+    const counts=issues.reduce((out,issue)=>(out[issue.severity]=(out[issue.severity]||0)+1,out),{});
+    res.json({ok:true,data:{source_database:c.source_database,company_id:c.company_id,summary:{parameter_count:rows.length,active_parameter_count:rows.filter(row=>String(row.status)==='approved').length,issue_count:issues.length,error_count:counts.error||0,warning_count:counts.warning||0,healthy:issues.every(issue=>issue.severity!=='error')},rows,issues}});
+  } catch(e){next(e);} });
   app.get('/api/accounting/g01/parameters/:id', async (req,res,next) => { try {
     await ensureTargetFinanceWorkflowSchema(); const c=contextOf(req), id=Number(req.params.id);
     const [[row]] = await pool.query(`SELECT * FROM accounting_system_parameters WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`, [id,...contextParams(c)]);
@@ -8202,6 +8246,45 @@ function registerAccountingManagementRoutes(app) {
     const [rows]=await pool.query(`SELECT * FROM accounting_accounts WHERE tenant_id=? AND company_id=? AND source_system=? ORDER BY account_code`,[c.tenant_id,c.company_id,c.source_system]);
     res.json({ok:true,data:rows,source_database:c.source_database});
   } catch(e){next(e);} });
+  // G02-R1：科目樹與正常餘額稽核。只讀檢查目前公司目標端科目，
+  // 不以預設值猜測沖銷科目；異常必須顯示原因，交由維護／核准流程處理。
+  app.get('/api/accounting/g02/tree-audit', async (req,res,next) => { try {
+    await ensureTargetFinanceWorkflowSchema(); const c=contextOf(req);
+    await tx(async conn=>ensureGAccounts(conn,c));
+    const [rows]=await pool.query(`SELECT id,account_code,account_name,account_type,parent_account_code,account_level,
+        normal_balance,is_detail,effective_from,effective_to,status,is_active,version_no,note
+      FROM accounting_accounts WHERE tenant_id=? AND company_id=? AND source_system=? ORDER BY account_code`,
+      [c.tenant_id,c.company_id,c.source_system]);
+    const byCode=new Map(rows.map(row=>[String(row.account_code),row]));
+    const issues=[];
+    const add=(severity,code,row,message)=>issues.push({severity,issue_code:code,account_code:row?.account_code||null,account_name:row?.account_name||null,message});
+    const validTypes=new Set(['asset','liability','equity','revenue','expense']);
+    const validBalances=new Set(['debit','credit']);
+    for(const row of rows){
+      const parentCode=String(row.parent_account_code||'').trim();
+      if(parentCode&&!byCode.has(parentCode))add('error','ORPHAN_PARENT',row,`上層科目 ${parentCode} 不存在`);
+      if(parentCode&&byCode.has(parentCode)&&Number(row.account_level||1)<=Number(byCode.get(parentCode).account_level||1))add('error','LEVEL_ORDER',row,'科目層級必須大於上層科目');
+      if(!validTypes.has(String(row.account_type)))add('error','INVALID_TYPE',row,'科目類別不在允許範圍');
+      if(!validBalances.has(String(row.normal_balance)))add('error','INVALID_NORMAL_BALANCE',row,'正常餘額必須是 debit 或 credit');
+      if(row.effective_from&&row.effective_to&&dateText(row.effective_from)>dateText(row.effective_to))add('error','DATE_RANGE',row,'啟用起日不可晚於迄日');
+      if(String(row.status)==='approved'&&Number(row.is_active)!==1)add('warning','APPROVED_INACTIVE',row,'已核准科目目前未啟用');
+    }
+    for(const row of rows){
+      const children=rows.filter(child=>String(child.parent_account_code||'')===String(row.account_code));
+      if(children.length&&Number(row.is_detail)===1)add('error','DETAIL_HAS_CHILDREN',row,'明細科目不可再有下層科目');
+      if(children.length&&String(row.status)==='disabled')add('warning','DISABLED_PARENT',row,'停用上層仍有下層科目，請確認停用影響');
+    }
+    // 父鏈循環不會由現有 API 建立，但匯入／歷史資料仍需檢查。
+    for(const row of rows){
+      const seen=new Set(),chain=[]; let code=String(row.account_code);
+      while(code&&byCode.has(code)){
+        if(seen.has(code)){add('error','PARENT_CYCLE',row,`上層科目鏈形成循環：${[...chain,code].join(' → ')}`);break;}
+        seen.add(code);chain.push(code);code=String(byCode.get(code).parent_account_code||'').trim();
+      }
+    }
+    const severityCounts=issues.reduce((out,issue)=>(out[issue.severity]=(out[issue.severity]||0)+1,out),{});
+    res.json({ok:true,data:{source_database:c.source_database,company_id:c.company_id,summary:{account_count:rows.length,active_count:rows.filter(row=>Number(row.is_active)===1).length,approved_count:rows.filter(row=>String(row.status)==='approved').length,issue_count:issues.length,error_count:severityCounts.error||0,warning_count:severityCounts.warning||0,healthy:issues.every(issue=>issue.severity!=='error')},rows,issues}});
+  } catch(e){next(e);} });
   app.get('/api/accounting/g02/accounts/:id', async(req,res,next)=>{try{
     await ensureTargetFinanceWorkflowSchema();const c=contextOf(req),id=Number(req.params.id);const[[row]]=await pool.query(`SELECT * FROM accounting_accounts WHERE id=? AND tenant_id=? AND company_id=? AND source_system=?`,[id,c.tenant_id,c.company_id,c.source_system]);if(!row)throw notFound('找不到目前公司的會計科目');const[events]=await pool.query('SELECT * FROM accounting_account_events WHERE account_id=? ORDER BY id',[id]);res.json({ok:true,data:{...row,events}});
   }catch(e){next(e);}});
@@ -8236,6 +8319,43 @@ function registerAccountingManagementRoutes(app) {
   app.post('/api/accounting/g03/budgets/:id/copy',async(req,res,next)=>{try{await ensureTargetFinanceWorkflowSchema();const c=contextOf(req),id=Number(req.params.id),newVersion=trim(req.body?.version_name);if(!newVersion)throw badRequest('複製預算必須輸入新版本名稱');const out=await tx(async conn=>{const source=await budgetDetail(conn,c,id);if(!['approved','draft'].includes(String(source.status)))throw badRequest('只有草稿或已核准預算可以複製');const[r]=await conn.query(`INSERT INTO accounting_budgets(tenant_id,company_id,source_system,source_database,budget_code,budget_name,fiscal_year,version_name,period_count,currency_code,status,total_amount,note,created_by) VALUES(?,?,?,?,?,?,?,?,?,?, 'draft',?,?,?)`,[...contextParams(c),source.budget_code,source.budget_name,source.fiscal_year,newVersion,source.period_count,source.currency_code,source.total_amount,`複製自 ${source.version_name}；${trim(req.body?.note)||''}`.trim(),req.auth.id]);await insertBudgetLines(conn,r.insertId,source.lines);await budgetEvent(conn,c,r.insertId,'copy',null,'draft',`複製自預算 ${id}`,req.auth.id);return await budgetDetail(conn,c,r.insertId);});res.status(201).json({ok:true,data:out});}catch(e){if(e.code==='ER_DUP_ENTRY')e=badRequest('新預算版本已存在');next(e);}});
   app.get('/api/accounting/g03/report',async(req,res,next)=>{try{await ensureTargetFinanceWorkflowSchema();const c=contextOf(req),year=trim(req.query.fiscal_year);if(!/^\d{4}$/.test(year))throw badRequest('預算比較必須指定四碼會計年度');const budgetWhere=['b.tenant_id=?','b.company_id=?','b.source_system=?','b.source_database=?','b.fiscal_year=?',"b.status='approved'"];const bp=[...contextParams(c),year];if(trim(req.query.budget_code)){budgetWhere.push('b.budget_code=?');bp.push(trim(req.query.budget_code));}if(trim(req.query.version_name)){budgetWhere.push('b.version_name=?');bp.push(trim(req.query.version_name));}const[budgetRows]=await pool.query(`SELECT b.*,l.line_no,l.account_code,l.account_name,l.department_code,l.period_no,l.budget_amount FROM accounting_budgets b JOIN accounting_budget_lines l ON l.budget_id=b.id WHERE ${budgetWhere.join(' AND ')} ORDER BY b.budget_code,b.version_name,l.line_no`,bp);const[actualRows]=await pool.query(`SELECT l.account_code,l.account_name,COALESCE(l.department_code,'') department_code,MONTH(j.journal_date) period_no,a.normal_balance,SUM(CASE WHEN COALESCE(a.normal_balance,'debit')='credit' THEN l.credit_amount-l.debit_amount ELSE l.debit_amount-l.credit_amount END) actual_amount FROM accounting_journals j JOIN accounting_journal_lines l ON l.journal_id=j.id LEFT JOIN accounting_accounts a ON a.tenant_id=j.tenant_id AND a.company_id=j.company_id AND a.source_system=j.source_system AND a.account_code=l.account_code WHERE j.tenant_id=? AND j.company_id=? AND j.source_system=? AND j.source_database=? AND j.status='posted' AND YEAR(j.journal_date)=? GROUP BY l.account_code,l.account_name,COALESCE(l.department_code,''),MONTH(j.journal_date),a.normal_balance`,[...contextParams(c),year]);const actualMap=new Map(actualRows.map(x=>[`${x.account_code}|${x.department_code}|${x.period_no}`,Number(x.actual_amount||0)]));const rows=budgetRows.map(x=>{const period=Number(x.period_no||0),actual=period?actualMap.get(`${x.account_code}|${x.department_code||''}|${period}`)||0:[...actualMap.entries()].filter(([key])=>key.startsWith(`${x.account_code}|${x.department_code||''}|`)).reduce((s,[,v])=>s+v,0);return{...x,budget_amount:Number(x.budget_amount||0),actual_amount:actual,variance_amount:actual-Number(x.budget_amount||0),achievement_rate:Number(x.budget_amount)?actual/Number(x.budget_amount):null};});const budgetSummary=[...new Map(budgetRows.map(x=>[Number(x.id),{id:x.id,budget_code:x.budget_code,version_name:x.version_name,status:x.status}])).values()];res.json({ok:true,data:{fiscal_year:year,budgets:budgetSummary,rows,actual_rows:actualRows}});}catch(e){next(e);}});
 
+  // G03-R1：預算執行控制查詢。現階段先提供可核對的超預算結果，
+  // 不在沒有明確來源單據／預算控制參數時擅自攔截其他模組過帳。
+  app.get('/api/accounting/g03/control',async(req,res,next)=>{try{
+    await ensureTargetFinanceWorkflowSchema();
+    const c=contextOf(req),year=trim(req.query.fiscal_year);
+    if(!/^\d{4}$/.test(year))throw badRequest('預算控制必須指定四碼會計年度');
+    const budgetWhere=['b.tenant_id=?','b.company_id=?','b.source_system=?','b.source_database=?','b.fiscal_year=?',"b.status='approved'"];
+    const budgetParams=[...contextParams(c),year];
+    for(const [key,column] of [['budget_code','b.budget_code'],['version_name','b.version_name'],['department_code','l.department_code'],['account_code','l.account_code']]){
+      const value=trim(req.query[key]); if(value){budgetWhere.push(`${column}=?`);budgetParams.push(value);}
+    }
+    const periodFilter=trim(req.query.period_no);
+    if(periodFilter){const period=integer(periodFilter,'預算期間',{min:0,max:13});budgetWhere.push('l.period_no=?');budgetParams.push(period);}
+    const [budgetRows]=await pool.query(`SELECT b.id,b.budget_code,b.version_name,b.fiscal_year,b.currency_code,
+        l.line_no,l.account_code,l.account_name,l.department_code,l.period_no,l.budget_amount,
+        COALESCE(a.account_type,'unknown') account_type
+      FROM accounting_budgets b JOIN accounting_budget_lines l ON l.budget_id=b.id
+      LEFT JOIN accounting_accounts a ON a.tenant_id=b.tenant_id AND a.company_id=b.company_id AND a.source_system=b.source_system AND a.account_code=l.account_code
+      WHERE ${budgetWhere.join(' AND ')} ORDER BY b.budget_code,b.version_name,l.line_no`,budgetParams);
+    const [actualRows]=await pool.query(`SELECT l.account_code,COALESCE(l.department_code,'') department_code,MONTH(j.journal_date) period_no,
+        SUM(CASE WHEN COALESCE(a.normal_balance,'debit')='credit' THEN l.credit_amount-l.debit_amount ELSE l.debit_amount-l.credit_amount END) actual_amount
+      FROM accounting_journals j JOIN accounting_journal_lines l ON l.journal_id=j.id
+      LEFT JOIN accounting_accounts a ON a.tenant_id=j.tenant_id AND a.company_id=j.company_id AND a.source_system=j.source_system AND a.account_code=l.account_code
+      WHERE j.tenant_id=? AND j.company_id=? AND j.source_system=? AND j.source_database=? AND j.status='posted' AND YEAR(j.journal_date)=?
+      GROUP BY l.account_code,COALESCE(l.department_code,''),MONTH(j.journal_date)`,[...contextParams(c),year]);
+    const actualMap=new Map(actualRows.map(row=>[`${row.account_code}|${row.department_code}|${row.period_no}`,Number(row.actual_amount||0)]));
+    const rows=budgetRows.map(row=>{
+      const budget=Number(row.budget_amount||0),period=Number(row.period_no||0),actual=period
+        ? actualMap.get(`${row.account_code}|${row.department_code||''}|${period}`)||0
+        : actualRows.filter(item=>String(item.account_code)===String(row.account_code)&&String(item.department_code||'')===String(row.department_code||'')).reduce((sum,item)=>sum+Number(item.actual_amount||0),0);
+      const available=budget-actual,controlStatus=String(row.account_type)==='expense'&&actual-budget>0.000001?'over_budget':'within_budget';
+      return {...row,budget_amount:budget,actual_amount:actual,variance_amount:actual-budget,available_amount:available,control_status:controlStatus};
+    });
+    const overBudget=rows.filter(row=>row.control_status==='over_budget');
+    res.json({ok:true,data:{source_database:c.source_database,company_id:c.company_id,fiscal_year:year,rows,summary:{budget_total:rows.reduce((sum,row)=>sum+row.budget_amount,0),actual_total:rows.reduce((sum,row)=>sum+row.actual_amount,0),variance_total:rows.reduce((sum,row)=>sum+row.variance_amount,0),over_budget_count:overBudget.length,over_budget_amount:overBudget.reduce((sum,row)=>sum+Math.max(-row.available_amount,0),0),healthy:overBudget.length===0}}});
+  }catch(e){next(e);}});
+
   function assetPayload(body) {
     const assetNo=trim(body.asset_no), assetName=trim(body.asset_name);
     if(!assetNo||!assetName)throw badRequest('資產代號與資產名稱不可空白');
@@ -8249,7 +8369,7 @@ function registerAccountingManagementRoutes(app) {
     const method=trim(body.depreciation_method||'straight_line').toLowerCase();if(method!=='straight_line')throw badRequest('目前 G04 僅開放直線法，其他折舊方法列入後續開發');
     return{assetNo,assetName,categoryCode:optionalText(body.category_code),accountCode,accountName,expenseCode,expenseName,departmentCode:optionalText(body.department_code),location:optionalText(body.location),supplierCode:optionalText(body.supplier_code),acquisition,inService,original,residual,life,method,currency:trim(body.currency_code)||'TWD',note:optionalText(body.note)};
   }
-  async function assetDetail(conn,c,id){const[[asset]]=await conn.query(`SELECT * FROM accounting_fixed_assets WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`,[id,...contextParams(c)]);if(!asset)throw notFound('找不到目前公司／資料來源的固定資產');const[depreciations]=await conn.query(`SELECT d.*,a.draft_no,a.status draft_status,j.journal_no FROM accounting_fixed_asset_depreciations d LEFT JOIN accounting_drafts a ON a.id=d.journal_draft_id LEFT JOIN accounting_journals j ON j.source_kind='fixed_asset_depreciation' AND j.source_id=d.id AND j.status<>'voided' WHERE d.asset_id=? ORDER BY d.depreciation_period`,[id]);return{...asset,depreciations};}
+  async function assetDetail(conn,c,id){const[[asset]]=await conn.query(`SELECT * FROM accounting_fixed_assets WHERE id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=?`,[id,...contextParams(c)]);if(!asset)throw notFound('找不到目前公司／資料來源的固定資產');const[depreciations]=await conn.query(`SELECT d.*,a.draft_no,a.status draft_status,j.journal_no FROM accounting_fixed_asset_depreciations d LEFT JOIN accounting_drafts a ON a.id=d.journal_draft_id LEFT JOIN accounting_journals j ON j.source_kind='fixed_asset_depreciation' AND j.source_id=d.id AND j.status<>'voided' WHERE d.asset_id=? ORDER BY d.depreciation_period`,[id]);const[events]=await conn.query(`SELECT id,event_kind,before_json,after_json,reason,user_id,created_at FROM accounting_fixed_asset_events WHERE asset_id=? AND tenant_id=? AND company_id=? AND source_system=? AND source_database=? ORDER BY id`,[id,...contextParams(c)]);return{...asset,depreciations,events};}
   // G04 固定資產管理：資產卡片、核准、直線折舊與折舊底稿／傳票鏈。
   app.get('/api/accounting/g04/assets',async(req,res,next)=>{try{await ensureTargetFinanceWorkflowSchema();const c=contextOf(req),[rows]=await pool.query(`SELECT * FROM accounting_fixed_assets WHERE tenant_id=? AND company_id=? AND source_system=? AND source_database=? ORDER BY asset_no`,contextParams(c));res.json({ok:true,data:rows,source_database:c.source_database});}catch(e){next(e);}});
   app.get('/api/accounting/g04/assets/:id',async(req,res,next)=>{try{await ensureTargetFinanceWorkflowSchema();const c=contextOf(req);res.json({ok:true,data:await assetDetail(pool,c,Number(req.params.id))});}catch(e){next(e);}});

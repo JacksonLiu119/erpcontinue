@@ -163,6 +163,8 @@ try {
   assert(parameter.status === 'draft', 'G01 建立後不是草稿', parameter);
   const parameterApproved = await expectOk(request, `/accounting/g01/parameters/${parameter.id}/approve`, 'POST', { source_database: source });
   assert(parameterApproved.status === 'approved', 'G01 核准失敗', parameterApproved);
+  const parameterAudit = await expectOk(request, `/accounting/g01/audit?source_database=${source}`);
+  assert(!parameterAudit.issues.some(issue => Number(issue.parameter_id) === Number(parameter.id)), 'G01 參數稽核不應產生本次資料異常', parameterAudit);
 
   const account = await expectOk(request, '/accounting/g02/accounts', 'POST', {
     source_database: source,
@@ -179,6 +181,13 @@ try {
   assert(account.status === 'draft', 'G02 建立後不是草稿', account);
   const accountApproved = await expectOk(request, `/accounting/g02/accounts/${account.id}/approve`, 'POST', { source_database: source });
   assert(accountApproved.status === 'approved', 'G02 核准失敗', accountApproved);
+  const accountAudit = await expectOk(request, `/accounting/g02/tree-audit?source_database=${source}`);
+  const normalBalanceExpectations = new Map([['2101', 'credit'], ['3201', 'credit'], ['4101', 'credit'], ['5101', 'debit']]);
+  for (const [accountCode, expected] of normalBalanceExpectations) {
+    const row = accountAudit.rows.find(item => String(item.account_code) === accountCode);
+    assert(row && String(row.normal_balance) === expected, `G02 ${accountCode} 正常餘額不正確`, row || accountAudit);
+  }
+  assert(!accountAudit.issues.some(issue => issue.account_code === codes.account), 'G02 回歸科目稽核不應產生異常', accountAudit);
 
   const budget = await expectOk(request, '/accounting/g03/budgets', 'POST', {
     source_database: source,
@@ -200,6 +209,8 @@ try {
   assert(budgetApproved.status === 'approved', 'G03 核准失敗', budgetApproved);
   const budgetReport = await expectOk(request, `/accounting/g03/report?source_database=${source}&fiscal_year=2026&budget_code=${encodeURIComponent(codes.budget)}`);
   assert(budgetReport.budgets.length === 1 && budgetReport.rows.length === 2, 'G03 報表未正確去重並保留兩行明細', budgetReport);
+  const budgetControl = await expectOk(request, `/accounting/g03/control?source_database=${source}&fiscal_year=2026&budget_code=${encodeURIComponent(codes.budget)}`);
+  assert(budgetControl.rows.length === 2 && budgetControl.rows.every(row => 'available_amount' in row && 'control_status' in row), 'G03 執行控制欄位不完整', budgetControl);
 
   const asset = await expectOk(request, '/accounting/g04/assets', 'POST', {
     source_database: source,
@@ -238,6 +249,7 @@ try {
   assert(depreciationPosted.status === 'posted' && Number(depreciationPosted.accumulated_depreciation) > 0, 'G04 折舊過帳失敗', depreciationPosted);
   const assetDetail = await expectOk(request, `/accounting/g04/assets/${asset.id}?source_database=${source}`);
   assert(assetDetail.depreciations.some(row => String(row.status) === 'posted'), 'G04 資產卡片未回寫已過帳折舊', assetDetail);
+  assert(assetDetail.events.some(row => String(row.event_kind) === 'depreciation_post'), 'G04 資產事件未保留折舊過帳', assetDetail);
 
   const center = await expectOk(request, '/accounting/g05/centers', 'POST', {
     source_database: source,
@@ -280,7 +292,7 @@ try {
     source,
     marker,
     modules: ['G01 會計系統參數設定作業', 'G02 會計科目設定作業', 'G03 預算管理', 'G04 固定資產管理系統', 'G05 利潤中心管理'],
-    checked: ['草稿→核准', 'G03 多行明細與版本去重報表', 'G04 折舊底稿→正式傳票→資產回寫', 'G05 分攤比例與報表', 'SH／SC 公司隔離'],
+    checked: ['G01 參數版本／生效稽核', 'G02 科目樹／正常餘額稽核', 'G03 多行明細／執行控制與版本去重報表', 'G04 折舊底稿→正式傳票→資產回寫／事件', 'G05 分攤比例與報表', 'SH／SC 公司隔離'],
     cross_company_rejected: crossCompanyRejected
   }, null, 2));
 } catch (error) {
